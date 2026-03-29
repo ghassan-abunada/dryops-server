@@ -38,7 +38,7 @@ app.use('/jnfiles', async (req, res) => {
     const upstream = await fetch(url, {
       method: req.method,
       headers: {
-        'Authorization': `bearer ${JN_TOKEN}`,
+        'Authorization': `Bearer ${JN_TOKEN}`,
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },

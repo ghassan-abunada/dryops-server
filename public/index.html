@@ -521,7 +521,8 @@ async function loadJNJob(index) {
   set('date-loss',  dateLoss);
   set('date-start', dateLoss);
 
-  currentJnJobId = job.jnid || null;
+  currentJnJobId  = job.jnid || null;
+  currentJnJobRef = currentJnJobId ? { id: currentJnJobId, name: job.name || '', number: String(job.number || ''), type: 'job' } : null;
 
   // Close results, show confirmation
   document.getElementById('jn-results').style.display = 'none';
@@ -923,7 +924,8 @@ function projectReadings(material, initialMC, finalMC, days, demoed, demoDay, st
 let reviewData = null;       // holds collected + projected data for editing
 let currentPDFDoc = null;
 let currentPDFFilename = null;
-let currentJnJobId = null;  // jnid of the loaded JobNimbus job
+let currentJnJobId = null;    // jnid of the loaded JobNimbus job
+let currentJnJobRef = null;  // full related object { id, name, number, type }
 
 function openReview() {
   const data = collectData();
@@ -1080,14 +1082,16 @@ async function sendToJobNimbus() {
       body: JSON.stringify({
         filename: currentPDFFilename,
         related: [currentJnJobId],
-        type: 1,
+        type: 10,
         isPrivate: false,
         description: 'Drying Log'
       })
     });
-    if (!metaResp.ok) throw new Error(`Presigned URL failed: ${metaResp.status}`);
-    const meta = await metaResp.json();
-    const presignedUrl = meta.url || meta.upload_url || meta.presigned_url;
+    const metaText = await metaResp.text();
+    console.log('[JN files response]', metaResp.status, metaText);
+    if (!metaResp.ok) throw new Error(`Presigned URL failed: ${metaResp.status} — ${metaText}`);
+    const meta = JSON.parse(metaText);
+    const presignedUrl = (meta.data && meta.data.url) || meta.url || meta.upload_url || meta.presigned_url;
     if (!presignedUrl) throw new Error('No presigned URL in response: ' + JSON.stringify(meta));
 
     const blob = currentPDFDoc.output('blob');
