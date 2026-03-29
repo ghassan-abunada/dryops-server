@@ -127,6 +127,25 @@
     </div>
   </div>
 
+  <!-- ── PDF Preview Modal ── -->
+  <div class="review-overlay" id="pdf-preview-modal" style="display:none">
+    <div class="review-box pdf-preview-box">
+      <div class="review-header">
+        <div>
+          <div class="review-title">Preview PDF</div>
+          <div class="review-subtitle" id="pdf-preview-filename"></div>
+        </div>
+        <button class="review-btn-back" style="width:auto;padding:8px 14px;flex:none" onclick="closePDFPreview()">✕</button>
+      </div>
+      <iframe id="pdf-preview-frame" style="width:100%;height:65vh;border:1px solid var(--border);border-radius:8px;background:#f0f0f0"></iframe>
+      <div class="review-btn-row">
+        <button class="review-btn-back" onclick="closePDFPreview()">← Back</button>
+        <button class="review-btn-pdf" style="background:#444" onclick="downloadCurrentPDF()">⬇ Download PDF</button>
+        <button class="review-btn-pdf" id="send-jn-btn" onclick="sendToJobNimbus()">Send to JobNimbus</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Room Name Modal ── -->
   <div class="modal-overlay" id="room-name-modal" style="display:none">
     <div class="modal-box">
@@ -501,6 +520,8 @@ async function loadJNJob(index) {
   set('claim-num',   claimNum);
   set('date-loss',  dateLoss);
   set('date-start', dateLoss);
+
+  currentJnJobId = job.jnid || null;
 
   // Close results, show confirmation
   document.getElementById('jn-results').style.display = 'none';
@@ -899,7 +920,10 @@ function projectReadings(material, initialMC, finalMC, days, demoed, demoDay, st
 // ── Collect form data ────────────────────────────────────────────────────────
 
 // ── Review modal ─────────────────────────────────────────────────────────────
-let reviewData = null; // holds collected + projected data for editing
+let reviewData = null;       // holds collected + projected data for editing
+let currentPDFDoc = null;
+let currentPDFFilename = null;
+let currentJnJobId = null;  // jnid of the loaded JobNimbus job
 
 function openReview() {
   const data = collectData();
@@ -1012,7 +1036,76 @@ function updateFinalMC(ri, mi, val) {
 function confirmGeneratePDF() {
   if (!reviewData) return;
   document.getElementById('review-modal').style.display = 'none';
-  generateFromData(reviewData);
+  const { doc, filename } = generateFromData(reviewData);
+  openPDFPreview(doc, filename);
+}
+
+function openPDFPreview(doc, filename) {
+  currentPDFDoc = doc;
+  currentPDFFilename = filename;
+  const blob = doc.output('blob');
+  const url = URL.createObjectURL(blob);
+  document.getElementById('pdf-preview-frame').src = url;
+  document.getElementById('pdf-preview-filename').textContent = filename;
+  const sendBtn = document.getElementById('send-jn-btn');
+  sendBtn.disabled = !currentJnJobId;
+  sendBtn.textContent = 'Send to JobNimbus';
+  sendBtn.style.background = '';
+  document.getElementById('pdf-preview-modal').style.display = 'flex';
+}
+
+function closePDFPreview() {
+  document.getElementById('pdf-preview-modal').style.display = 'none';
+  const frame = document.getElementById('pdf-preview-frame');
+  if (frame.src.startsWith('blob:')) URL.revokeObjectURL(frame.src);
+  frame.src = '';
+}
+
+function downloadCurrentPDF() {
+  if (!currentPDFDoc) return;
+  currentPDFDoc.save(currentPDFFilename);
+  const banner = document.getElementById('success-banner');
+  if (banner) { banner.style.display = 'flex'; setTimeout(() => banner.style.display = 'none', 4000); }
+}
+
+async function sendToJobNimbus() {
+  if (!currentPDFDoc || !currentJnJobId) return;
+  const btn = document.getElementById('send-jn-btn');
+  btn.disabled = true;
+  btn.textContent = 'Uploading…';
+  try {
+    const metaResp = await fetch('/jnfiles/uploads/url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: currentPDFFilename,
+        related: [currentJnJobId],
+        type: 1,
+        isPrivate: false,
+        description: 'Drying Log'
+      })
+    });
+    if (!metaResp.ok) throw new Error(`Presigned URL failed: ${metaResp.status}`);
+    const meta = await metaResp.json();
+    const presignedUrl = meta.url || meta.upload_url || meta.presigned_url;
+    if (!presignedUrl) throw new Error('No presigned URL in response: ' + JSON.stringify(meta));
+
+    const blob = currentPDFDoc.output('blob');
+    const putResp = await fetch(presignedUrl, {
+      method: 'PUT',
+      body: blob,
+      headers: { 'Content-Type': 'application/pdf' }
+    });
+    if (!putResp.ok) throw new Error(`Upload failed: ${putResp.status}`);
+
+    btn.textContent = '✓ Sent to JobNimbus';
+    btn.style.background = 'var(--success)';
+  } catch (err) {
+    console.error('JN upload error:', err);
+    btn.disabled = false;
+    btn.textContent = 'Send to JobNimbus';
+    alert('Upload failed: ' + err.message);
+  }
 }
 
 function dateCols(dateStart, days) {
@@ -1367,10 +1460,7 @@ function generateFromData(data) {
   }
 
   const filename = `DryingLog_${(data.client || 'Job').replace(/\s+/g,'_')}_${data.dateStart || 'undated'}.pdf`;
-  doc.save(filename);
-
-  document.getElementById('success-banner').style.display = 'flex';
-  setTimeout(() => document.getElementById('success-banner').style.display = 'none', 4000);
+  return { doc, filename };
 }
 
 // ── Init: default dates + first room ─────────────────────────────────────────

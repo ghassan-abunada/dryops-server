@@ -438,6 +438,8 @@
     margin-bottom: 1.25rem;
   }
   .review-title { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+  .pdf-preview-box { max-width: 860px; }
+  #send-jn-btn:disabled { background: #aaa; cursor: not-allowed; }
   .review-subtitle { font-size: 12px; color: var(--ink3); margin-top: 2px; font-family: var(--mono); }
   .review-room-block { margin-bottom: 1.25rem; }
   .review-room-label {
@@ -687,8 +689,13 @@
     }
   }
 
+  @media (max-width: 768px) {
+    #pdf-preview-frame { height: 55vh; }
+  }
+
   /* ── Mobile ── */
   @media (max-width: 600px) {
+    #pdf-preview-frame { height: 45vh; }
     .topbar { padding: 0 1rem; }
     .shell { padding: 0.75rem 0.75rem 5rem; }
 
