@@ -67,24 +67,22 @@
         <input type="text" id="ins-company" placeholder="State Farm">
       </div>
     </div>
-    <div class="grid-3">
+    <div class="grid-4">
       <div class="field">
         <label>Date of Loss</label>
-        <input type="date" id="date-loss">
+        <input type="date" id="date-loss" oninput="document.getElementById('date-start').value=this.value">
       </div>
       <div class="field">
         <label>Dry Start Date</label>
         <input type="date" id="date-start">
       </div>
       <div class="field">
-        <label>Dry Duration</label>
-        <select id="dry-days">
-          <option value="3">3 Days</option>
-          <option value="4">4 Days</option>
-          <option value="5" selected>5 Days</option>
-          <option value="6">6 Days</option>
-          <option value="7">7 Days</option>
-        </select>
+        <label>Demo Date</label>
+        <input type="date" id="demo-date">
+      </div>
+      <div class="field">
+        <label>Dry End Date</label>
+        <input type="date" id="date-end">
       </div>
     </div>
   </div>
@@ -368,12 +366,14 @@ function buildEquipRow(eid, selectedType, qty) {
   ).join('');
   const isOther = selectedType === 'Other';
   return `
-    <select onchange="toggleOtherInput(this, '${eid}')"
-      style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 8px;font-size:13px;font-family:var(--sans);background:#fafafa;width:100%">
-      ${opts}
-    </select>
-    <input type="text" id="other-label-${eid}" placeholder="Describe equipment"
-      style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 10px;font-size:13px;font-family:var(--mono);background:#fafafa;width:100%;display:${isOther ? '' : 'none'}">
+    <div style="position:relative;width:100%">
+      <select onchange="toggleOtherInput(this, '${eid}')"
+        style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 8px;font-size:13px;font-family:var(--sans);background:#fafafa;width:100%;visibility:${isOther ? 'hidden' : 'visible'}">
+        ${opts}
+      </select>
+      <input type="text" id="other-label-${eid}" placeholder="Describe equipment"
+        style="position:absolute;top:0;left:0;height:34px;border:1px solid var(--border);border-radius:7px;padding:0 10px;font-size:13px;font-family:var(--mono);background:#fafafa;width:100%;box-sizing:border-box;visibility:${isOther ? 'visible' : 'hidden'}">
+    </div>
     <input type="number" value="${qty}" min="1" placeholder="Qty"
       style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 10px;font-size:13px;font-family:var(--mono);background:#fafafa;width:60px;flex-shrink:0">
     <button class="del-mat" onclick="document.getElementById('${eid}').remove()">×</button>
@@ -382,13 +382,14 @@ function buildEquipRow(eid, selectedType, qty) {
 
 function toggleOtherInput(selectEl, eid) {
   const labelInput = document.getElementById('other-label-' + eid);
-  if (labelInput) labelInput.style.display = selectEl.value === 'Other' ? '' : 'none';
+  const isOther = selectEl.value === 'Other';
+  if (labelInput) labelInput.style.visibility = isOther ? 'visible' : 'hidden';
+  selectEl.style.visibility = isOther ? 'hidden' : 'visible';
 }
 
 
 // ── JobNimbus Integration ─────────────────────────────────────────────────────
-const JN_TOKEN = 'mg16mu4lyx064qcj';
-const JN_BASE  = '/jnapi'; // proxied via proxy.js to app.jobnimbus.com/api1
+const JN_BASE  = '/jnapi'; // proxied via server.js to app.jobnimbus.com/api1
 
 function jnStatus(msg, type = '') {
   const el = document.getElementById('jn-status');
@@ -406,11 +407,9 @@ async function searchJNJobs() {
   document.getElementById('jn-results').style.display = 'none';
 
   try {
-    // Search contacts first (jobs are linked to contacts in JobNimbus)
-    const url = `${JN_BASE}/jobs?limit=25&q=${encodeURIComponent(q)}`;
-    const resp = await fetch(url, {
-      headers: { 'Authorization': `bearer ${JN_TOKEN}` }
-    });
+    const filter = JSON.stringify({ must: [{ wildcard: { name: `*${q}*` } }, { term: { record_type_name: 'Mitigation' } }] });
+    const url = `${JN_BASE}/jobs?size=25&filter=${encodeURIComponent(filter)}`;
+    const resp = await fetch(url);
 
     if (!resp.ok) {
       jnStatus(`API error: ${resp.status} ${resp.statusText}`, 'error');
@@ -453,15 +452,23 @@ function renderJNResults(jobs) {
   box.style.display = 'block';
 }
 
-function loadJNJob(index) {
+async function loadJNJob(index) {
   const box = document.getElementById('jn-results');
   const job = box._jobs[index];
   if (!job) return;
 
-  // ── Map JobNimbus fields → form fields ─────────────────────────────────────
-  // Client name: prefer contact name, fall back to job name
-  const clientName = [job.first_name, job.last_name].filter(Boolean).join(' ')
-                     || job.name || '';
+  // ── Fetch primary contact for first/last name ───────────────────────────────
+  let clientName = '';
+  const contactRef = (job.related || []).find(r => r.type === 'contact');
+  if (contactRef?.id) {
+    try {
+      const cr = await fetch(`${JN_BASE}/contacts/${contactRef.id}`);
+      if (cr.ok) {
+        const contact = await cr.json();
+        clientName = [contact.first_name, contact.last_name].filter(Boolean).join(' ');
+      }
+    } catch (_) {}
+  }
 
   // Address: combine parts
   const addrParts = [
@@ -474,8 +481,8 @@ function loadJNJob(index) {
   const address = addrParts.join(', ');
 
   // Insurance info — JobNimbus stores these under various field names
-  const insurer  = job.insurance_company || job.insurer || job.claim_company || '';
-  const claimNum = job.claim_number || job.claim_num || job.insurance_claim_id || '';
+  const insurer  = job.cf_string_9 || '';
+  const claimNum = job.cf_string_2 || '';
 
   // Dates — JobNimbus uses Unix timestamps (seconds)
   function jnDate(ts) {
@@ -483,7 +490,7 @@ function loadJNJob(index) {
     const d = new Date(ts * 1000);
     return d.toISOString().split('T')[0]; // YYYY-MM-DD for <input type=date>
   }
-  const dateLoss  = jnDate(job.date_of_loss || job.loss_date || job.created);
+  const dateLoss  = jnDate(job.cf_date_1);
   const dateStart = jnDate(job.start_date || job.date_start || job.created);
 
   // Fill form fields
@@ -492,13 +499,13 @@ function loadJNJob(index) {
   set('job-address', address);
   set('ins-company', insurer);
   set('claim-num',   claimNum);
-  set('date-loss',   dateLoss);
-  set('date-start',  dateStart);
+  set('date-loss',  dateLoss);
+  set('date-start', dateLoss);
 
   // Close results, show confirmation
   document.getElementById('jn-results').style.display = 'none';
   document.getElementById('jn-search-input').value = '';
-  jnStatus(`✓ Loaded: ${job.name || clientName}`, 'success');
+  jnStatus(`✓ Loaded: ${job.name}`, 'success');
   setTimeout(() => jnStatus(''), 4000);
 }
 
@@ -662,13 +669,12 @@ async function addRoom() {
 
       <div style="font-size:11px;font-weight:700;font-family:var(--mono);color:var(--ink3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Moisture Readings — Day 1</div>
 
-      <div style="display:grid;grid-template-columns:140px 1fr 70px 70px 60px 60px 32px;gap:8px;margin-bottom:6px;align-items:end;">
+      <div style="display:grid;grid-template-columns:140px 1fr 70px 70px 60px 32px;gap:8px;margin-bottom:6px;align-items:end;">
         <span style="font-size:11px;font-family:var(--mono);color:var(--ink3);">MATERIAL</span>
         <span style="font-size:11px;font-family:var(--mono);color:var(--ink3);">LOCATION / NOTE</span>
         <span style="font-size:11px;font-family:var(--mono);color:var(--ink3);">INITIAL %</span>
         <span style="font-size:11px;font-family:var(--mono);color:var(--ink3);">FINAL %</span>
         <span style="font-size:11px;font-family:var(--mono);color:var(--ink3);">DEMO?</span>
-        <span style="font-size:11px;font-family:var(--mono);color:var(--ink3);">DEMO DAY</span>
         <span></span>
       </div>
 
@@ -742,63 +748,47 @@ function addMaterial(roomId) {
     <div style="display:flex;align-items:center;justify-content:center;height:34px;">
       <input type="checkbox" id="demo-chk-${eid}" onchange="toggleDemoDay('${eid}')" style="width:18px;height:18px;cursor:pointer;accent-color:var(--red)">
     </div>
-    <input type="number" id="demo-day-${eid}" placeholder="Day #" min="1" max="7" style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 8px;font-size:13px;font-family:var(--mono);background:#f0f0f0;width:100%;display:none" disabled>
     <button class="del-mat" onclick="document.getElementById('${eid}').remove()">×</button>
   `;
   document.getElementById('materials-' + roomId).appendChild(div);
 }
 
-// ── Demo day toggle ─────────────────────────────────────────────────────────
+// ── Demo toggle ──────────────────────────────────────────────────────────────
 function toggleDemoDay(eid) {
   const chk = document.getElementById('demo-chk-' + eid);
-  const dayInput = document.getElementById('demo-day-' + eid);
-  if (chk.checked) {
-    dayInput.style.display = '';
-    dayInput.disabled = false;
-    dayInput.style.background = '#fafafa';
-  } else {
-    dayInput.style.display = 'none';
-    dayInput.disabled = true;
-    dayInput.value = '';
-    // Remove any auto-added studs row linked to this drywall
-    const linkedStuds = document.getElementById('auto-studs-' + eid);
-    if (linkedStuds) linkedStuds.remove();
-  }
 
-  // Check if this row is a Drywall row
+  // Check if this row is a Drywall row — auto-add/remove studs
   const row = document.getElementById(eid);
   if (!row) return;
   const matSel = row.querySelector('select');
-  if (!matSel || matSel.value !== 'Drywall') return;
+  if (matSel && matSel.value === 'Drywall') {
+    if (chk.checked) {
+      addAutoStuds(eid);
+    } else {
+      const linkedStuds = document.getElementById('auto-studs-' + eid);
+      if (linkedStuds) linkedStuds.remove();
+    }
+  }
 
-  if (chk.checked) {
-    // Auto-add studs when drywall is demoed — listen for demo day input
-    dayInput.addEventListener('input', syncStudsDemoDay.bind(null, eid), { once: false });
-    // Add studs row immediately if not already present
-    addAutoStuds(eid, dayInput.value);
-  } else {
+  if (!chk.checked) {
     const linkedStuds = document.getElementById('auto-studs-' + eid);
     if (linkedStuds) linkedStuds.remove();
   }
 }
 
-function addAutoStuds(drywallEid, demoDay) {
-  // Don't add if already exists
+function addAutoStuds(drywallEid) {
   if (document.getElementById('auto-studs-' + drywallEid)) return;
 
-  // Find the room this drywall row belongs to
   const drywallRow = document.getElementById(drywallEid);
   if (!drywallRow) return;
-  const materialsContainer = drywallRow.parentElement;
   const roomId = drywallEid.split('-')[1];
 
   if (!matCount[roomId]) matCount[roomId] = 0;
-  const mid = ++matCount[roomId];
-  const studsEid = `mat-${roomId}-${mid}`;
+  ++matCount[roomId];
 
   const div = document.createElement('div');
   div.className = 'material-row';
-  div.id = 'auto-studs-' + drywallEid; // track by drywall eid
+  div.id = 'auto-studs-' + drywallEid;
   div.style.background = '#fffbf0';
   div.style.borderRadius = '6px';
   div.style.padding = '2px 4px';
@@ -807,30 +797,16 @@ function addAutoStuds(drywallEid, demoDay) {
     <select style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 8px;font-size:13px;font-family:var(--sans);background:#fffbf0;width:100%">
       ${MATERIALS.map(m => `<option${m === 'Studs' ? ' selected' : ''}>${m}</option>`).join('')}
     </select>
-    <input type="text" value="Auto-added (drywall demo)" style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 10px;font-size:13px;font-family:var(--mono);background:#fffbf0;width:100%">
+    <input type="text" value="Behind drywall" style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 10px;font-size:13px;font-family:var(--mono);background:#fffbf0;width:100%">
     <input type="number" value="100" min="0" max="100" step="0.1" style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 10px;font-size:13px;font-family:var(--mono);background:#fffbf0;width:100%" title="Initial MC%">
     <input type="number" placeholder="Final%" min="0" max="100" step="0.1" style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 10px;font-size:13px;font-family:var(--mono);background:#fffbf0;width:100%" title="Final MC%">
     <div style="display:flex;align-items:center;justify-content:center;height:34px;">
       <input type="checkbox" style="width:18px;height:18px;cursor:pointer;accent-color:var(--red)" disabled>
     </div>
-    <input type="number" id="auto-studs-day-${drywallEid}" placeholder="Day #" min="1" max="7"
-      value="${demoDay || ''}"
-      style="height:34px;border:1px solid #f0c080;border-radius:7px;padding:0 8px;font-size:13px;font-family:var(--mono);background:#fff8e8;width:100%" title="Start day (from drywall demo day)">
     <button class="del-mat" onclick="document.getElementById('auto-studs-${drywallEid}').remove()" title="Remove">×</button>
   `;
 
-  // Insert right after the drywall row
   drywallRow.insertAdjacentElement('afterend', div);
-}
-
-function syncStudsDemoDay(drywallEid) {
-  const dayInput = document.getElementById('demo-day-' + drywallEid);
-  const studsDay = document.getElementById('auto-studs-day-' + drywallEid);
-  if (!document.getElementById('auto-studs-' + drywallEid)) {
-    addAutoStuds(drywallEid, dayInput.value);
-    return;
-  }
-  if (studsDay) studsDay.value = dayInput.value;
 }
 
 // ── Psychrometrics ───────────────────────────────────────────────────────────
@@ -860,7 +836,7 @@ function calcPsychro(roomId) {
 }
 
 // ── Project moisture readings (smooth-step S-curve) ─────────────────────────
-function projectReadings(material, initialMC, finalMC, days, demoed, demoDay, startDay) {
+function projectReadings(material, initialMC, finalMC, days, demoed, demoDay, startDay, seedOffset = 0) {
   const dry   = DRY_STANDARD[material] ?? 15;
   const start = startDay || 1;
 
@@ -870,7 +846,7 @@ function projectReadings(material, initialMC, finalMC, days, demoed, demoDay, st
   // Target: if tech entered a final reading use it, otherwise curve to dry standard
   const target = (finalMC != null && !demoed) ? finalMC : dry;
 
-  const seed = initialMC * 7.3 + (start) * 13.1 + material.length * 3.7;
+  const seed = initialMC * 7.3 + (start) * 13.1 + material.length * 3.7 + seedOffset * 91.7;
   function seededRand(day) {
     const x = Math.sin(seed + day * 127.1) * 43758.5453;
     return x - Math.floor(x);
@@ -880,8 +856,10 @@ function projectReadings(material, initialMC, finalMC, days, demoed, demoDay, st
   for (let d = 1; d <= days; d++) {
     if (d < start) {
       rows.push({ day: d, mc: null, notStarted: true });
-    } else if (demoed && demoDay && d >= demoDay) {
+    } else if (demoed && demoDay && d === demoDay) {
       rows.push({ day: d, mc: null, demoed: true });
+    } else if (demoed && demoDay && d > demoDay) {
+      rows.push({ day: d, mc: null, afterDemo: true });
     } else {
       const t = d - start; // 0-indexed active step
 
@@ -891,9 +869,15 @@ function projectReadings(material, initialMC, finalMC, days, demoed, demoDay, st
       } else if (t === 0) {
         // Day 1 always exact initial reading
         mc = initialMC;
-      } else if (t === activeDays - 1) {
-        // Last active day always lands exactly on final reading / dry standard
-        mc = target;
+      } else if (t === activeDays - 1 && !demoed) {
+        // Last active day: land slightly below dry standard (realistic confirmation of drying)
+        // If tech entered a finalMC, respect it; otherwise go 0.3–1.5% below standard
+        if (finalMC != null) {
+          mc = target;
+        } else {
+          const drop = 0.6 + seededRand(d + 200) * 5.4;
+          mc = Math.max(0, target - drop);
+        }
       } else {
         // Smooth-step S-curve: slow start → fast middle → slow finish
         // Mimics real drying: equipment ramp-up, peak extraction, asymptote
@@ -933,9 +917,9 @@ function closeReview() {
 }
 
 function buildReviewUI(data) {
-  const days = data.days;
-  const dayHeaders = Array.from({length: days}, (_, i) =>
-    `<th>Day ${i + 1}${i === 0 ? '<br><span style="font-weight:400;font-size:9px">(Initial)</span>' : ''}</th>`
+  const { days, dateLabels } = data;
+  const dayHeaders = dateLabels.map((lbl, i) =>
+    `<th>${lbl}${i === 0 ? '<br><span style="font-weight:400;font-size:9px">(Initial)</span>' : ''}</th>`
   ).join('');
 
   let html = '';
@@ -947,24 +931,25 @@ function buildReviewUI(data) {
     html += `<table class="review-table" id="review-table-${ri}">`;
     html += `<thead><tr><th>Material</th><th>Final MC</th>${dayHeaders}</tr></thead>`;
     html += `<tbody id="review-tbody-${ri}">`;
-    html += buildReviewRows(room, ri, days);
+    html += buildReviewRows(room, ri, dateLabels);
     html += '</tbody></table></div>';
   });
 
   document.getElementById('review-content').innerHTML = html;
 }
 
-function buildReviewRows(room, ri, days) {
+function buildReviewRows(room, ri, dateLabels) {
   let html = '';
   room.materials.forEach((mat, mi) => {
-    html += buildReviewRow(mat, ri, mi, days);
+    html += buildReviewRow(mat, ri, mi, dateLabels);
   });
   return html;
 }
 
-function buildReviewRow(mat, ri, mi, days) {
+function buildReviewRow(mat, ri, mi, dateLabels) {
+  const demoLabel = mat.demoDay != null ? (dateLabels[mat.demoDay - 1] || '?') : '?';
   const finalCell = mat.demoed
-    ? `<td><span class="review-cell-demo">DEMO'd D${mat.demoDay || '?'}</span></td>`
+    ? `<td><span class="review-cell-demo">DEMO'd ${demoLabel}</span></td>`
     : `<td><input class="review-cell-input" type="number" step="0.1" min="0" max="100"
           value="${mat.finalMC != null ? mat.finalMC : ''}"
           placeholder="–"
@@ -973,11 +958,12 @@ function buildReviewRow(mat, ri, mi, days) {
 
   const dayCells = mat.projection.map((p, di) => {
     if (p.demoed)     return `<td><span class="review-cell-demo">DEMO</span></td>`;
+    if (p.afterDemo)  return `<td></td>`;
     if (p.notStarted) return `<td style="color:#ccc">–</td>`;
     return `<td><input class="review-cell-input" type="number" step="0.1" min="0" max="100"
         value="${p.mc != null ? p.mc : ''}"
         oninput="updateProjectionCell(${ri},${mi},${di},this.value)"
-        title="Day ${di+1} MC%"></td>`;
+        title="${dateLabels[di]} MC%"></td>`;
   }).join('');
 
   return `<tr id="review-row-${ri}-${mi}">
@@ -1002,13 +988,13 @@ function updateFinalMC(ri, mi, val) {
   // Recalculate projections with updated finalMC
   mat.projection = projectReadings(
     mat.material, mat.initialMC, mat.finalMC,
-    reviewData.days, mat.demoed, mat.demoDay, mat.startDay
+    reviewData.days, mat.demoed, mat.demoDay, mat.startDay, mat.seedOffset
   );
 
   // Re-render just this row in the DOM
   const rowEl = document.getElementById(`review-row-${ri}-${mi}`);
   if (rowEl) {
-    rowEl.outerHTML = buildReviewRow(mat, ri, mi, reviewData.days);
+    rowEl.outerHTML = buildReviewRow(mat, ri, mi, reviewData.dateLabels);
     // Refocus the finalMC input after re-render
     const newRow = document.getElementById(`review-row-${ri}-${mi}`);
     if (newRow) {
@@ -1030,11 +1016,35 @@ function confirmGeneratePDF() {
   generateFromData(reviewData);
 }
 
+function dateCols(dateStart, days) {
+  const base = new Date(dateStart + 'T00:00:00');
+  return Array.from({length: days}, (_, i) => {
+    const d = new Date(base);
+    d.setDate(d.getDate() + i);
+    return String(d.getMonth()+1).padStart(2,'0') + '/' + String(d.getDate()).padStart(2,'0');
+  });
+}
+
 function collectData() {
-  const days = parseInt(document.getElementById('dry-days').value);
+  const msPerDay = 86400000;
+  const dateStart   = document.getElementById('date-start').value;
+  const dateEnd     = document.getElementById('date-end').value;
+  const demoDateVal = document.getElementById('demo-date').value;
+
+  const days = (dateStart && dateEnd)
+    ? Math.max(1, Math.round((new Date(dateEnd) - new Date(dateStart)) / msPerDay) + 1)
+    : 5;
+
+  const globalDemoDay = (demoDateVal && dateStart)
+    ? Math.round((new Date(demoDateVal) - new Date(dateStart)) / msPerDay) + 1
+    : null;
+
+  const dateLabels = dateStart ? dateCols(dateStart, days) : Array.from({length: days}, (_, i) => `Day ${i+1}`);
 
   const rooms = [];
+  let roomIdx = 0;
   document.querySelectorAll('.room-card').forEach(rc => {
+    const ri = roomIdx++;
     const id = rc.id.replace('room-', '');
     const name = rc.querySelector('.room-name-input').value;
     const tempF = parseFloat(document.getElementById('temp-' + id)?.value) || null;
@@ -1053,16 +1063,18 @@ function collectData() {
     }
 
     const materials = [];
+    let matIdx = 0;
     rc.querySelectorAll('.material-row').forEach(mr => {
+      const mi = matIdx++;
       const inputs  = mr.querySelectorAll('input');
       const sel     = mr.querySelector('select').value;
       const note    = inputs[0].value;
       const initMC  = parseFloat(inputs[1].value);
       const finalMC = parseFloat(inputs[2].value);
       const demoed  = inputs[3].checked;
-      const demoDay = demoed ? parseInt(inputs[4].value) || null : null;
-      // startDay: auto-studs rows have disabled checkbox, 5th input is start day
-      const startDay = (inputs[3] && inputs[3].disabled) ? parseInt(inputs[4]?.value) || null : null;
+      const demoDay = demoed ? globalDemoDay : null;
+      // startDay: auto-studs rows have disabled checkbox — start on demo day
+      const startDay = (inputs[3] && inputs[3].disabled) ? globalDemoDay : null;
       if (!isNaN(initMC)) {
         materials.push({
           material: sel,
@@ -1073,7 +1085,8 @@ function collectData() {
           demoDay,
           startDay,
           dryStd: DRY_STANDARD[sel],
-          projection: projectReadings(sel, initMC, isNaN(finalMC) ? null : finalMC, days, demoed, demoDay, startDay)
+          seedOffset: ri * 100 + mi,
+          projection: projectReadings(sel, initMC, isNaN(finalMC) ? null : finalMC, days, demoed, demoDay, startDay, ri * 100 + mi)
         });
       }
     });
@@ -1092,13 +1105,17 @@ function collectData() {
   });
 
   return {
-    client:    document.getElementById('client-name').value,
-    claim:     document.getElementById('claim-num').value,
-    address:   document.getElementById('job-address').value,
-    insurer:   document.getElementById('ins-company').value,
-    dateLoss:  document.getElementById('date-loss').value,
-    dateStart: document.getElementById('date-start').value,
-    days, rooms
+    client:     document.getElementById('client-name').value,
+    claim:      document.getElementById('claim-num').value,
+    address:    document.getElementById('job-address').value,
+    insurer:    document.getElementById('ins-company').value,
+    dateLoss:   document.getElementById('date-loss').value,
+    dateStart,
+    dateEnd,
+    demoDate:   demoDateVal,
+    days,
+    dateLabels,
+    rooms
   };
 }
 
@@ -1285,26 +1302,26 @@ function generateFromData(data) {
     if (room.materials.length) {
       pageCheck(30);
 
-      const dayHeaders = Array.from({ length: data.days }, (_, i) => {
-        const label = i === 0 ? 'Day 1\n(Initial)' : `Day ${i+1}`;
-        return label;
-      });
+      const dayHeaders = (data.dateLabels || dateCols(data.dateStart, data.days)).map((lbl, i) =>
+        i === 0 ? `${lbl}\n(Initial)` : lbl
+      );
 
-      const head = [['Material', 'Location', 'Dry Std%', 'Final MC%', ...dayHeaders]];
+      const head = [['Material', 'Dry Std%', 'Final MC%', ...dayHeaders]];
       const body = room.materials.map(mat => {
         const dryStd  = mat.dryStd != null ? mat.dryStd + '%' : 'N/A';
         const finalMC = mat.demoed
-          ? { content: `DEMO'd Day ${mat.demoDay || '–'}`, styles: { textColor: [150,80,0], fontStyle: 'bold', fillColor: [255,243,220] } }
+          ? { content: `DEMO'd ${mat.demoDay != null ? (data.dateLabels?.[mat.demoDay-1] || mat.demoDay) : '–'}`, styles: { textColor: [150,80,0], fontStyle: 'bold', fillColor: [255,243,220] } }
           : mat.finalMC != null
             ? { content: mat.finalMC + '%', styles: { textColor: mat.dryStd && mat.finalMC <= mat.dryStd ? GREEN : RED, fontStyle: 'bold' } }
             : { content: '–', styles: { textColor: GRAY } };
         const mcVals = mat.projection.map((p, di) => {
           if (p.demoed)     return { content: 'DEMO', styles: { textColor: [180,120,0], fontStyle: 'bold' } };
+          if (p.afterDemo)  return { content: '', styles: {} };
           if (p.notStarted) return { content: '–', styles: { textColor: GRAY } };
           const isDry = mat.dryStd != null && p.mc <= mat.dryStd;
           return { content: p.mc + '%', styles: { textColor: isDry ? GREEN : (di === 0 ? RED : INK), fontStyle: isDry ? 'bold' : 'normal' } };
         });
-        return [mat.material, mat.note || '–', dryStd, finalMC, ...mcVals];
+        return [mat.material, dryStd, finalMC, ...mcVals];
       });
 
       doc.autoTable({
@@ -1315,10 +1332,9 @@ function generateFromData(data) {
         styles: { fontSize: 8, cellPadding: 2.5, font: 'helvetica', halign: 'center' },
         headStyles: { fillColor: [60, 60, 60], textColor: WHITE, fontStyle: 'bold', fontSize: 7, halign: 'center' },
         columnStyles: {
-          0: { halign: 'left', cellWidth: 26 },
-          1: { halign: 'left', cellWidth: 34 },
-          2: { cellWidth: 16 },
-          3: { cellWidth: 18 },
+          0: { halign: 'left', cellWidth: 30 },
+          1: { cellWidth: 16 },
+          2: { cellWidth: 18 },
         },
         alternateRowStyles: { fillColor: [250, 250, 250] },
       });

@@ -152,7 +152,7 @@
   /* ── Material rows ── */
   .material-row {
     display: grid;
-    grid-template-columns: 140px 1fr 70px 70px 60px 60px 32px;
+    grid-template-columns: 140px 1fr 70px 70px 60px 32px;
     gap: 8px;
     align-items: center;
     margin-bottom: 8px;
@@ -281,7 +281,7 @@
   /* ── Equipment ── */
   .equip-row {
     display: grid;
-    grid-template-columns: 160px 1fr 60px 32px;
+    grid-template-columns: 180px 80px 32px;
     gap: 8px;
     align-items: center;
     margin-bottom: 8px;
@@ -678,5 +678,5 @@
     .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr 1fr; }
     .psychro-grid { grid-template-columns: 1fr 1fr; }
     .material-row { grid-template-columns: 1fr 1fr 80px 32px; }
-    .equip-row { grid-template-columns: 140px 1fr 50px 32px; }
+    .equip-row { grid-template-columns: 1fr 60px 32px; }
   }
