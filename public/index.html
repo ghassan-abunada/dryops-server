@@ -800,7 +800,7 @@ async function addRoom() {
 
       <div style="font-size:11px;font-weight:700;font-family:var(--mono);color:var(--ink3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Moisture Readings — Day 1</div>
 
-      <div class="material-row-header" style="display:grid;grid-template-columns:1fr 70px 70px 60px 32px;gap:8px;margin-bottom:6px;align-items:end;">
+      <div class="material-row-header" style="display:grid;grid-template-columns:1fr 70px 70px auto 32px;gap:8px;margin-bottom:6px;align-items:end;">
         <span style="font-size:11px;font-family:var(--mono);color:var(--ink3);">MATERIAL</span>
         <span style="font-size:11px;font-family:var(--mono);color:var(--ink3);">INITIAL %</span>
         <span style="font-size:11px;font-family:var(--mono);color:var(--ink3);">FINAL %</span>
@@ -878,8 +878,9 @@ function addMaterial(roomId) {
     </div>
     <input type="number" placeholder="100" value="100" min="0" max="100" step="0.1" style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 10px;font-size:13px;font-family:var(--mono);background:#fafafa;width:100%" title="Initial MC%">
     <input type="number" placeholder="Final%" min="0" max="100" step="0.1" style="height:34px;border:1px solid var(--border);border-radius:7px;padding:0 10px;font-size:13px;font-family:var(--mono);background:#fafafa;width:100%" title="Final MC%">
-    <div style="display:flex;align-items:center;justify-content:center;height:34px;">
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px;padding:2px 0;">
       <input type="checkbox" id="demo-chk-${eid}" onchange="toggleDemoDay('${eid}')" style="width:18px;height:18px;cursor:pointer;accent-color:var(--red)">
+      <input type="date" class="demo-date-input" style="display:none;height:26px;font-size:11px;font-family:var(--mono);border:1px solid var(--border);border-radius:5px;padding:0 4px;background:#fff;width:110px;" title="Demo date">
     </div>
     <button class="del-mat" onclick="document.getElementById('${eid}').remove()">×</button>
   `;
@@ -889,10 +890,21 @@ function addMaterial(roomId) {
 // ── Demo toggle ──────────────────────────────────────────────────────────────
 function toggleDemoDay(eid) {
   const chk = document.getElementById('demo-chk-' + eid);
-
-  // Check if this row is a Drywall row — auto-add/remove studs
   const row = document.getElementById(eid);
   if (!row) return;
+
+  // Show/hide per-row demo date input
+  const dateInput = row.querySelector('.demo-date-input');
+  if (dateInput) {
+    dateInput.style.display = chk.checked ? 'block' : 'none';
+    if (chk.checked && !dateInput.value) {
+      // Pre-fill with global demo date
+      const globalDate = document.getElementById('demo-date')?.value;
+      if (globalDate) dateInput.value = globalDate;
+    }
+  }
+
+  // Auto-add/remove studs for Drywall rows
   const matSel = row.querySelector('.mat-type-input');
   if (matSel && matSel.value === 'Drywall') {
     if (chk.checked) {
@@ -1285,9 +1297,21 @@ function collectData() {
       const initMC    = parseFloat(numInputs[0].value);
       const finalMC   = parseFloat(numInputs[1].value);
       const demoed    = chkInput ? chkInput.checked : false;
-      const demoDay   = demoed ? globalDemoDay : null;
-      // startDay: auto-studs rows have disabled checkbox — start on demo day
-      const startDay  = (chkInput && chkInput.disabled) ? globalDemoDay : null;
+      // Per-row demo date (falls back to global demo date)
+      function rowDemoDay(row) {
+        const di = row.querySelector('.demo-date-input');
+        const dv = (di?.value) || demoDateVal;
+        if (!dv || !dateStart) return globalDemoDay;
+        return Math.round((new Date(dv) - new Date(dateStart)) / msPerDay) + 1;
+      }
+      const demoDay   = demoed ? rowDemoDay(mr) : null;
+      // startDay: auto-studs rows inherit demo day from their parent drywall row
+      let startDay = null;
+      if (chkInput && chkInput.disabled) {
+        const parentId  = mr.id.replace('auto-studs-', '');
+        const parentRow = document.getElementById(parentId);
+        startDay = parentRow ? rowDemoDay(parentRow) : globalDemoDay;
+      }
       if (!isNaN(initMC)) {
         materials.push({
           material: sel,
