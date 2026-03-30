@@ -91,6 +91,11 @@
   <div class="section-head">
     <div class="section-num">2</div>
     <div class="section-title">Rooms &amp; Initial Readings</div>
+    <label class="psychro-toggle-wrap">
+      <input type="checkbox" id="psychro-toggle" onchange="togglePsychro()">
+      <span class="psychro-toggle-track"></span>
+      <span class="psychro-toggle-label">Psychrometrics</span>
+    </label>
   </div>
 
   <div id="rooms-list"></div>
@@ -850,6 +855,18 @@ async function addRoom() {
   // Default equipment: 1 dehumidifier + 1 air mover
   addEquipWithDefaults(id, 'Dehumidifier', 1);
   addEquipWithDefaults(id, 'Air Mover', 1);
+  // Apply current psychro toggle state to new room
+  if (!document.getElementById('psychro-toggle').checked) {
+    const grid = div.querySelector('.psychro-grid');
+    if (grid) grid.style.display = 'none';
+  }
+}
+
+function togglePsychro() {
+  const on = document.getElementById('psychro-toggle').checked;
+  document.querySelectorAll('.psychro-grid').forEach(el => {
+    el.style.display = on ? '' : 'none';
+  });
 }
 
 function toggleRoom(id) {
@@ -1272,8 +1289,9 @@ function collectData() {
     const ri = roomIdx++;
     const id = rc.id.replace('room-', '');
     const name = rc.querySelector('.room-name-input').value;
-    const tempF = parseFloat(document.getElementById('temp-' + id)?.value) || null;
-    const rh    = parseFloat(document.getElementById('rh-'  + id)?.value) || null;
+    const usePsychroRoom = document.getElementById('psychro-toggle').checked;
+    const tempF = usePsychroRoom ? (parseFloat(document.getElementById('temp-' + id)?.value) || null) : null;
+    const rh    = usePsychroRoom ? (parseFloat(document.getElementById('rh-'  + id)?.value) || null) : null;
 
     let gpp = null, dp = null;
     if (tempF && rh) {
