@@ -93,6 +93,7 @@ app.post('/invite-user', async (req, res) => {
       body: JSON.stringify({
         email,
         data: { role, location_id, location_name, full_name },
+        redirect_to: 'dryops://',
       }),
     });
     const body = await r.json();
