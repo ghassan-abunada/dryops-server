@@ -74,6 +74,36 @@ app.use('/jnfiles', async (req, res) => {
   }
 });
 
+// ── Invite user (creates Supabase account via Admin API) ─────────────────────
+// Requires env vars: SUPABASE_URL, SUPABASE_SERVICE_KEY, INVITE_SECRET
+app.post('/invite-user', async (req, res) => {
+  if (req.headers['x-invite-secret'] !== process.env.INVITE_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const { email, role, location_id, location_name, full_name } = req.body;
+  if (!email) return res.status(400).json({ error: 'email is required' });
+
+  try {
+    const r = await fetch(`${process.env.SUPABASE_URL}/auth/v1/invite`, {
+      method: 'POST',
+      headers: {
+        'apikey': process.env.SUPABASE_SERVICE_KEY,
+        'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        email,
+        data: { role, location_id, location_name, full_name },
+      }),
+    });
+    const body = await r.json();
+    res.status(r.status).json(body);
+  } catch (err) {
+    console.error('[invite-user error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
 });
