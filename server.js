@@ -30,6 +30,26 @@ app.use('/jnapi', async (req, res) => {
   }
 });
 
+// ── JobNimbus photo download proxy ───────────────────────────────────────────
+// GET /jnphoto/:jnid — follows the JN redirect and streams the image binary
+app.get('/jnphoto/:jnid', async (req, res) => {
+  const url = `${JN_BASE}/files/${req.params.jnid}`;
+  console.log('[JN photo]', url);
+  try {
+    const upstream = await fetch(url, {
+      headers: { 'Authorization': `bearer ${JN_TOKEN}` },
+    });
+    const contentType = upstream.headers.get('content-type') || 'image/jpeg';
+    const buf = await upstream.arrayBuffer();
+    res.set('Content-Type', contentType)
+       .set('Cache-Control', 'public, max-age=3600')
+       .send(Buffer.from(buf));
+  } catch (err) {
+    console.error('[JN photo error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // ── JobNimbus Files API proxy (presigned URL upload) ──────────────────────────
 app.use('/jnfiles', async (req, res) => {
   const url = `https://api.jobnimbus.com/files/v1${req.path}`;
