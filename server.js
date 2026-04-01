@@ -5,6 +5,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JN_TOKEN = process.env.JN_TOKEN || 'mg16mu4lyx064qcj';
 const JN_BASE = 'https://app.jobnimbus.com/api1';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://aurbjoqmuzbisoirotdm.supabase.co';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 
 // ── Serve static files ────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
@@ -81,11 +83,11 @@ app.post('/invite-user', async (req, res) => {
   if (!email) return res.status(400).json({ error: 'email is required' });
 
   try {
-    const r = await fetch(`${process.env.SUPABASE_URL}/auth/v1/invite`, {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/invite`, {
       method: 'POST',
       headers: {
-        'apikey': process.env.SUPABASE_SERVICE_KEY,
-        'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+        'apikey': SUPABASE_SERVICE_KEY,
+        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
