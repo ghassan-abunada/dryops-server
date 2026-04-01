@@ -7,8 +7,6 @@ const JN_TOKEN = process.env.JN_TOKEN || 'mg16mu4lyx064qcj';
 const JN_BASE = 'https://app.jobnimbus.com/api1';
 const SUPABASE_URL = (process.env.SUPABASE_URL || 'https://aurbjoqmuzbisoirotdm.supabase.co').trim();
 const SUPABASE_SERVICE_KEY = (process.env.SUPABASE_SERVICE_KEY || '').trim();
-console.log('[config] SUPABASE_URL:', SUPABASE_URL);
-console.log('[config] SUPABASE_SERVICE_KEY length:', SUPABASE_SERVICE_KEY.length, 'prefix:', SUPABASE_SERVICE_KEY.slice(0, 10));
 
 // ── Serve static files ────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
