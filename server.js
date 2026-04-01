@@ -77,9 +77,6 @@ app.use('/jnfiles', async (req, res) => {
 // ── Invite user (creates Supabase account via Admin API) ─────────────────────
 // Requires env vars: SUPABASE_URL, SUPABASE_SERVICE_KEY, INVITE_SECRET
 app.post('/invite-user', async (req, res) => {
-  if (req.headers['x-invite-secret'] !== process.env.INVITE_SECRET) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
   const { email, role, location_id, location_name, full_name } = req.body;
   if (!email) return res.status(400).json({ error: 'email is required' });
 
