@@ -16,13 +16,16 @@ app.use(express.json());
 app.use('/jnapi', async (req, res) => {
   const url = `${JN_BASE}${req.path}${req.url.includes('?') ? '?' + req.url.split('?')[1] : ''}`;
   console.log('[JN]', req.method, url);
+  const hasBody = ['PUT', 'POST', 'PATCH'].includes(req.method) && req.body && Object.keys(req.body).length > 0;
   try {
     const upstream = await fetch(url, {
       method: req.method,
       headers: {
         'Authorization': `bearer ${JN_TOKEN}`,
         'Accept': 'application/json',
+        ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
       },
+      body: hasBody ? JSON.stringify(req.body) : undefined,
     });
     const body = await upstream.text();
     res.status(upstream.status).set('Content-Type', 'application/json').send(body);
