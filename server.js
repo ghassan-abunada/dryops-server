@@ -22,8 +22,8 @@ app.use('/jnapi', async (req, res) => {
       method: req.method,
       headers: {
         'Authorization': `bearer ${JN_TOKEN}`,
+        'Content-Type': 'application/json',
         'Accept': 'application/json',
-        ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
       },
       body: hasBody ? JSON.stringify(req.body) : undefined,
     });
