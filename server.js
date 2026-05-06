@@ -107,6 +107,71 @@ app.post('/invite-user', async (req, res) => {
   }
 });
 
+// ── Company management API ────────────────────────────────────────────────────
+app.get('/api/companies', async (req, res) => {
+  if (!SUPABASE_SERVICE_KEY) {
+    return res.json([{ id: 'aff-default', name: 'American Fire and Flood', logo_b64: null }]);
+  }
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/companies?select=id,name,logo_b64&order=created_at.asc`, {
+      headers: {
+        'apikey': SUPABASE_SERVICE_KEY,
+        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+    });
+    const body = await r.json();
+    res.status(r.status).json(body);
+  } catch(err) {
+    console.error('[companies GET error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/api/companies', async (req, res) => {
+  if (!SUPABASE_SERVICE_KEY) return res.status(503).json({ error: 'Not configured' });
+  const { name, logo_b64 } = req.body;
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/companies`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_SERVICE_KEY,
+        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation',
+      },
+      body: JSON.stringify({ name, logo_b64: logo_b64 || null }),
+    });
+    const body = await r.json();
+    res.status(r.status).json(body);
+  } catch(err) {
+    console.error('[companies POST error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.patch('/api/companies/:id', async (req, res) => {
+  if (!SUPABASE_SERVICE_KEY) return res.status(503).json({ error: 'Not configured' });
+  const { logo_b64 } = req.body;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/companies?id=eq.${req.params.id}`, {
+      method: 'PATCH',
+      headers: {
+        'apikey': SUPABASE_SERVICE_KEY,
+        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation',
+      },
+      body: JSON.stringify({ logo_b64 }),
+    });
+    const body = await r.json();
+    res.status(r.status).json(body);
+  } catch(err) {
+    console.error('[companies PATCH error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
 });

@@ -40,6 +40,35 @@
   </div>
 
   <div class="card">
+    <!-- ── Company / Location ── -->
+    <div style="margin-bottom:16px">
+      <div class="grid-2">
+        <div class="field">
+          <label>Company / Location</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="company-select" onchange="onCompanyChange()" style="flex:1;min-width:0">
+              <option value="__a1__">A1 Restoration</option>
+            </select>
+            <img id="company-logo-thumb" src="" alt="" style="height:30px;display:none;object-fit:contain;background:#fff;border:1px solid #e0e0e0;border-radius:4px;padding:2px 6px;max-width:100px">
+          </div>
+        </div>
+        <div class="field" id="custom-name-field" style="display:none">
+          <label>Company Name</label>
+          <input type="text" id="custom-company-name" placeholder="Your company name" oninput="selectedCompanyName=this.value">
+        </div>
+      </div>
+      <div id="logo-upload-section" style="display:none;margin-top:10px">
+        <div class="field">
+          <label id="logo-upload-label">Upload Logo <span style="font-weight:400;color:#888;font-size:12px">(PNG, JPG, or WebP)</span></label>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="file" id="logo-file-input" accept="image/png,image/jpeg,image/webp" onchange="onLogoFileSelect(event)" style="flex:1;min-width:0">
+            <button id="save-logo-btn" onclick="saveCompanyLogo()" style="display:none;padding:7px 16px;border:none;background:#c0392b;color:#fff;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;white-space:nowrap">Save Logo</button>
+            <button id="save-custom-btn" onclick="saveCustomCompany()" style="display:none;padding:7px 16px;border:none;background:#c0392b;color:#fff;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;white-space:nowrap">Save Company</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="grid-2" style="margin-bottom:12px">
       <div class="field">
         <label>Client Name</label>

@@ -1,3 +1,150 @@
+// ── Company management ────────────────────────────────────────────────────────
+let companies = [];
+let selectedCompanyName = 'A1 Restoration';
+let selectedCompanyLogo = null; // null → falls back to hardcoded LOGO_B64 in PDF gen
+let _pendingLogoB64 = null;
+
+async function loadCompanies() {
+  try {
+    const res = await fetch('/api/companies');
+    if (res.ok) companies = await res.json();
+  } catch(e) {}
+  buildCompanyDropdown();
+}
+
+function buildCompanyDropdown() {
+  const sel = document.getElementById('company-select');
+  if (!sel) return;
+  sel.innerHTML = '<option value="__a1__">A1 Restoration</option>';
+  companies.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = c.name;
+    sel.appendChild(opt);
+  });
+  const other = document.createElement('option');
+  other.value = '__other__';
+  other.textContent = 'Other (Custom)…';
+  sel.appendChild(other);
+  onCompanyChange();
+}
+
+function onCompanyChange() {
+  const sel = document.getElementById('company-select');
+  if (!sel) return;
+  const val = sel.value;
+  const customNameField  = document.getElementById('custom-name-field');
+  const logoSection      = document.getElementById('logo-upload-section');
+  const saveLogoBtn      = document.getElementById('save-logo-btn');
+  const saveCustomBtn    = document.getElementById('save-custom-btn');
+  const thumb            = document.getElementById('company-logo-thumb');
+
+  _pendingLogoB64 = null;
+  if (customNameField) customNameField.style.display = 'none';
+  if (logoSection)     logoSection.style.display     = 'none';
+  if (saveLogoBtn)     saveLogoBtn.style.display     = 'none';
+  if (saveCustomBtn)   saveCustomBtn.style.display   = 'none';
+
+  if (!val || val === '__a1__') {
+    selectedCompanyName = 'A1 Restoration';
+    selectedCompanyLogo = null;
+    if (thumb) thumb.style.display = 'none';
+    return;
+  }
+
+  if (val === '__other__') {
+    selectedCompanyName = (document.getElementById('custom-company-name')?.value || '').trim();
+    selectedCompanyLogo = null;
+    if (customNameField) customNameField.style.display = '';
+    if (logoSection)     logoSection.style.display     = '';
+    if (saveCustomBtn)   saveCustomBtn.style.display   = '';
+    const lbl = document.getElementById('logo-upload-label');
+    if (lbl) lbl.innerHTML = 'Upload Logo <span style="font-weight:400;color:#888;font-size:12px">(optional, PNG/JPG)</span>';
+    if (thumb) thumb.style.display = 'none';
+    return;
+  }
+
+  const company = companies.find(c => c.id === val);
+  if (!company) return;
+  selectedCompanyName = company.name;
+
+  if (company.logo_b64) {
+    selectedCompanyLogo = company.logo_b64;
+    if (thumb) { thumb.src = company.logo_b64; thumb.style.display = ''; }
+  } else {
+    selectedCompanyLogo = null;
+    if (thumb) thumb.style.display = 'none';
+    if (logoSection)  logoSection.style.display  = '';
+    if (saveLogoBtn)  saveLogoBtn.style.display  = '';
+    const lbl = document.getElementById('logo-upload-label');
+    if (lbl) lbl.innerHTML = `Upload Logo for <strong>${company.name}</strong> <span style="font-weight:400;color:#888;font-size:12px">(PNG/JPG)</span>`;
+  }
+}
+
+function onLogoFileSelect(event) {
+  const file = event.target.files[0];
+  if (!file) { _pendingLogoB64 = null; return; }
+  const reader = new FileReader();
+  reader.onload = e => {
+    _pendingLogoB64 = e.target.result;
+    const thumb = document.getElementById('company-logo-thumb');
+    if (thumb) { thumb.src = _pendingLogoB64; thumb.style.display = ''; }
+  };
+  reader.readAsDataURL(file);
+}
+
+async function saveCompanyLogo() {
+  const sel = document.getElementById('company-select');
+  const companyId = sel?.value;
+  if (!companyId || companyId.startsWith('__')) return;
+  if (!_pendingLogoB64) { alert('Please select a logo file first.'); return; }
+  const btn = document.getElementById('save-logo-btn');
+  if (btn) { btn.textContent = 'Saving…'; btn.disabled = true; }
+  try {
+    const r = await fetch(`/api/companies/${companyId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ logo_b64: _pendingLogoB64 }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const company = companies.find(c => c.id === companyId);
+    if (company) company.logo_b64 = _pendingLogoB64;
+    selectedCompanyLogo = _pendingLogoB64;
+    document.getElementById('logo-upload-section').style.display = 'none';
+  } catch(e) {
+    alert('Could not save logo: ' + e.message);
+  } finally {
+    if (btn) { btn.textContent = 'Save Logo'; btn.disabled = false; }
+  }
+}
+
+async function saveCustomCompany() {
+  const name = (document.getElementById('custom-company-name')?.value || '').trim();
+  if (!name) { alert('Please enter a company name.'); return; }
+  const btn = document.getElementById('save-custom-btn');
+  if (btn) { btn.textContent = 'Saving…'; btn.disabled = true; }
+  try {
+    const r = await fetch('/api/companies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, logo_b64: _pendingLogoB64 || null }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    const saved = Array.isArray(data) ? data[0] : data;
+    companies.push(saved);
+    selectedCompanyName = name;
+    selectedCompanyLogo = _pendingLogoB64 || null;
+    buildCompanyDropdown();
+    const sel = document.getElementById('company-select');
+    if (sel && saved?.id) { sel.value = saved.id; onCompanyChange(); }
+  } catch(e) {
+    alert('Could not save company: ' + e.message);
+  } finally {
+    if (btn) { btn.textContent = 'Save Company'; btn.disabled = false; }
+  }
+}
+
 // ── Address autocomplete (Google Places Autocomplete API via fetch) ──────────
 const MAPS_KEY = 'AIzaSyBR0WXiCAs16A502isiMtmGei5Rj-LvxBE';
 let addrSession = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36);
@@ -934,12 +1081,14 @@ function collectData() {
   });
 
   return {
-    client:    document.getElementById('client-name').value,
-    claim:     document.getElementById('claim-num').value,
-    address:   document.getElementById('job-address').value,
-    insurer:   document.getElementById('ins-company').value,
-    dateLoss:  document.getElementById('date-loss').value,
-    dateStart: document.getElementById('date-start').value,
+    client:      document.getElementById('client-name').value,
+    claim:       document.getElementById('claim-num').value,
+    address:     document.getElementById('job-address').value,
+    insurer:     document.getElementById('ins-company').value,
+    dateLoss:    document.getElementById('date-loss').value,
+    dateStart:   document.getElementById('date-start').value,
+    companyName: selectedCompanyName || 'A1 Restoration',
+    companyLogo: selectedCompanyLogo || null,
     days, rooms
   };
 }
@@ -996,7 +1145,7 @@ function generateFromData(data) {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
     doc.setTextColor(...INK);
-    doc.text('A1 RESTORATION  |  DRYING LOG', M, 6.5);
+    doc.text(`${(data.companyName || 'A1 Restoration').toUpperCase()}  |  DRYING LOG`, M, 6.5);
     doc.setTextColor(...GRAY);
     doc.text(`CLAIM: ${data.claim || '–'}`, W - M, 6.5, { align: 'right' });
     y = 16;
@@ -1007,12 +1156,17 @@ function generateFromData(data) {
   doc.setFillColor(...RED);
   doc.rect(0, 0, W, 2, 'F');
 
-  // Logo: crop to content area — original logo is ~4:1 ratio, render short & wide
+  // Logo: use selected company logo or fall back to A1 hardcoded logo
   try {
-    // addImage(data, format, x, y, width, height, alias, compression, rotation)
-    // Render tall portion of logo only by clipping via a small height
-    doc.addImage(LOGO_B64, 'PNG', M, 4, 55, 13);
-  } catch(e) {}
+    const logoData = data.companyLogo || LOGO_B64;
+    doc.addImage(logoData, 'PNG', M, 4, 55, 13);
+  } catch(e) {
+    // No logo — render company name as text
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13);
+    doc.setTextColor(...INK);
+    doc.text(data.companyName || '', M, 13);
+  }
 
   // Subtitle right-aligned at baseline of logo
   doc.setFont('helvetica', 'normal');
@@ -1192,7 +1346,7 @@ function generateFromData(data) {
     doc.setFontSize(7);
     doc.setTextColor(...GRAY);
     doc.text(`Page ${i} of ${totalPages}`, W - M, 275, { align: 'right' });
-    doc.text('A1 Restoration  |  Confidential – For Insurance Purposes', M, 275);
+    doc.text(`${data.companyName || 'A1 Restoration'}  |  Confidential – For Insurance Purposes`, M, 275);
   }
 
   const filename = `DryingLog_${(data.client || 'Job').replace(/\s+/g,'_')}_${data.dateStart || 'undated'}.pdf`;
@@ -1206,4 +1360,5 @@ function generateFromData(data) {
 window.addEventListener('DOMContentLoaded', () => {
   const today = new Date().toISOString().split('T')[0];
   document.getElementById('date-start').value = today;
+  loadCompanies();
 });
