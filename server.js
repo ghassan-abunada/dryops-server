@@ -14,6 +14,9 @@ const SUPABASE_SERVICE_KEY = (process.env.SUPABASE_SERVICE_KEY || '').trim();
 // Shared secret for the JobNimbus job webhook. Set in Railway env and include
 // as ?token=... in the webhook URL configured in JobNimbus.
 const JN_WEBHOOK_TOKEN = (process.env.JN_WEBHOOK_TOKEN || '').trim();
+// Google Maps key for server-side geocoding in the job webhook. If unset,
+// geocoding is skipped (jobs still upsert; they just won't get map coordinates).
+const GOOGLE_MAPS_KEY = (process.env.GOOGLE_MAPS_KEY || '').trim();
 
 // ── Fail fast on missing secrets ──────────────────────────────────────────────
 if (!process.env.JN_TOKEN) {
@@ -218,11 +221,6 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   set('jn_created', jnToISO(job.date_created));
   set('jn_updated', jnToISO(job.date_modified || job.date_updated));
 
-  // Client name from the related contact, if the payload includes it.
-  const rel = Array.isArray(job.related) ? job.related : [];
-  const contact = rel.find(r => r && r.type === 'contact' && r.name);
-  if (contact) set('client_name', contact.name);
-
   // Resolve JobNimbus numeric location id -> our locations.id UUID.
   const jnLocRaw = job.location && (job.location.id ?? job.location);
   if (jnLocRaw != null && /^\d+$/.test(String(jnLocRaw))) {
@@ -235,6 +233,35 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
       const locs = await lr.json();
       if (Array.isArray(locs) && locs[0] && locs[0].id) set('location_id', locs[0].id);
     } catch (err) { console.error('[jn-webhook] location lookup error', err.message); }
+  }
+
+  // What we already have for this job (drives the enrichment-only-when-needed
+  // logic below, so steady-state updates skip the extra contact/geocode calls).
+  const existing = await getExistingJob(String(jnid));
+
+  // Client name + contact_created from the related contact. Use the name in the
+  // payload if present; fetch the contact from JobNimbus for the creation date
+  // (needed by the stats "new contact within 120 days" rule) only when we don't
+  // already have it stored.
+  const rel = Array.isArray(job.related) ? job.related : [];
+  const contactRef = rel.find(r => r && r.type === 'contact' && r.id);
+  if (contactRef && contactRef.name) set('client_name', contactRef.name);
+  if (contactRef && !(existing && existing.contact_created)) {
+    const c = await jnGetContact(contactRef.id);
+    if (c) {
+      if (!row.client_name && c.name) set('client_name', c.name);
+      if (c.contact_created) set('contact_created', c.contact_created);
+    }
+  }
+
+  // Geocode when we have an address and either the job is new, has no
+  // coordinates yet, or the address changed. Skips silently if no key set.
+  if (row.address && GOOGLE_MAPS_KEY) {
+    const needsGeocode = !existing || existing.lat == null || existing.address !== row.address;
+    if (needsGeocode) {
+      const coords = await geocode(row.address);
+      if (coords) { set('lat', coords.lat); set('lng', coords.lng); }
+    }
   }
 
   try {
@@ -259,6 +286,46 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
     return res.status(502).json({ ok: false });
   }
 });
+
+// Current stored row for a job (null if new) — used to enrich only when needed.
+async function getExistingJob(jnId) {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?jn_id=eq.${encodeURIComponent(jnId)}&select=id,address,lat,contact_created`, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const rows = await r.json();
+    return Array.isArray(rows) && rows[0] ? rows[0] : null;
+  } catch (err) { console.error('[jn-webhook] existing job lookup error', err.message); return null; }
+}
+
+// Fetch a JobNimbus contact for its name + creation date (contact_created).
+async function jnGetContact(contactId) {
+  try {
+    const r = await fetch(`${JN_BASE}/contacts/${contactId}`, {
+      headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+    });
+    if (!r.ok) return null;
+    const c = await r.json();
+    const name = [c.first_name, c.last_name].filter(Boolean).join(' ');
+    const contact_created = c.date_created ? new Date(c.date_created * 1000).toISOString() : undefined;
+    return { name, contact_created };
+  } catch (err) { console.error('[jn-webhook] contact fetch error', err.message); return null; }
+}
+
+// Server-side geocode via Google Maps (mirrors the app's geocodeAddress).
+async function geocode(address) {
+  try {
+    const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_KEY}`);
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (d.status !== 'OK' || !d.results || !d.results.length) {
+      console.warn('[jn-webhook] geocode status', d.status, d.error_message || '');
+      return null;
+    }
+    const loc = d.results[0].geometry.location;
+    return { lat: loc.lat, lng: loc.lng };
+  } catch (err) { console.error('[jn-webhook] geocode error', err.message); return null; }
+}
 
 // Unwrap a webhook record that JobNimbus may send directly, as {data:...}, or
 // as a one-element array.
