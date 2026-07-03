@@ -107,6 +107,13 @@ async function requireAdmin(req, res, next) {
 // search jobs by name. Remove this bypass if the drying-log tool is retired.
 function jnapiAuth(req, res, next) {
   if (req.method === 'GET' && req.path === '/jobs') return next();
+  // TEMPORARY (2026-07-03): token-gated read access for the one-time
+  // invoices/payments database backfill. REMOVE after the backfill completes.
+  if (req.method === 'GET'
+      && (req.path === '/v2/invoices' || req.path === '/payments')
+      && req.headers['x-backfill-token'] === 'f702c8c618e0303fb39ca94223e04e126cd7975461ec56f1') {
+    return next();
+  }
   return requireAuth(req, res, next);
 }
 
