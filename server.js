@@ -17,10 +17,10 @@ const JN_WEBHOOK_TOKEN = (process.env.JN_WEBHOOK_TOKEN || '').trim();
 // Google Maps key for server-side geocoding in the job webhook. If unset,
 // geocoding is skipped (jobs still upsert; they just won't get map coordinates).
 const GOOGLE_MAPS_KEY = (process.env.GOOGLE_MAPS_KEY || '').trim();
-// Where invite email links should land. Set to the deployed DryOps WEB app URL
-// (must also be in Supabase Auth → URL Configuration → Redirect URLs). Falls
-// back to the mobile scheme if unset.
-const WEB_APP_URL = (process.env.WEB_APP_URL || 'dryops://').trim();
+// Where invite email links should land — the deployed DryOps WEB app. This URL
+// must also be listed in Supabase Auth → URL Configuration → Redirect URLs, or
+// Supabase ignores redirect_to and uses the project Site URL instead.
+const WEB_APP_URL = (process.env.WEB_APP_URL || 'https://dryops.app').trim();
 
 // ── Fail fast on missing secrets ──────────────────────────────────────────────
 if (!process.env.JN_TOKEN) {
