@@ -260,6 +260,112 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   }
 });
 
+// Unwrap a webhook record that JobNimbus may send directly, as {data:...}, or
+// as a one-element array.
+function unwrapRecord(body) {
+  let r = body;
+  if (r && typeof r === 'object' && r.data && typeof r.data === 'object') r = r.data;
+  if (Array.isArray(r)) r = r[0];
+  return r && typeof r === 'object' ? r : null;
+}
+
+// Resolve the related job → our jobs.id (uuid) + location_id, so invoices and
+// payments attach to the right job/location. Returns {} if no job match.
+async function resolveJobRef(rec) {
+  const rel = Array.isArray(rec.related) ? rec.related : [];
+  const jobRef = rel.find(r => r && r.type === 'job' && r.id);
+  if (!jobRef) return {};
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?jn_id=eq.${encodeURIComponent(jobRef.id)}&select=id,location_id`, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const rows = await r.json();
+    if (Array.isArray(rows) && rows[0]) return { job_id: rows[0].id, location_id: rows[0].location_id || undefined };
+  } catch (err) { console.error('[jn-webhook] job ref lookup error', err.message); }
+  return {};
+}
+
+async function upsertRow(table, row) {
+  const up = await fetch(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=jn_id`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_SERVICE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates,return=minimal',
+    },
+    body: JSON.stringify(row),
+  });
+  if (!up.ok) { const t = await up.text(); throw new Error(`${up.status} ${t.slice(0, 300)}`); }
+}
+
+// ── JobNimbus invoice webhook ─────────────────────────────────────────────────
+// POST /webhooks/jobnimbus/invoices — same secret gate as the jobs webhook.
+app.post('/webhooks/jobnimbus/invoices', async (req, res) => {
+  if (!webhookTokenOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  const inv = unwrapRecord(req.body);
+  if (!inv) return res.status(200).json({ ok: true, skipped: 'empty body' });
+  const jnid = inv.jnid || inv.id;
+  if (!jnid) return res.status(200).json({ ok: true, skipped: 'no jnid' });
+  console.log('[jn-webhook:invoice]', String(jnid), 'status=', inv.status_name, 'total=', inv.total);
+
+  const row = { jn_id: String(jnid), last_synced: new Date().toISOString() };
+  const set = (col, val) => { if (val !== undefined) row[col] = val; };
+  const ref = await resolveJobRef(inv);
+  set('job_id', ref.job_id);
+  set('location_id', ref.location_id);
+  set('number', inv.number != null && inv.number !== '' ? inv.number : undefined);
+  set('status_name', inv.status_name || undefined);
+  if (inv.total != null) set('total', inv.total);
+  if (inv.total_paid != null) set('total_paid', inv.total_paid);
+  if (inv.due != null) set('due', inv.due);
+  set('date_invoice', jnToDate(inv.date_invoice));
+  set('date_due', jnToDate(inv.date_due));
+  set('date_paid_in_full', jnToDate(inv.date_paid_in_full));
+  set('jn_created', jnToISO(inv.date_created));
+  set('jn_updated', jnToISO(inv.date_modified || inv.date_updated));
+
+  try {
+    await upsertRow('invoices', row);
+    return res.status(200).json({ ok: true, jn_id: String(jnid) });
+  } catch (err) {
+    console.error('[jn-webhook:invoice] upsert failed', err.message);
+    return res.status(502).json({ ok: false });
+  }
+});
+
+// ── JobNimbus payment webhook ─────────────────────────────────────────────────
+// POST /webhooks/jobnimbus/payments — same secret gate. Payment amount is in the
+// JN `total` field; method_id = -1 marks a credit memo (matches the app).
+app.post('/webhooks/jobnimbus/payments', async (req, res) => {
+  if (!webhookTokenOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  const pay = unwrapRecord(req.body);
+  if (!pay) return res.status(200).json({ ok: true, skipped: 'empty body' });
+  const jnid = pay.jnid || pay.id;
+  if (!jnid) return res.status(200).json({ ok: true, skipped: 'no jnid' });
+  console.log('[jn-webhook:payment]', String(jnid), 'amount=', pay.total, 'method=', pay.method_id);
+
+  const row = { jn_id: String(jnid), last_synced: new Date().toISOString() };
+  const set = (col, val) => { if (val !== undefined) row[col] = val; };
+  const ref = await resolveJobRef(pay);
+  set('job_id', ref.job_id);
+  set('location_id', ref.location_id);
+  const amount = pay.total != null ? pay.total : (pay.amount != null ? pay.amount : undefined);
+  if (amount != null) set('amount', amount);
+  if (pay.method_id != null) set('method_id', pay.method_id);
+  set('note', (pay.note || pay.description) || undefined);
+  set('jn_created', jnToISO(pay.date_payment || pay.date_created));
+  set('jn_updated', jnToISO(pay.date_updated || pay.date_modified));
+
+  try {
+    await upsertRow('payments', row);
+    return res.status(200).json({ ok: true, jn_id: String(jnid) });
+  } catch (err) {
+    console.error('[jn-webhook:payment] upsert failed', err.message);
+    return res.status(502).json({ ok: false });
+  }
+});
+
 // ── JobNimbus photo download proxy ───────────────────────────────────────────
 // GET /jnphoto/:jnid — follows the JN redirect and streams the image binary
 // INTENTIONALLY UNAUTHENTICATED: this URL is used directly as an <img> /
