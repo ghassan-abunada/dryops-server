@@ -20,7 +20,7 @@ npm start
 ## Key things to know
 
 ### JobNimbus integration
-- Token: `mg16mu4lyx064qcj` (stored in server.js, never exposed to client)
+- Token: set via `JN_TOKEN` env var (server-side only, never exposed to client; no hardcoded fallback)
 - All API calls go through `/jnapi/*` → proxied to `https://app.jobnimbus.com/api1/*`
 - Client-side `JN_BASE = '/jnapi'` — no auth header needed in browser fetch
 
@@ -54,4 +54,6 @@ npm start
 
 ## Environment variables
 - `PORT` — server port (default 3000)
-- `JN_TOKEN` — JobNimbus bearer token (default hardcoded in server.js)
+- `JN_TOKEN` — JobNimbus bearer token (required; server exits at startup if missing)
+- `SUPABASE_URL` — Supabase project URL
+- `SUPABASE_SERVICE_KEY` — Supabase service role key (required; server exits at startup if missing)
