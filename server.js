@@ -17,6 +17,10 @@ const JN_WEBHOOK_TOKEN = (process.env.JN_WEBHOOK_TOKEN || '').trim();
 // Google Maps key for server-side geocoding in the job webhook. If unset,
 // geocoding is skipped (jobs still upsert; they just won't get map coordinates).
 const GOOGLE_MAPS_KEY = (process.env.GOOGLE_MAPS_KEY || '').trim();
+// Where invite email links should land. Set to the deployed DryOps WEB app URL
+// (must also be in Supabase Auth → URL Configuration → Redirect URLs). Falls
+// back to the mobile scheme if unset.
+const WEB_APP_URL = (process.env.WEB_APP_URL || 'dryops://').trim();
 
 // ── Fail fast on missing secrets ──────────────────────────────────────────────
 if (!process.env.JN_TOKEN) {
@@ -497,14 +501,99 @@ app.post('/invite-user', requireAuth, requireAdmin, async (req, res) => {
       },
       body: JSON.stringify({
         email,
-        data: { role, location_id, location_name, full_name },
-        redirect_to: 'dryops://',
+        data: { role, location_id, location_name, full_name,
+                location_ids: req.body.location_ids, location_names: req.body.location_names },
+        redirect_to: WEB_APP_URL,
       }),
     });
     const body = await r.json();
     res.status(r.status).json(body);
   } catch (err) {
     console.error('[invite-user error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ── Create a user manually (admin/owner only) ────────────────────────────────
+// Creates a confirmed Supabase account with an auto-generated temp password and
+// sets the profile's role + locations directly (no email round-trip). Returns
+// the temp password once so the admin can relay it; the user changes it on first
+// login. handle_new_user forces 'technician' for non-invited signups, so we
+// upsert the real role/locations here (service role bypasses RLS + the
+// profile-privilege trigger).
+function genTempPassword() {
+  // 16 chars, url-safe, always meets Supabase's min length.
+  return crypto.randomBytes(12).toString('base64').replace(/[+/=]/g, '').slice(0, 16) + 'A9';
+}
+
+app.post('/admin/create-user', requireAuth, requireAdmin, async (req, res) => {
+  const { email, full_name, role, location_id, location_name, location_ids, location_names } = req.body;
+  if (!email) return res.status(400).json({ error: 'email is required' });
+  const allowedRoles = ['owner', 'technician', 'technician_2', 'executive', 'admin'];
+  const finalRole = allowedRoles.includes(role) ? role : 'technician';
+  const tempPassword = genTempPassword();
+
+  try {
+    // 1) Create the confirmed auth user.
+    const cr = await fetch(`${SUPABASE_URL}/auth/v1/admin/users`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email, password: tempPassword, email_confirm: true,
+        user_metadata: { full_name, role: finalRole, location_id, location_name, location_ids, location_names },
+      }),
+    });
+    const created = await cr.json();
+    if (!cr.ok || !created.id) {
+      return res.status(cr.status === 200 ? 502 : cr.status).json({ error: created.msg || created.message || created.error_description || 'create user failed' });
+    }
+
+    // 2) Set the real profile role + locations (handle_new_user made a
+    //    technician row; overwrite it via service role).
+    const profile = {
+      id: created.id, full_name: full_name || null, role: finalRole,
+      location_id: location_id || null, location_name: location_name || null,
+      location_ids: location_ids || [], location_names: location_names || [],
+      updated_at: new Date().toISOString(),
+    };
+    const pr = await fetch(`${SUPABASE_URL}/rest/v1/profiles?on_conflict=id`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(profile),
+    });
+    if (!pr.ok) {
+      const t = await pr.text();
+      console.error('[create-user] profile upsert failed', pr.status, t.slice(0, 300));
+      // The auth user exists; report partial success so the admin knows.
+      return res.status(502).json({ error: 'user created but profile setup failed', detail: t.slice(0, 200) });
+    }
+    return res.status(200).json({ ok: true, user_id: created.id, email, temp_password: tempPassword });
+  } catch (err) {
+    console.error('[create-user error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ── Create a location (admin/owner only) ─────────────────────────────────────
+app.post('/admin/locations', requireAuth, requireAdmin, async (req, res) => {
+  const { name, location_type, jn_location_id } = req.body;
+  if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
+  let jnLoc = null;
+  if (jn_location_id !== undefined && jn_location_id !== null && String(jn_location_id).trim() !== '') {
+    if (!/^\d+$/.test(String(jn_location_id))) return res.status(400).json({ error: 'jn_location_id must be a number' });
+    jnLoc = Number(jn_location_id);
+  }
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/locations`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+      body: JSON.stringify({ name: String(name).trim(), location_type: location_type || null, jn_location_id: jnLoc, status: 'active' }),
+    });
+    const body = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: (body && (body.message || body.error)) || 'create location failed' });
+    return res.status(200).json({ ok: true, location: Array.isArray(body) ? body[0] : body });
+  } catch (err) {
+    console.error('[create-location error]', err.message);
     res.status(502).json({ error: err.message });
   }
 });
