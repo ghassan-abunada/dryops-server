@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -10,6 +11,9 @@ const JN_TOKEN = (process.env.JN_TOKEN || 'mg16mu4lyx064qcj').trim();
 const JN_BASE = 'https://app.jobnimbus.com/api1';
 const SUPABASE_URL = (process.env.SUPABASE_URL || 'https://aurbjoqmuzbisoirotdm.supabase.co').trim();
 const SUPABASE_SERVICE_KEY = (process.env.SUPABASE_SERVICE_KEY || '').trim();
+// Shared secret for the JobNimbus job webhook. Set in Railway env and include
+// as ?token=... in the webhook URL configured in JobNimbus.
+const JN_WEBHOOK_TOKEN = (process.env.JN_WEBHOOK_TOKEN || '').trim();
 
 // ── Fail fast on missing secrets ──────────────────────────────────────────────
 if (!process.env.JN_TOKEN) {
@@ -31,7 +35,7 @@ app.use((req, res, next) => {
 
 // ── Serve static files ────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
 // Clients send `Authorization: Bearer <Supabase user access token>` (a Supabase
@@ -131,6 +135,128 @@ app.use('/jnapi', jnapiAuth, async (req, res) => {
   } catch (err) {
     console.error('[JN proxy error]', err.message);
     res.status(502).json({ error: 'Proxy error', detail: err.message });
+  }
+});
+
+// ── JobNimbus job webhook ─────────────────────────────────────────────────────
+// JobNimbus POSTs here whenever a job is created or updated. Secret-gated by
+// JN_WEBHOOK_TOKEN (Railway env), supplied as ?token=... in the webhook URL (or
+// an X-Webhook-Token header). Maps the JN job payload to our jobs columns and
+// upserts into Supabase with the service key. Uses PostgREST merge-duplicates so
+// an update only touches the columns present in the payload (no accidental
+// nulling of fields JobNimbus omits). `stage` is a generated column — never sent.
+const WEBHOOK_DEPRECATED_TYPES = new Set([
+  'Contents (do not use)', 'CONTENTS (old)', 'Abatement (Hidden)', 'Testing (not copied)',
+  'MITIGATION (non contact)', 'A1 - SEATTLE', 'A1 RECON - SEATTLE', 'RECON', '24HR ROOFING PROS',
+]);
+
+function webhookTokenOk(req) {
+  if (!JN_WEBHOOK_TOKEN) return false;
+  const provided = String(req.query.token || req.headers['x-webhook-token'] || '');
+  const a = Buffer.from(provided);
+  const b = Buffer.from(JN_WEBHOOK_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// JobNimbus timestamps are unix seconds; be tolerant of ISO strings too.
+function jnToISO(v) {
+  if (v === undefined || v === null || v === '') return undefined;
+  if (typeof v === 'number') return v > 0 ? new Date(v * 1000).toISOString() : undefined;
+  if (/^\d+$/.test(String(v))) { const n = Number(v); return n > 0 ? new Date(n * 1000).toISOString() : undefined; }
+  const d = new Date(v); return isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+function jnToDate(v) { const iso = jnToISO(v); return iso ? iso.slice(0, 10) : undefined; }
+
+app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
+  if (!webhookTokenOk(req)) return res.status(401).json({ error: 'unauthorized' });
+
+  // Accept the record directly, or wrapped as {data:...} / an array of one.
+  let job = req.body;
+  if (job && typeof job === 'object' && job.data && typeof job.data === 'object') job = job.data;
+  if (Array.isArray(job)) job = job[0];
+  if (!job || typeof job !== 'object') return res.status(200).json({ ok: true, skipped: 'empty body' });
+
+  const jnid = job.jnid || job.id || job.recid;
+  if (!jnid) {
+    console.warn('[jn-webhook] no jnid; keys=', Object.keys(job).slice(0, 40).join(','));
+    return res.status(200).json({ ok: true, skipped: 'no jnid' });
+  }
+  // Log the payload key set (no PII) so we can confirm/adjust field mapping.
+  console.log('[jn-webhook]', String(jnid), 'type=', job.record_type_name, 'status=', job.status_name, 'keys=', Object.keys(job).length);
+
+  const recordType = job.record_type_name;
+  if (recordType && WEBHOOK_DEPRECATED_TYPES.has(recordType)) {
+    return res.status(200).json({ ok: true, skipped: 'deprecated type' });
+  }
+
+  // Prefer JobNimbus cf_string_* keys; fall back to display-name keys if present.
+  const pick = (...keys) => { for (const k of keys) { const v = job[k]; if (v !== undefined && v !== null && v !== '') return v; } return undefined; };
+
+  const row = { jn_id: String(jnid), last_synced: new Date().toISOString() };
+  const set = (col, val) => { if (val !== undefined) row[col] = val; };
+
+  const addrParts = [job.address_line1, job.city, (job.state_text || job.state), job.zip].filter(Boolean);
+  set('name', job.name || undefined);
+  set('number', job.number != null && job.number !== '' ? String(job.number) : undefined);
+  set('address', addrParts.length ? addrParts.join(', ') : undefined);
+  set('claim_number', pick('cf_string_2'));
+  set('client_phone', pick('parent_mobile_phone'));
+  set('adjuster_name', pick('cf_string_3'));
+  set('adjuster_phone', pick('cf_string_4'));
+  set('adjuster_email', pick('cf_string_5'));
+  set('lead_type', pick('cf_string_6', 'Lead Type'));
+  set('insurance_type', pick('cf_string_7', 'Insurance or Not Insurance'));
+  set('tested', pick('cf_string_8', 'Tested or Not Tested'));
+  set('insurer', pick('cf_string_9'));
+  set('cat', pick('cf_string_18'));
+  set('date_loss', jnToDate(job.cf_date_1));
+  set('date_start', jnToDate(job.start_date));
+  set('record_type', recordType || undefined);
+  set('status', job.status_name || undefined);
+  if (job.active !== undefined) set('is_active', !!job.active);
+  else if (job.is_active !== undefined) set('is_active', !!job.is_active);
+  set('jn_created', jnToISO(job.date_created));
+  set('jn_updated', jnToISO(job.date_modified || job.date_updated));
+
+  // Client name from the related contact, if the payload includes it.
+  const rel = Array.isArray(job.related) ? job.related : [];
+  const contact = rel.find(r => r && r.type === 'contact' && r.name);
+  if (contact) set('client_name', contact.name);
+
+  // Resolve JobNimbus numeric location id -> our locations.id UUID.
+  const jnLocRaw = job.location && (job.location.id ?? job.location);
+  if (jnLocRaw != null && /^\d+$/.test(String(jnLocRaw))) {
+    const jnLocId = Number(jnLocRaw);
+    set('jn_location_id', jnLocId);
+    try {
+      const lr = await fetch(`${SUPABASE_URL}/rest/v1/locations?jn_location_id=eq.${jnLocId}&select=id`, {
+        headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+      });
+      const locs = await lr.json();
+      if (Array.isArray(locs) && locs[0] && locs[0].id) set('location_id', locs[0].id);
+    } catch (err) { console.error('[jn-webhook] location lookup error', err.message); }
+  }
+
+  try {
+    const up = await fetch(`${SUPABASE_URL}/rest/v1/jobs?on_conflict=jn_id`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=minimal',
+      },
+      body: JSON.stringify(row),
+    });
+    if (!up.ok) {
+      const t = await up.text();
+      console.error('[jn-webhook] upsert failed', up.status, t.slice(0, 300));
+      return res.status(502).json({ ok: false, error: 'upsert failed' }); // JN may retry
+    }
+    return res.status(200).json({ ok: true, jn_id: String(jnid) });
+  } catch (err) {
+    console.error('[jn-webhook] error', err.message);
+    return res.status(502).json({ ok: false });
   }
 });
 
