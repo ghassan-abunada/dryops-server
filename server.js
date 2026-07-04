@@ -21,6 +21,11 @@ const GOOGLE_MAPS_KEY = (process.env.GOOGLE_MAPS_KEY || '').trim();
 // must also be listed in Supabase Auth → URL Configuration → Redirect URLs, or
 // Supabase ignores redirect_to and uses the project Site URL instead.
 const WEB_APP_URL = (process.env.WEB_APP_URL || 'https://dryops.app').trim();
+// CallRail (call tracking). API key + account id for pulling numbers/calls;
+// a separate shared secret gates the post-call webhook (?token=... in the URL).
+const CALLRAIL_API_KEY = (process.env.CALLRAIL_API_KEY || '').trim();
+const CALLRAIL_ACCOUNT_ID = (process.env.CALLRAIL_ACCOUNT_ID || '').trim();
+const CALLRAIL_WEBHOOK_TOKEN = (process.env.CALLRAIL_WEBHOOK_TOKEN || '').trim();
 
 // ── Fail fast on missing secrets ──────────────────────────────────────────────
 if (!process.env.JN_TOKEN) {
@@ -369,6 +374,184 @@ async function upsertRow(table, row) {
   });
   if (!up.ok) { const t = await up.text(); throw new Error(`${up.status} ${t.slice(0, 300)}`); }
 }
+
+// ── CallRail integration ──────────────────────────────────────────────────────
+function callrailWebhookOk(req) {
+  if (!CALLRAIL_WEBHOOK_TOKEN) return false;
+  const provided = String(req.query.token || req.headers['x-webhook-token'] || '');
+  const a = Buffer.from(provided);
+  const b = Buffer.from(CALLRAIL_WEBHOOK_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function normPhone(v) {
+  const d = String(v ?? '').replace(/\D/g, '');
+  return d.length >= 10 ? d.slice(-10) : (d || null);
+}
+function callrailToISO(v) {
+  if (v === undefined || v === null || v === '') return undefined;
+  const d = new Date(v); return isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+async function sbGet(pathAndQuery) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}`, {
+    headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+  });
+  return r.ok ? r.json() : null;
+}
+async function sbUpsert(table, rowOrRows, conflictCol) {
+  const up = await fetch(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=${conflictCol}`, {
+    method: 'POST',
+    headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify(rowOrRows),
+  });
+  if (!up.ok) { const t = await up.text(); throw new Error(`${up.status} ${t.slice(0, 300)}`); }
+}
+async function sbRpc(fn) {
+  await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+}
+async function callrailApi(pathAndQuery) {
+  const r = await fetch(`https://api.callrail.com/v3/a/${CALLRAIL_ACCOUNT_ID}/${pathAndQuery}`, {
+    headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json' },
+  });
+  const text = await r.text();
+  let json = null; try { json = JSON.parse(text); } catch {}
+  return { ok: r.ok, status: r.status, json };
+}
+
+// Map a CallRail call object → our `calls` row (raw fields only; location/job
+// resolution is done separately: inline for the webhook, set-based for backfill).
+function mapCallRow(call) {
+  const src = call.source || (call.lead_source && call.lead_source.source) || undefined;
+  return {
+    callrail_id: String(call.id ?? call.call_id ?? ''),
+    tracking_phone_number: call.tracking_phone_number || undefined,
+    customer_phone_number: call.customer_phone_number || undefined,
+    direction: call.direction || undefined,
+    duration: call.duration != null && call.duration !== '' ? Number(call.duration) : undefined,
+    answered: typeof call.answered === 'boolean' ? call.answered : undefined,
+    voicemail: typeof call.voicemail === 'boolean' ? call.voicemail : undefined,
+    first_call: typeof call.first_call === 'boolean' ? call.first_call : undefined,
+    source: src,
+    medium: call.medium || undefined,
+    campaign: call.campaign || undefined,
+    gclid: call.gclid || undefined,
+    customer_name: call.customer_name || undefined,
+    customer_city: call.customer_city || undefined,
+    customer_state: call.customer_state || undefined,
+    value: call.value != null && call.value !== '' ? Number(call.value) : undefined,
+    start_time: callrailToISO(call.start_time),
+    last_synced: new Date().toISOString(),
+  };
+}
+
+// Post-call webhook: CallRail POSTs each completed call here in real time.
+app.post('/webhooks/callrail/calls', async (req, res) => {
+  if (!callrailWebhookOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  let call = req.body;
+  if (call && typeof call === 'object' && call.data && typeof call.data === 'object') call = call.data;
+  if (Array.isArray(call)) call = call[0];
+  if (!call || typeof call !== 'object') return res.status(200).json({ ok: true, skipped: 'empty' });
+
+  const row = mapCallRow(call);
+  if (!row.callrail_id) return res.status(200).json({ ok: true, skipped: 'no id' });
+
+  try {
+    // Resolve location from the tracking-number assignment.
+    const trackNorm = normPhone(call.tracking_phone_number);
+    if (trackNorm) {
+      const t = await sbGet(`location_tracking_numbers?phone_norm=eq.${trackNorm}&select=location_id&limit=1`);
+      if (Array.isArray(t) && t[0] && t[0].location_id) row.location_id = t[0].location_id;
+    }
+    // Resolve job from the caller number (prefer same location).
+    const custNorm = normPhone(call.customer_phone_number);
+    if (custNorm) {
+      let j = row.location_id
+        ? await sbGet(`jobs?client_phone_norm=eq.${custNorm}&location_id=eq.${row.location_id}&select=id,date_contacted&order=jn_created.asc&limit=1`)
+        : null;
+      if (!j || !j.length) j = await sbGet(`jobs?client_phone_norm=eq.${custNorm}&select=id,date_contacted&order=jn_created.asc&limit=1`);
+      if (Array.isArray(j) && j[0]) {
+        row.job_id = j[0].id;
+        // Set date_contacted to the earliest matched call.
+        if (row.start_time && (!j[0].date_contacted || new Date(row.start_time) < new Date(j[0].date_contacted))) {
+          await fetch(`${SUPABASE_URL}/rest/v1/jobs?id=eq.${row.job_id}`, {
+            method: 'PATCH',
+            headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+            body: JSON.stringify({ date_contacted: row.start_time }),
+          });
+        }
+      }
+    }
+    await sbUpsert('calls', row, 'callrail_id');
+    return res.status(200).json({ ok: true, callrail_id: row.callrail_id, location_id: row.location_id || null, job_id: row.job_id || null });
+  } catch (err) {
+    console.error('[callrail-webhook] error', err.message);
+    return res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+// List CallRail tracking numbers (flattened from trackers), for the admin
+// assignment UI. The app fetches current assignments + suggestions itself.
+app.get('/admin/callrail/numbers', requireAuth, requireAdmin, async (req, res) => {
+  if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_ID) return res.status(400).json({ error: 'CallRail is not configured on the server' });
+  try {
+    const numbers = [];
+    for (let page = 1; page <= 20; page++) {
+      const r = await callrailApi(`trackers.json?per_page=250&page=${page}`);
+      if (!r.ok) { if (page === 1) return res.status(r.status).json({ error: 'CallRail API error', status: r.status }); break; }
+      const trackers = (r.json && (r.json.trackers || r.json.data)) || [];
+      for (const t of trackers) {
+        const nums = t.tracking_numbers || (t.tracking_number ? [t.tracking_number] : []);
+        for (const n of nums) {
+          numbers.push({
+            tracking_phone_number: n,
+            tracker_id: t.id || null,
+            tracker_name: t.name || null,
+            company_id: (t.company && t.company.id) || t.company_id || null,
+            company_name: (t.company && t.company.name) || null,
+            status: t.status || null,
+          });
+        }
+      }
+      const totalPages = r.json && (r.json.total_pages || r.json.pages);
+      if (trackers.length < 250 || (totalPages && page >= totalPages)) break;
+    }
+    return res.json({ ok: true, numbers });
+  } catch (err) {
+    console.error('[callrail-numbers] error', err.message);
+    return res.status(502).json({ error: err.message });
+  }
+});
+
+// One-time (or repeatable) historical backfill: pull calls in a date range,
+// bulk-upsert, then resolve location/job/date_contacted set-based.
+app.post('/admin/callrail/backfill', requireAuth, requireAdmin, async (req, res) => {
+  if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_ID) return res.status(400).json({ error: 'CallRail is not configured on the server' });
+  const { start_date, end_date } = req.body || {};
+  const fields = 'source,medium,campaign,gclid,first_call,duration,answered,voicemail,direction,value,customer_name,customer_city,customer_state';
+  const dateQ = (start_date && end_date) ? `&start_date=${start_date}&end_date=${end_date}` : '&date_range=last_90_days';
+  let fetched = 0, upserted = 0;
+  try {
+    for (let page = 1; page <= 200; page++) {
+      const r = await callrailApi(`calls.json?per_page=250&page=${page}&fields=${fields}${dateQ}`);
+      if (!r.ok) { if (page === 1) return res.status(r.status).json({ error: 'CallRail API error', status: r.status }); break; }
+      const calls = (r.json && (r.json.calls || r.json.data)) || [];
+      const rows = calls.map(mapCallRow).filter(row => row.callrail_id);
+      if (rows.length) { await sbUpsert('calls', rows, 'callrail_id'); upserted += rows.length; }
+      fetched += calls.length;
+      const totalPages = r.json && (r.json.total_pages || r.json.pages);
+      if (calls.length < 250 || (totalPages && page >= totalPages)) break;
+    }
+    await sbRpc('callrail_resolve_all'); // fill location_id/job_id + date_contacted set-based
+    return res.json({ ok: true, fetched, upserted });
+  } catch (err) {
+    console.error('[callrail-backfill] error', err.message);
+    return res.status(502).json({ error: err.message, fetched, upserted });
+  }
+});
 
 // ── JobNimbus invoice webhook ─────────────────────────────────────────────────
 // POST /webhooks/jobnimbus/invoices — same secret gate as the jobs webhook.
