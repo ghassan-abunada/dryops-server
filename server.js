@@ -462,25 +462,28 @@ async function fetchCallsPage(acct, page, fields, dateQ) {
 // Map a CallRail call object → our `calls` row (raw fields only; location/job
 // resolution is done separately: inline for the webhook, set-based for backfill).
 function mapCallRow(call) {
-  const src = call.source || (call.lead_source && call.lead_source.source) || undefined;
+  // Use null (not undefined) for every field: JSON.stringify drops undefined
+  // keys, and PostgREST bulk insert requires all objects to share identical keys
+  // (else PGRST102 "All object keys must match" rejects the whole batch).
+  const src = call.source || (call.lead_source && call.lead_source.source) || null;
   return {
     callrail_id: String(call.id ?? call.call_id ?? ''),
-    tracking_phone_number: call.tracking_phone_number || undefined,
-    customer_phone_number: call.customer_phone_number || undefined,
-    direction: call.direction || undefined,
-    duration: call.duration != null && call.duration !== '' ? Number(call.duration) : undefined,
-    answered: typeof call.answered === 'boolean' ? call.answered : undefined,
-    voicemail: typeof call.voicemail === 'boolean' ? call.voicemail : undefined,
-    first_call: typeof call.first_call === 'boolean' ? call.first_call : undefined,
+    tracking_phone_number: call.tracking_phone_number || null,
+    customer_phone_number: call.customer_phone_number || null,
+    direction: call.direction || null,
+    duration: call.duration != null && call.duration !== '' ? Number(call.duration) : null,
+    answered: typeof call.answered === 'boolean' ? call.answered : null,
+    voicemail: typeof call.voicemail === 'boolean' ? call.voicemail : null,
+    first_call: typeof call.first_call === 'boolean' ? call.first_call : null,
     source: src,
-    medium: call.medium || undefined,
-    campaign: call.campaign || undefined,
-    gclid: call.gclid || undefined,
-    customer_name: call.customer_name || undefined,
-    customer_city: call.customer_city || undefined,
-    customer_state: call.customer_state || undefined,
-    value: call.value != null && call.value !== '' ? Number(call.value) : undefined,
-    start_time: callrailToISO(call.start_time),
+    medium: call.medium || null,
+    campaign: call.campaign || null,
+    gclid: call.gclid || null,
+    customer_name: call.customer_name || null,
+    customer_city: call.customer_city || null,
+    customer_state: call.customer_state || null,
+    value: call.value != null && call.value !== '' ? Number(call.value) : null,
+    start_time: callrailToISO(call.start_time) ?? null,
     last_synced: new Date().toISOString(),
   };
 }
