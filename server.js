@@ -24,7 +24,10 @@ const WEB_APP_URL = (process.env.WEB_APP_URL || 'https://dryops.app').trim();
 // CallRail (call tracking). API key + account id for pulling numbers/calls;
 // a separate shared secret gates the post-call webhook (?token=... in the URL).
 const CALLRAIL_API_KEY = (process.env.CALLRAIL_API_KEY || '').trim();
-const CALLRAIL_ACCOUNT_ID = (process.env.CALLRAIL_ACCOUNT_ID || '').trim();
+// One or more CallRail account ids (comma-separated) — the same API key can
+// access multiple accounts. Accepts CALLRAIL_ACCOUNT_IDS or the legacy singular.
+const CALLRAIL_ACCOUNT_IDS = (process.env.CALLRAIL_ACCOUNT_IDS || process.env.CALLRAIL_ACCOUNT_ID || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
 const CALLRAIL_WEBHOOK_TOKEN = (process.env.CALLRAIL_WEBHOOK_TOKEN || '').trim();
 
 // ── Fail fast on missing secrets ──────────────────────────────────────────────
@@ -413,13 +416,20 @@ async function sbRpc(fn) {
     body: '{}',
   });
 }
-async function callrailApi(pathAndQuery) {
-  const r = await fetch(`https://api.callrail.com/v3/a/${CALLRAIL_ACCOUNT_ID}/${pathAndQuery}`, {
+async function callrailApi(accountId, pathAndQuery) {
+  const r = await fetch(`https://api.callrail.com/v3/a/${accountId}/${pathAndQuery}`, {
     headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json' },
   });
   const text = await r.text();
   let json = null; try { json = JSON.parse(text); } catch {}
   return { ok: r.ok, status: r.status, json };
+}
+async function callrailAccounts() {
+  const r = await fetch('https://api.callrail.com/v3/a.json', {
+    headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json' },
+  });
+  if (!r.ok) return [];
+  const j = await r.json(); return (j && (j.accounts || j.data)) || [];
 }
 
 // Map a CallRail call object → our `calls` row (raw fields only; location/job
@@ -494,11 +504,11 @@ app.post('/webhooks/callrail/calls', async (req, res) => {
 });
 
 // TEMPORARY setup helper: returns CallRail accounts (id + name) using the API
-// key, ONLY while CALLRAIL_ACCOUNT_ID isn't configured yet. Self-disables (410)
-// once the account id is set, so it needs no manual removal.
+// key, ONLY while no account ids are configured yet. Self-disables (410) once
+// CALLRAIL_ACCOUNT_IDS is set, so it needs no manual removal.
 app.get('/admin/callrail/accounts', async (req, res) => {
   if (!CALLRAIL_API_KEY) return res.status(400).json({ error: 'CALLRAIL_API_KEY is not set' });
-  if (CALLRAIL_ACCOUNT_ID) return res.status(410).json({ error: 'Already configured (CALLRAIL_ACCOUNT_ID set)' });
+  if (CALLRAIL_ACCOUNT_IDS.length) return res.status(410).json({ error: 'Already configured (CALLRAIL_ACCOUNT_IDS set)' });
   try {
     const r = await fetch('https://api.callrail.com/v3/a.json', {
       headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json' },
@@ -516,28 +526,33 @@ app.get('/admin/callrail/accounts', async (req, res) => {
 // List CallRail tracking numbers (flattened from trackers), for the admin
 // assignment UI. The app fetches current assignments + suggestions itself.
 app.get('/admin/callrail/numbers', requireAuth, requireAdmin, async (req, res) => {
-  if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_ID) return res.status(400).json({ error: 'CallRail is not configured on the server' });
+  if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return res.status(400).json({ error: 'CallRail is not configured on the server' });
   try {
+    const nameById = Object.fromEntries((await callrailAccounts()).map(a => [a.id, a.name]));
     const numbers = [];
-    for (let page = 1; page <= 20; page++) {
-      const r = await callrailApi(`trackers.json?per_page=250&page=${page}`);
-      if (!r.ok) { if (page === 1) return res.status(r.status).json({ error: 'CallRail API error', status: r.status }); break; }
-      const trackers = (r.json && (r.json.trackers || r.json.data)) || [];
-      for (const t of trackers) {
-        const nums = t.tracking_numbers || (t.tracking_number ? [t.tracking_number] : []);
-        for (const n of nums) {
-          numbers.push({
-            tracking_phone_number: n,
-            tracker_id: t.id || null,
-            tracker_name: t.name || null,
-            company_id: (t.company && t.company.id) || t.company_id || null,
-            company_name: (t.company && t.company.name) || null,
-            status: t.status || null,
-          });
+    for (const acct of CALLRAIL_ACCOUNT_IDS) {
+      for (let page = 1; page <= 20; page++) {
+        const r = await callrailApi(acct, `trackers.json?per_page=250&page=${page}`);
+        if (!r.ok) break;
+        const trackers = (r.json && (r.json.trackers || r.json.data)) || [];
+        for (const t of trackers) {
+          const nums = t.tracking_numbers || (t.tracking_number ? [t.tracking_number] : []);
+          for (const n of nums) {
+            numbers.push({
+              tracking_phone_number: n,
+              tracker_id: t.id || null,
+              tracker_name: t.name || null,
+              company_id: (t.company && t.company.id) || t.company_id || null,
+              company_name: (t.company && t.company.name) || null,
+              account_id: acct,
+              account_name: nameById[acct] || null,
+              status: t.status || null,
+            });
+          }
         }
+        const totalPages = r.json && (r.json.total_pages || r.json.pages);
+        if (trackers.length < 250 || (totalPages && page >= totalPages)) break;
       }
-      const totalPages = r.json && (r.json.total_pages || r.json.pages);
-      if (trackers.length < 250 || (totalPages && page >= totalPages)) break;
     }
     return res.json({ ok: true, numbers });
   } catch (err) {
@@ -549,21 +564,23 @@ app.get('/admin/callrail/numbers', requireAuth, requireAdmin, async (req, res) =
 // One-time (or repeatable) historical backfill: pull calls in a date range,
 // bulk-upsert, then resolve location/job/date_contacted set-based.
 app.post('/admin/callrail/backfill', requireAuth, requireAdmin, async (req, res) => {
-  if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_ID) return res.status(400).json({ error: 'CallRail is not configured on the server' });
+  if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return res.status(400).json({ error: 'CallRail is not configured on the server' });
   const { start_date, end_date } = req.body || {};
   const fields = 'source,medium,campaign,gclid,first_call,duration,answered,voicemail,direction,value,customer_name,customer_city,customer_state';
   const dateQ = (start_date && end_date) ? `&start_date=${start_date}&end_date=${end_date}` : '&date_range=last_90_days';
   let fetched = 0, upserted = 0;
   try {
-    for (let page = 1; page <= 200; page++) {
-      const r = await callrailApi(`calls.json?per_page=250&page=${page}&fields=${fields}${dateQ}`);
-      if (!r.ok) { if (page === 1) return res.status(r.status).json({ error: 'CallRail API error', status: r.status }); break; }
-      const calls = (r.json && (r.json.calls || r.json.data)) || [];
-      const rows = calls.map(mapCallRow).filter(row => row.callrail_id);
-      if (rows.length) { await sbUpsert('calls', rows, 'callrail_id'); upserted += rows.length; }
-      fetched += calls.length;
-      const totalPages = r.json && (r.json.total_pages || r.json.pages);
-      if (calls.length < 250 || (totalPages && page >= totalPages)) break;
+    for (const acct of CALLRAIL_ACCOUNT_IDS) {
+      for (let page = 1; page <= 200; page++) {
+        const r = await callrailApi(acct, `calls.json?per_page=250&page=${page}&fields=${fields}${dateQ}`);
+        if (!r.ok) break;
+        const calls = (r.json && (r.json.calls || r.json.data)) || [];
+        const rows = calls.map(mapCallRow).filter(row => row.callrail_id);
+        if (rows.length) { await sbUpsert('calls', rows, 'callrail_id'); upserted += rows.length; }
+        fetched += calls.length;
+        const totalPages = r.json && (r.json.total_pages || r.json.pages);
+        if (calls.length < 250 || (totalPages && page >= totalPages)) break;
+      }
     }
     await sbRpc('callrail_resolve_all'); // fill location_id/job_id + date_contacted set-based
     return res.json({ ok: true, fetched, upserted });
