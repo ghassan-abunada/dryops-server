@@ -623,7 +623,10 @@ app.post('/admin/callrail/backfill', requireCallAccess, async (req, res) => {
   // Only OPTIONAL attribution fields (source/medium/campaign/first_call/gclid);
   // phone, answered, duration, direction, start_time, customer_* are defaults.
   const fields = 'source,medium,campaign,first_call,gclid';
-  const dateQ = (start_date && end_date) ? `&start_date=${start_date}&end_date=${end_date}` : '&date_range=last_90_days';
+  // CallRail date_range must be one of: recent,today,yesterday,last_7_days,
+  // last_30_days,this_month,last_month,this_year,last_year,all_time. Default to
+  // full history so job-matching / date_contacted / suggestions have everything.
+  const dateQ = (start_date && end_date) ? `&start_date=${start_date}&end_date=${end_date}` : '&date_range=all_time';
 
   // Probe account #1 page 1 synchronously so config/auth/param errors + the
   // available call count surface in the response (the full pull runs in bg).
