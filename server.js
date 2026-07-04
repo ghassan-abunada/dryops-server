@@ -654,7 +654,14 @@ app.post('/admin/callrail/backfill', requireCallAccess, async (req, res) => {
           const r = await fetchCallsPage(acct, page, fields, dateQ);
           if (!r.ok) { firstErr = firstErr || `fetch ${acct} p${page} HTTP ${r.status}`; console.error('[callrail-backfill] api', acct, r.status); break; }
           const calls = (r.json && (r.json.calls || r.json.data)) || [];
-          const rows = calls.map(mapCallRow).filter(row => row.callrail_id);
+          // Dedupe by callrail_id within the batch — a repeated conflict target
+          // in one upsert statement makes Postgres reject the whole batch.
+          const seen = new Set();
+          const rows = [];
+          for (const c of calls) {
+            const row = mapCallRow(c);
+            if (row.callrail_id && !seen.has(row.callrail_id)) { seen.add(row.callrail_id); rows.push(row); }
+          }
           if (rows.length) {
             try { await sbUpsert('calls', rows, 'callrail_id'); upserted += rows.length; }
             catch (ue) { firstErr = firstErr || `upsert: ${ue.message}`; throw ue; }
