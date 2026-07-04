@@ -571,7 +571,7 @@ app.get('/admin/callrail/diag', async (req, res) => {
       all_time:    { status: nfAll.status, total: nfAll.json ? (nfAll.json.total_records ?? null) : null, error: err(nfAll) },
     });
   }
-  return res.json({ ok: true, accounts: out });
+  return res.json({ ok: true, accounts: out, running: callrailBackfillRunning, last_backfill: lastBackfillResult });
 });
 
 // List CallRail tracking numbers (flattened from trackers), for the admin
@@ -616,6 +616,7 @@ app.get('/admin/callrail/numbers', requireCallAccess, async (req, res) => {
 // then resolve location/job/date_contacted set-based. Runs in the BACKGROUND —
 // responds 202 immediately so long pulls can't time out; progress is logged.
 let callrailBackfillRunning = false;
+let lastBackfillResult = null; // captured for the self-disabling diag endpoint
 app.post('/admin/callrail/backfill', requireCallAccess, async (req, res) => {
   if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return res.status(400).json({ error: 'CallRail is not configured on the server' });
   if (callrailBackfillRunning) return res.status(409).json({ error: 'A backfill is already running' });
@@ -642,25 +643,32 @@ app.post('/admin/callrail/backfill', requireCallAccess, async (req, res) => {
   };
 
   callrailBackfillRunning = true;
+  lastBackfillResult = { phase: 'started', probe, fetched: 0, upserted: 0, error: null, at: new Date().toISOString() };
   res.status(202).json({ ok: true, started: true, probe }); // respond now; process below
 
   (async () => {
-    let fetched = 0, upserted = 0;
+    let fetched = 0, upserted = 0, firstErr = null;
     try {
       for (const acct of CALLRAIL_ACCOUNT_IDS) {
         for (let page = 1; page <= 200; page++) {
           const r = await fetchCallsPage(acct, page, fields, dateQ);
-          if (!r.ok) { console.error('[callrail-backfill] api', acct, r.status); break; }
+          if (!r.ok) { firstErr = firstErr || `fetch ${acct} p${page} HTTP ${r.status}`; console.error('[callrail-backfill] api', acct, r.status); break; }
           const calls = (r.json && (r.json.calls || r.json.data)) || [];
           const rows = calls.map(mapCallRow).filter(row => row.callrail_id);
-          if (rows.length) { await sbUpsert('calls', rows, 'callrail_id'); upserted += rows.length; }
+          if (rows.length) {
+            try { await sbUpsert('calls', rows, 'callrail_id'); upserted += rows.length; }
+            catch (ue) { firstErr = firstErr || `upsert: ${ue.message}`; throw ue; }
+          }
           fetched += calls.length;
+          lastBackfillResult = { phase: 'running', fetched, upserted, error: firstErr, at: new Date().toISOString() };
           if (calls.length < 250) break;
         }
       }
       await sbRpc('callrail_resolve_all'); // fill location_id/job_id + date_contacted
+      lastBackfillResult = { phase: 'done', fetched, upserted, error: firstErr, at: new Date().toISOString() };
       console.log('[callrail-backfill] done', { fetched, upserted });
     } catch (err) {
+      lastBackfillResult = { phase: 'error', fetched, upserted, error: firstErr || err.message, at: new Date().toISOString() };
       console.error('[callrail-backfill] error', err.message);
     } finally {
       callrailBackfillRunning = false;
