@@ -118,6 +118,26 @@ async function requireAdmin(req, res, next) {
   }
 }
 
+// Like requireAdmin but also allows the executive role — used ONLY for the
+// CallRail endpoints (executives manage call tracking; they get no other writes).
+async function requireCallAccess(req, res, next) {
+  return requireAuth(req, res, async () => {
+    try {
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${req.userId}&select=role`, {
+        headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+      });
+      if (!r.ok) return res.status(403).json({ error: 'Access required' });
+      const rows = await r.json();
+      const role = Array.isArray(rows) && rows[0] ? rows[0].role : null;
+      if (!['admin', 'owner', 'executive'].includes(role)) return res.status(403).json({ error: 'Access required' });
+      next();
+    } catch (err) {
+      console.error('[call-access check error]', err.message);
+      res.status(502).json({ error: 'Role verification failed' });
+    }
+  });
+}
+
 // ── JobNimbus API proxy (avoids CORS) ─────────────────────────────────────────
 // EXCEPTION (deliberate, per owner decision 2026-07-02): the drying-log web
 // tool served from public/ does an unauthenticated `GET /jnapi/jobs?q=...`
@@ -525,7 +545,7 @@ app.get('/admin/callrail/accounts', async (req, res) => {
 
 // List CallRail tracking numbers (flattened from trackers), for the admin
 // assignment UI. The app fetches current assignments + suggestions itself.
-app.get('/admin/callrail/numbers', requireAuth, requireAdmin, async (req, res) => {
+app.get('/admin/callrail/numbers', requireCallAccess, async (req, res) => {
   if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return res.status(400).json({ error: 'CallRail is not configured on the server' });
   try {
     const nameById = Object.fromEntries((await callrailAccounts()).map(a => [a.id, a.name]));
@@ -565,7 +585,7 @@ app.get('/admin/callrail/numbers', requireAuth, requireAdmin, async (req, res) =
 // then resolve location/job/date_contacted set-based. Runs in the BACKGROUND —
 // responds 202 immediately so long pulls can't time out; progress is logged.
 let callrailBackfillRunning = false;
-app.post('/admin/callrail/backfill', requireAuth, requireAdmin, async (req, res) => {
+app.post('/admin/callrail/backfill', requireCallAccess, async (req, res) => {
   if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return res.status(400).json({ error: 'CallRail is not configured on the server' });
   if (callrailBackfillRunning) return res.status(409).json({ error: 'A backfill is already running' });
   const { start_date, end_date } = req.body || {};
