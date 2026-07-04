@@ -451,6 +451,13 @@ async function callrailAccounts() {
   if (!r.ok) return [];
   const j = await r.json(); return (j && (j.accounts || j.data)) || [];
 }
+// Fetch one page of calls. If the optional `fields` param 400s (a field name not
+// valid for the account's plan poisons the whole request), retry with defaults.
+async function fetchCallsPage(acct, page, fields, dateQ) {
+  let r = await callrailApi(acct, `calls.json?per_page=250&page=${page}&fields=${fields}${dateQ}`);
+  if (!r.ok && fields) r = await callrailApi(acct, `calls.json?per_page=250&page=${page}${dateQ}`);
+  return r;
+}
 
 // Map a CallRail call object → our `calls` row (raw fields only; location/job
 // resolution is done separately: inline for the webhook, set-based for backfill).
@@ -589,25 +596,39 @@ app.post('/admin/callrail/backfill', requireCallAccess, async (req, res) => {
   if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return res.status(400).json({ error: 'CallRail is not configured on the server' });
   if (callrailBackfillRunning) return res.status(409).json({ error: 'A backfill is already running' });
   const { start_date, end_date } = req.body || {};
-  const fields = 'source,medium,campaign,gclid,first_call,duration,answered,voicemail,direction,value,customer_name,customer_city,customer_state';
+  // Only OPTIONAL attribution fields (source/medium/campaign/first_call/gclid);
+  // phone, answered, duration, direction, start_time, customer_* are defaults.
+  const fields = 'source,medium,campaign,first_call,gclid';
   const dateQ = (start_date && end_date) ? `&start_date=${start_date}&end_date=${end_date}` : '&date_range=last_90_days';
 
+  // Probe account #1 page 1 synchronously so config/auth/param errors + the
+  // available call count surface in the response (the full pull runs in bg).
+  const probeAcct = CALLRAIL_ACCOUNT_IDS[0];
+  const p = await fetchCallsPage(probeAcct, 1, fields, dateQ);
+  const pcalls = (p.json && (p.json.calls || p.json.data)) || [];
+  const probe = {
+    account: probeAcct,
+    status: p.status,
+    total_records: p.json ? (p.json.total_records ?? p.json.total ?? null) : null,
+    page_count: pcalls.length,
+    error: p.ok ? undefined : ((p.json && (p.json.error || p.json.message)) || `CallRail HTTP ${p.status}`),
+  };
+
   callrailBackfillRunning = true;
-  res.status(202).json({ ok: true, started: true }); // respond now; process below
+  res.status(202).json({ ok: true, started: true, probe }); // respond now; process below
 
   (async () => {
     let fetched = 0, upserted = 0;
     try {
       for (const acct of CALLRAIL_ACCOUNT_IDS) {
         for (let page = 1; page <= 200; page++) {
-          const r = await callrailApi(acct, `calls.json?per_page=250&page=${page}&fields=${fields}${dateQ}`);
+          const r = await fetchCallsPage(acct, page, fields, dateQ);
           if (!r.ok) { console.error('[callrail-backfill] api', acct, r.status); break; }
           const calls = (r.json && (r.json.calls || r.json.data)) || [];
           const rows = calls.map(mapCallRow).filter(row => row.callrail_id);
           if (rows.length) { await sbUpsert('calls', rows, 'callrail_id'); upserted += rows.length; }
           fetched += calls.length;
-          const totalPages = r.json && (r.json.total_pages || r.json.pages);
-          if (calls.length < 250 || (totalPages && page >= totalPages)) break;
+          if (calls.length < 250) break;
         }
       }
       await sbRpc('callrail_resolve_all'); // fill location_id/job_id + date_contacted
