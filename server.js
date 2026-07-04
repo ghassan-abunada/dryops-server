@@ -493,6 +493,26 @@ app.post('/webhooks/callrail/calls', async (req, res) => {
   }
 });
 
+// TEMPORARY setup helper: returns CallRail accounts (id + name) using the API
+// key, ONLY while CALLRAIL_ACCOUNT_ID isn't configured yet. Self-disables (410)
+// once the account id is set, so it needs no manual removal.
+app.get('/admin/callrail/accounts', async (req, res) => {
+  if (!CALLRAIL_API_KEY) return res.status(400).json({ error: 'CALLRAIL_API_KEY is not set' });
+  if (CALLRAIL_ACCOUNT_ID) return res.status(410).json({ error: 'Already configured (CALLRAIL_ACCOUNT_ID set)' });
+  try {
+    const r = await fetch('https://api.callrail.com/v3/a.json', {
+      headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json' },
+    });
+    const text = await r.text();
+    let json = null; try { json = JSON.parse(text); } catch {}
+    if (!r.ok) return res.status(r.status).json({ error: 'CallRail API error', status: r.status, body: text.slice(0, 300) });
+    const accounts = (json && (json.accounts || json.data)) || [];
+    return res.json({ ok: true, accounts: accounts.map(a => ({ id: a.id, name: a.name })) });
+  } catch (err) {
+    return res.status(502).json({ error: err.message });
+  }
+});
+
 // List CallRail tracking numbers (flattened from trackers), for the admin
 // assignment UI. The app fetches current assignments + suggestions itself.
 app.get('/admin/callrail/numbers', requireAuth, requireAdmin, async (req, res) => {
