@@ -561,33 +561,43 @@ app.get('/admin/callrail/numbers', requireAuth, requireAdmin, async (req, res) =
   }
 });
 
-// One-time (or repeatable) historical backfill: pull calls in a date range,
-// bulk-upsert, then resolve location/job/date_contacted set-based.
+// Historical backfill: pull calls (all accounts) in a date range, bulk-upsert,
+// then resolve location/job/date_contacted set-based. Runs in the BACKGROUND —
+// responds 202 immediately so long pulls can't time out; progress is logged.
+let callrailBackfillRunning = false;
 app.post('/admin/callrail/backfill', requireAuth, requireAdmin, async (req, res) => {
   if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return res.status(400).json({ error: 'CallRail is not configured on the server' });
+  if (callrailBackfillRunning) return res.status(409).json({ error: 'A backfill is already running' });
   const { start_date, end_date } = req.body || {};
   const fields = 'source,medium,campaign,gclid,first_call,duration,answered,voicemail,direction,value,customer_name,customer_city,customer_state';
   const dateQ = (start_date && end_date) ? `&start_date=${start_date}&end_date=${end_date}` : '&date_range=last_90_days';
-  let fetched = 0, upserted = 0;
-  try {
-    for (const acct of CALLRAIL_ACCOUNT_IDS) {
-      for (let page = 1; page <= 200; page++) {
-        const r = await callrailApi(acct, `calls.json?per_page=250&page=${page}&fields=${fields}${dateQ}`);
-        if (!r.ok) break;
-        const calls = (r.json && (r.json.calls || r.json.data)) || [];
-        const rows = calls.map(mapCallRow).filter(row => row.callrail_id);
-        if (rows.length) { await sbUpsert('calls', rows, 'callrail_id'); upserted += rows.length; }
-        fetched += calls.length;
-        const totalPages = r.json && (r.json.total_pages || r.json.pages);
-        if (calls.length < 250 || (totalPages && page >= totalPages)) break;
+
+  callrailBackfillRunning = true;
+  res.status(202).json({ ok: true, started: true }); // respond now; process below
+
+  (async () => {
+    let fetched = 0, upserted = 0;
+    try {
+      for (const acct of CALLRAIL_ACCOUNT_IDS) {
+        for (let page = 1; page <= 200; page++) {
+          const r = await callrailApi(acct, `calls.json?per_page=250&page=${page}&fields=${fields}${dateQ}`);
+          if (!r.ok) { console.error('[callrail-backfill] api', acct, r.status); break; }
+          const calls = (r.json && (r.json.calls || r.json.data)) || [];
+          const rows = calls.map(mapCallRow).filter(row => row.callrail_id);
+          if (rows.length) { await sbUpsert('calls', rows, 'callrail_id'); upserted += rows.length; }
+          fetched += calls.length;
+          const totalPages = r.json && (r.json.total_pages || r.json.pages);
+          if (calls.length < 250 || (totalPages && page >= totalPages)) break;
+        }
       }
+      await sbRpc('callrail_resolve_all'); // fill location_id/job_id + date_contacted
+      console.log('[callrail-backfill] done', { fetched, upserted });
+    } catch (err) {
+      console.error('[callrail-backfill] error', err.message);
+    } finally {
+      callrailBackfillRunning = false;
     }
-    await sbRpc('callrail_resolve_all'); // fill location_id/job_id + date_contacted set-based
-    return res.json({ ok: true, fetched, upserted });
-  } catch (err) {
-    console.error('[callrail-backfill] error', err.message);
-    return res.status(502).json({ error: err.message, fetched, upserted });
-  }
+  })();
 });
 
 // ── JobNimbus invoice webhook ─────────────────────────────────────────────────
