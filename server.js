@@ -550,6 +550,30 @@ app.get('/admin/callrail/accounts', async (req, res) => {
   }
 });
 
+// TEMPORARY self-disabling diagnostic: reports what CallRail's calls endpoint
+// returns per account (HTTP status + total count only — NO call data), while the
+// calls table is still empty. Returns 410 once any calls exist. Same safe pattern
+// as the accounts setup helper; lets setup verify the pull without app/alerts.
+app.get('/admin/callrail/diag', async (req, res) => {
+  if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return res.status(400).json({ error: 'CallRail is not configured' });
+  const existing = await sbGet('calls?select=id&limit=1');
+  if (Array.isArray(existing) && existing.length) return res.status(410).json({ error: 'Calls already present; diagnostic disabled' });
+  const err = (x) => x.ok ? undefined : ((x.json && (x.json.error || x.json.message)) || `HTTP ${x.status}`);
+  const out = [];
+  for (const acct of CALLRAIL_ACCOUNT_IDS) {
+    const wf = await callrailApi(acct, 'calls.json?per_page=1&fields=source,medium,campaign,first_call,gclid&date_range=last_90_days');
+    const nf = await callrailApi(acct, 'calls.json?per_page=1&date_range=last_90_days');
+    const nfAll = await callrailApi(acct, 'calls.json?per_page=1&date_range=all_time');
+    out.push({
+      account: acct,
+      with_fields: { status: wf.status, total_90d: wf.json ? (wf.json.total_records ?? null) : null, error: err(wf) },
+      no_fields:   { status: nf.status, total_90d: nf.json ? (nf.json.total_records ?? null) : null, error: err(nf) },
+      all_time:    { status: nfAll.status, total: nfAll.json ? (nfAll.json.total_records ?? null) : null, error: err(nfAll) },
+    });
+  }
+  return res.json({ ok: true, accounts: out });
+});
+
 // List CallRail tracking numbers (flattened from trackers), for the admin
 // assignment UI. The app fetches current assignments + suggestions itself.
 app.get('/admin/callrail/numbers', requireCallAccess, async (req, res) => {
