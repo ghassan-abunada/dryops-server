@@ -21,6 +21,12 @@ const GOOGLE_MAPS_KEY = (process.env.GOOGLE_MAPS_KEY || '').trim();
 // must also be listed in Supabase Auth → URL Configuration → Redirect URLs, or
 // Supabase ignores redirect_to and uses the project Site URL instead.
 const WEB_APP_URL = (process.env.WEB_APP_URL || 'https://dryops.app').trim();
+// Twilio (SMS for referral-program lead source invites). If unset, invite rows
+// are still created but SMS sending reports "not configured" so owners can
+// resend once the vars are added in Railway.
+const TWILIO_ACCOUNT_SID = (process.env.TWILIO_ACCOUNT_SID || '').trim();
+const TWILIO_AUTH_TOKEN = (process.env.TWILIO_AUTH_TOKEN || '').trim();
+const TWILIO_FROM_NUMBER = (process.env.TWILIO_FROM_NUMBER || '').trim();
 // CallRail (call tracking). API key + account id for pulling numbers/calls;
 // a separate shared secret gates the post-call webhook (?token=... in the URL).
 const CALLRAIL_API_KEY = (process.env.CALLRAIL_API_KEY || '').trim();
@@ -409,6 +415,36 @@ function callrailWebhookOk(req) {
 function normPhone(v) {
   const d = String(v ?? '').replace(/\D/g, '');
   return d.length >= 10 ? d.slice(-10) : (d || null);
+}
+// Strict E.164 for outbound SMS (unlike normPhone's last-10 matching form).
+// Bare 10-digit numbers are assumed US (+1).
+function toE164(v) {
+  const raw = String(v ?? '').trim();
+  if (/^\+\d{8,15}$/.test(raw)) return raw;
+  const d = raw.replace(/\D/g, '');
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith('1')) return `+${d}`;
+  return null;
+}
+async function sendSms(to, body) {
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) {
+    return { ok: false, error: 'SMS not configured (set TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER)' };
+  }
+  try {
+    const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Basic ' + Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64'),
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ To: to, From: TWILIO_FROM_NUMBER, Body: body }),
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok) return { ok: false, error: (j && j.message) || `Twilio error ${r.status}` };
+    return { ok: true, sid: j && j.sid };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 }
 function callrailToISO(v) {
   if (v === undefined || v === null || v === '') return undefined;
@@ -1151,6 +1187,120 @@ app.patch('/api/companies/:id', requireAuth, requireAdmin, async (req, res) => {
     res.status(r.status).json(body);
   } catch(err) {
     console.error('[companies PATCH error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ── Referral program: lead source invites (admin/owner only) ─────────────────
+// Creates the lead_sources row (service key — token generation and SMS happen
+// in one call) and texts the lead source a tokenized signup link. The row is
+// kept even when the SMS fails so the owner can fix Twilio config and resend.
+function leadSourceStructureError(b) {
+  const basisOk = v => v === 'fixed' || v === 'percent';
+  const rateOk = v => Number.isFinite(Number(v)) && Number(v) > 0;
+  if (b.split_by_payer) {
+    if (!basisOk(b.ins_basis) || !rateOk(b.ins_rate)) return 'insurance structure requires a basis (fixed/percent) and a positive rate';
+    if (!basisOk(b.oop_basis) || !rateOk(b.oop_rate)) return 'out-of-pocket structure requires a basis (fixed/percent) and a positive rate';
+  } else {
+    if (!basisOk(b.referral_basis) || !rateOk(b.referral_rate)) return 'referral structure requires a basis (fixed/percent) and a positive rate';
+  }
+  return null;
+}
+
+function inviteSmsBody(name, locName, token) {
+  return `Hi ${name}! ${locName} has invited you to join their referral program. Sign up here: ${WEB_APP_URL}/referral?token=${token}`;
+}
+
+app.post('/admin/lead-sources/invite', requireAuth, requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const { location_id, company_id, source_type, name } = b;
+  if (!location_id || !company_id || !source_type || !name || !String(name).trim()) {
+    return res.status(400).json({ error: 'location_id, company_id, source_type and name are required' });
+  }
+  if (!UUID_RE.test(String(company_id))) return res.status(400).json({ error: 'Invalid company id' });
+  const phone = toE164(b.phone);
+  if (!phone) return res.status(400).json({ error: 'Invalid phone number' });
+  const shapeErr = leadSourceStructureError(b);
+  if (shapeErr) return res.status(400).json({ error: shapeErr });
+
+  const split = !!b.split_by_payer;
+  const inviteToken = crypto.randomBytes(24).toString('hex');
+  const now = new Date().toISOString();
+  const row = {
+    location_id: String(location_id),
+    company_id,
+    source_type: String(source_type),
+    name: String(name).trim(),
+    phone,
+    split_by_payer: split,
+    referral_basis: split ? null : b.referral_basis,
+    referral_rate: split ? null : Number(b.referral_rate),
+    ins_basis: split ? b.ins_basis : null,
+    ins_rate: split ? Number(b.ins_rate) : null,
+    oop_basis: split ? b.oop_basis : null,
+    oop_rate: split ? Number(b.oop_rate) : null,
+    percent_scope: b.percent_scope === 'first_invoice' ? 'first_invoice' : 'revenue',
+    invite_token: inviteToken,
+    status: 'invited',
+    invited_at: now,
+    last_invited_at: now,
+    invite_count: 1,
+    created_by: req.userId || null,
+  };
+
+  try {
+    const cr = await fetch(`${SUPABASE_URL}/rest/v1/lead_sources`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json', Prefer: 'return=representation' },
+      body: JSON.stringify(row),
+    });
+    const body = await cr.json().catch(() => null);
+    if (!cr.ok) {
+      if (cr.status === 409) return res.status(409).json({ error: 'A lead source with this phone number already exists for this location' });
+      const msg = (body && (body.message || body.error)) || 'create lead source failed';
+      return res.status(cr.status).json({ error: msg });
+    }
+    const leadSource = Array.isArray(body) ? body[0] : body;
+
+    const locs = await sbGet(`locations?id=eq.${encodeURIComponent(String(location_id))}&select=name`);
+    const locName = (locs && locs[0] && locs[0].name) || 'A restoration company';
+    const sms = await sendSms(phone, inviteSmsBody(row.name, locName, inviteToken));
+    if (!sms.ok) console.warn('[lead-source invite] SMS failed:', sms.error);
+    return res.status(200).json({ ok: true, lead_source: leadSource, sms_sent: sms.ok, ...(sms.ok ? {} : { sms_error: sms.error }) });
+  } catch (err) {
+    console.error('[lead-source invite error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/admin/lead-sources/resend', requireAuth, requireAdmin, async (req, res) => {
+  const id = String((req.body || {}).lead_source_id || '');
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid lead source id' });
+  try {
+    const rows = await sbGet(`lead_sources?id=eq.${id}&select=id,name,phone,location_id,status,invite_token,invite_count`);
+    const ls = rows && rows[0];
+    if (!ls) return res.status(404).json({ error: 'Lead source not found' });
+    if (ls.status === 'signed_up') return res.status(400).json({ error: 'This lead source has already signed up' });
+
+    let token = ls.invite_token;
+    if (!token) token = crypto.randomBytes(24).toString('hex');
+    const locs = await sbGet(`locations?id=eq.${encodeURIComponent(String(ls.location_id))}&select=name`);
+    const locName = (locs && locs[0] && locs[0].name) || 'A restoration company';
+    const sms = await sendSms(ls.phone, inviteSmsBody(ls.name, locName, token));
+    if (!sms.ok) return res.status(502).json({ error: sms.error });
+
+    const pr = await fetch(`${SUPABASE_URL}/rest/v1/lead_sources?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ invite_token: token, last_invited_at: new Date().toISOString(),
+        invite_count: (Number(ls.invite_count) || 0) + 1, updated_at: new Date().toISOString() }),
+    });
+    if (!pr.ok) console.warn('[lead-source resend] row update failed', pr.status);
+    return res.status(200).json({ ok: true, sms_sent: true });
+  } catch (err) {
+    console.error('[lead-source resend error]', err.message);
     res.status(502).json({ error: err.message });
   }
 });
