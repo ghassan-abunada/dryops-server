@@ -1341,6 +1341,45 @@ app.get('/admin/places/autocomplete', requireAuth, requireAdmin, async (req, res
   }
 });
 
+// Place Details for a picked autocomplete suggestion — returns the address
+// broken into components so the app can fill street/city/state/zip fields.
+// Passing the same session token as the autocomplete calls closes the billing
+// session (Google charges per session, not per keystroke, when tokens match).
+app.get('/admin/places/details', requireAuth, requireAdmin, async (req, res) => {
+  const placeId = String(req.query.place_id || '').trim();
+  if (!placeId || !GOOGLE_MAPS_KEY) return res.json({});
+  try {
+    const params = new URLSearchParams({
+      place_id: placeId,
+      key: GOOGLE_MAPS_KEY,
+      fields: 'address_component,formatted_address',
+    });
+    const session = String(req.query.session || '').slice(0, 64);
+    if (session) params.set('sessiontoken', session);
+    const r = await fetch(`https://maps.googleapis.com/maps/api/place/details/json?${params}`);
+    const d = await r.json().catch(() => null);
+    if (!d || d.status !== 'OK') {
+      console.warn('[places details] status', d && d.status, (d && d.error_message) || '');
+      return res.json({});
+    }
+    const comps = (d.result && d.result.address_components) || [];
+    const comp = (type, short) => {
+      const c = comps.find(c => c.types.includes(type));
+      return c ? (short ? c.short_name : c.long_name) : '';
+    };
+    return res.json({
+      street: [comp('street_number'), comp('route')].filter(Boolean).join(' '),
+      city: comp('locality') || comp('sublocality') || comp('postal_town'),
+      state: comp('administrative_area_level_1', true),
+      zip: comp('postal_code'),
+      formatted: d.result.formatted_address || '',
+    });
+  } catch (err) {
+    console.error('[places details error]', err.message);
+    return res.json({});
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
 });
