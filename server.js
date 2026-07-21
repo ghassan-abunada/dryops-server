@@ -1382,6 +1382,82 @@ app.post('/admin/lead-sources/resend', requireAuth, requireAdmin, async (req, re
   }
 });
 
+// ── Lead source signup (PUBLIC — the invite token is the credential) ─────────
+// The invite email/SMS links to {WEB_APP_URL}/referral?token=..., a public
+// page in the web app. These endpoints back it: no Supabase auth, the
+// 48-hex-char single-use-ish token scopes everything to one lead_sources row.
+
+const INVITE_TOKEN_RE = /^[a-f0-9]{48}$/;
+
+async function leadSourceByToken(token) {
+  if (!INVITE_TOKEN_RE.test(token)) return null;
+  const rows = await sbGet(
+    `lead_sources?invite_token=eq.${token}&select=id,name,phone,email,source_type,status,` +
+    `split_by_payer,referral_basis,referral_rate,ins_basis,ins_rate,oop_basis,oop_rate,` +
+    `percent_scope,location_id,lead_source_companies(name)`);
+  return (rows && rows[0]) || null;
+}
+
+app.get('/referral/info', async (req, res) => {
+  try {
+    const ls = await leadSourceByToken(String(req.query.token || '').trim());
+    if (!ls) return res.status(404).json({ error: 'This invite link is invalid or has expired.' });
+    const locs = await sbGet(`locations?id=eq.${encodeURIComponent(String(ls.location_id))}&select=name`);
+    return res.json({
+      name: ls.name,
+      phone: ls.phone,
+      email: ls.email,
+      source_type: ls.source_type,
+      status: ls.status,
+      split_by_payer: ls.split_by_payer,
+      referral_basis: ls.referral_basis, referral_rate: ls.referral_rate,
+      ins_basis: ls.ins_basis, ins_rate: ls.ins_rate,
+      oop_basis: ls.oop_basis, oop_rate: ls.oop_rate,
+      percent_scope: ls.percent_scope,
+      company_name: (ls.lead_source_companies && ls.lead_source_companies.name) || null,
+      location_name: (locs && locs[0] && locs[0].name) || 'A restoration company',
+    });
+  } catch (err) {
+    console.error('[referral info error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/referral/signup', async (req, res) => {
+  const b = req.body || {};
+  try {
+    const ls = await leadSourceByToken(String(b.token || '').trim());
+    if (!ls) return res.status(404).json({ error: 'This invite link is invalid or has expired.' });
+    if (ls.status === 'signed_up') return res.status(200).json({ ok: true, already_signed_up: true });
+
+    const name = String(b.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+    const rawPhone = String(b.phone || '').trim();
+    const phone = rawPhone ? toE164(rawPhone) : null;
+    if (rawPhone && !phone) return res.status(400).json({ error: 'Invalid phone number' });
+    const email = String(b.email || '').trim().toLowerCase() || null;
+    if (email && !EMAIL_RE.test(email)) return res.status(400).json({ error: 'Invalid email address' });
+    if (!phone && !email) return res.status(400).json({ error: 'A phone number or email is required' });
+
+    const now = new Date().toISOString();
+    const pr = await fetch(`${SUPABASE_URL}/rest/v1/lead_sources?id=eq.${ls.id}`, {
+      method: 'PATCH',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ name, phone, email, status: 'signed_up', signed_up_at: now, updated_at: now }),
+    });
+    if (!pr.ok) {
+      if (pr.status === 409) return res.status(409).json({ error: 'That phone or email is already registered with this company.' });
+      const body = await pr.json().catch(() => null);
+      return res.status(pr.status).json({ error: (body && (body.message || body.error)) || 'Signup failed' });
+    }
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('[referral signup error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // Google Places address autocomplete, proxied so the Maps key stays server-side.
 // Used by the app's address fields (e.g. new lead-source company). Same
 // admin/owner gating as the rest of /admin. Requires the "Places API" to be
