@@ -753,6 +753,168 @@ app.post('/webhooks/jobnimbus/payments', async (req, res) => {
   }
 });
 
+// ── JobNimbus financials reconcile (periodic pull) ────────────────────────────
+// The JN automation webhooks are not sufficient for financial data: payment
+// events never fire at all (automation is active but JN never calls the URL),
+// and invoice webhook payloads are slim — total/total_paid/due/date_invoice
+// arrive as undefined, so webhook-synced invoices carry no amounts. This loop
+// pulls records modified since the last sync from the JN API (date_updated
+// range filter, verified working) and upserts complete rows. The first run
+// after deploy automatically catches up from each table's max(last_synced).
+const RECONCILE_INTERVAL_MS = 10 * 60 * 1000;
+const RECONCILE_OVERLAP_MS = 6 * 60 * 60 * 1000;      // re-pull window overlap
+const RECONCILE_MAX_LOOKBACK_MS = 45 * 24 * 60 * 60 * 1000;
+
+const sbHeaders = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+
+async function sbSelect(table, query) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, { headers: sbHeaders });
+  if (!r.ok) throw new Error(`${table} select ${r.status}`);
+  return r.json();
+}
+
+async function sbBulkUpsert(table, rows) {
+  if (!rows.length) return;
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=jn_id`, {
+    method: 'POST',
+    headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify(rows),
+  });
+  if (!r.ok) throw new Error(`${table} bulk upsert ${r.status} ${(await r.text()).slice(0, 300)}`);
+}
+
+// Pull all records modified since `sinceSecs` (unix). Pages with from/size and,
+// if the ES 10k window cap is hit, advances the date cursor and keeps going.
+async function jnFetchUpdatedSince(path, sinceSecs) {
+  const out = [];
+  let cursor = sinceSecs;
+  for (let guard = 0; guard < 20; guard++) {
+    const filter = encodeURIComponent(JSON.stringify({ must: [{ range: { date_updated: { gte: cursor } } }] }));
+    let count = Infinity, fetched = 0, pageMax = cursor;
+    for (let from = 0; from + 500 <= 10000 && fetched < count; from += 500) {
+      const r = await fetch(`${JN_BASE}${path}?size=500&from=${from}&filter=${filter}`, {
+        headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+      });
+      if (!r.ok) throw new Error(`JN ${path} ${r.status}`);
+      const data = await r.json();
+      const page = data?.results ?? data?.data ?? [];
+      count = data?.count ?? data?.total ?? page.length;
+      out.push(...page);
+      fetched += page.length;
+      for (const it of page) {
+        if (typeof it.date_updated === 'number' && it.date_updated > pageMax) pageMax = it.date_updated;
+      }
+      if (page.length < 500) break;
+    }
+    if (fetched >= count || pageMax <= cursor) return out;
+    cursor = pageMax; // hit the ES from+size cap — advance the window
+  }
+  return out;
+}
+
+// Batch-resolve related job jn_ids → { job_id, location_id } in one pass.
+async function resolveJobRefs(records) {
+  const jnIds = new Set();
+  for (const rec of records) {
+    const ref = (Array.isArray(rec.related) ? rec.related : []).find(x => x && x.type === 'job' && x.id);
+    if (ref) jnIds.add(String(ref.id));
+  }
+  const map = new Map();
+  const ids = [...jnIds];
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100).map(id => `"${id}"`).join(',');
+    const rows = await sbSelect('jobs', `jn_id=in.(${encodeURIComponent(chunk)})&select=jn_id,id,location_id`);
+    for (const row of rows) map.set(row.jn_id, { job_id: row.id, location_id: row.location_id || null });
+  }
+  return map;
+}
+
+function jobRefFor(rec, jobMap) {
+  const ref = (Array.isArray(rec.related) ? rec.related : []).find(x => x && x.type === 'job' && x.id);
+  return (ref && jobMap.get(String(ref.id))) || { job_id: null, location_id: null };
+}
+
+// Since-cursor per table: catch up from the newest last_synced (minus overlap).
+async function reconcileSinceSecs(table) {
+  const now = Date.now();
+  let since = now - RECONCILE_MAX_LOOKBACK_MS;
+  try {
+    const rows = await sbSelect(table, 'select=last_synced&order=last_synced.desc.nullslast&limit=1');
+    const last = rows?.[0]?.last_synced ? new Date(rows[0].last_synced).getTime() : NaN;
+    if (!isNaN(last)) since = Math.max(since, last - RECONCILE_OVERLAP_MS);
+  } catch (err) {
+    console.error(`[jn-reconcile] ${table} cursor lookup failed, using max lookback:`, err.message);
+  }
+  return Math.floor(since / 1000);
+}
+
+let reconcileRunning = false;
+async function reconcileFinancials() {
+  if (reconcileRunning) return;
+  reconcileRunning = true;
+  const nowISO = new Date().toISOString();
+  try {
+    const [invSince, paySince] = await Promise.all([reconcileSinceSecs('invoices'), reconcileSinceSecs('payments')]);
+    const [invoices, payments] = await Promise.all([
+      jnFetchUpdatedSince('/v2/invoices', invSince),
+      jnFetchUpdatedSince('/payments', paySince),
+    ]);
+    const jobMap = await resolveJobRefs([...invoices, ...payments]);
+
+    const invoiceRows = invoices
+      .filter(inv => inv.jnid || inv.id)
+      .map(inv => {
+        const ref = jobRefFor(inv, jobMap);
+        return {
+          jn_id: String(inv.jnid ?? inv.id),
+          job_id: ref.job_id,
+          location_id: ref.location_id,
+          number: inv.number ?? null,
+          status_name: inv.status_name ?? null,
+          total: inv.total ?? null,
+          total_paid: inv.total_paid ?? null,
+          due: inv.due ?? null,
+          date_invoice: jnToDate(inv.date_invoice) ?? null,
+          date_due: jnToDate(inv.date_due) ?? null,
+          date_paid_in_full: jnToDate(inv.date_paid_in_full) ?? null,
+          jn_created: jnToISO(inv.date_created) ?? null,
+          jn_updated: jnToISO(inv.date_updated ?? inv.date_modified) ?? null,
+          last_synced: nowISO,
+        };
+      });
+
+    const paymentRows = payments
+      .filter(pay => pay.jnid || pay.id)
+      .map(pay => {
+        const ref = jobRefFor(pay, jobMap);
+        return {
+          jn_id: String(pay.jnid ?? pay.id),
+          job_id: ref.job_id,
+          location_id: ref.location_id,
+          amount: pay.total ?? pay.amount ?? null,
+          method_id: pay.method_id ?? null,
+          note: pay.note ?? pay.description ?? null,
+          jn_created: jnToISO(pay.date_payment ?? pay.date_created) ?? null,
+          jn_updated: jnToISO(pay.date_updated ?? pay.date_modified) ?? null,
+          last_synced: nowISO,
+        };
+      });
+
+    await sbBulkUpsert('invoices', invoiceRows);
+    await sbBulkUpsert('payments', paymentRows);
+    console.log(`[jn-reconcile] upserted ${invoiceRows.length} invoices, ${paymentRows.length} payments`);
+  } catch (err) {
+    console.error('[jn-reconcile] failed:', err.message);
+  } finally {
+    reconcileRunning = false;
+  }
+}
+
+if (SUPABASE_SERVICE_KEY) {
+  setTimeout(reconcileFinancials, 15 * 1000); // catch-up shortly after boot
+  setInterval(reconcileFinancials, RECONCILE_INTERVAL_MS);
+}
+
 // ── JobNimbus photo download proxy ───────────────────────────────────────────
 // GET /jnphoto/:jnid — follows the JN redirect and streams the image binary
 // INTENTIONALLY UNAUTHENTICATED: this URL is used directly as an <img> /
