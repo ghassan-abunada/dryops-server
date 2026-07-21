@@ -27,6 +27,12 @@ const WEB_APP_URL = (process.env.WEB_APP_URL || 'https://dryops.app').trim();
 const TWILIO_ACCOUNT_SID = (process.env.TWILIO_ACCOUNT_SID || '').trim();
 const TWILIO_AUTH_TOKEN = (process.env.TWILIO_AUTH_TOKEN || '').trim();
 const TWILIO_FROM_NUMBER = (process.env.TWILIO_FROM_NUMBER || '').trim();
+// Resend (email for referral-program invites while Twilio A2P approval is
+// pending). EMAIL_FROM e.g. "DryOps <invites@yourdomain.com>" — the domain must
+// be verified in Resend. Invites prefer SMS whenever Twilio is configured and
+// the lead source has a phone; otherwise they go out by email.
+const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim();
+const EMAIL_FROM = (process.env.EMAIL_FROM || '').trim();
 // CallRail (call tracking). API key + account id for pulling numbers/calls;
 // a separate shared secret gates the post-call webhook (?token=... in the URL).
 const CALLRAIL_API_KEY = (process.env.CALLRAIL_API_KEY || '').trim();
@@ -1211,6 +1217,66 @@ function inviteSmsBody(name, locName, token) {
   return `Hi ${name}! ${locName} has invited you to join their referral program. Sign up here: ${WEB_APP_URL}/referral?token=${token}`;
 }
 
+async function sendEmail(to, subject, html) {
+  if (!RESEND_API_KEY || !EMAIL_FROM) {
+    return { ok: false, error: 'Email not configured (set RESEND_API_KEY / EMAIL_FROM)' };
+  }
+  try {
+    const r = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: EMAIL_FROM, to: [to], subject, html }),
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok) return { ok: false, error: (j && j.message) || `Resend error ${r.status}` };
+    return { ok: true, id: j && j.id };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function inviteEmailHtml(name, locName, token) {
+  const link = `${WEB_APP_URL}/referral?token=${token}`;
+  return `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="margin:0 0 16px">You're invited to a referral program</h2>
+  <p style="line-height:1.5">Hi ${escapeHtml(name)},</p>
+  <p style="line-height:1.5"><strong>${escapeHtml(locName)}</strong> has invited you to join their referral program. Tap below to sign up and start earning for the leads you send their way.</p>
+  <p style="margin:28px 0"><a href="${link}" style="background:#2563eb;color:#fff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:700;display:inline-block">Join the Referral Program</a></p>
+  <p style="font-size:13px;color:#64748b;line-height:1.5">Or copy this link into your browser:<br>${link}</p>
+</div>`;
+}
+
+// Channel pick: SMS whenever Twilio is configured and a phone exists (falls
+// back to email if the send fails); email otherwise. Once Twilio's A2P
+// campaign is approved and its env vars are set, invites switch back to SMS
+// with no code change.
+async function deliverInvite({ name, phone, email }, locName, token) {
+  const smsReady = !!(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM_NUMBER);
+  if (phone && smsReady) {
+    const sms = await sendSms(phone, inviteSmsBody(name, locName, token));
+    if (sms.ok) return { ok: true, channel: 'sms' };
+    if (!email) return { ok: false, channel: 'sms', error: sms.error };
+    console.warn('[lead-source invite] SMS failed, falling back to email:', sms.error);
+  }
+  if (email) {
+    const em = await sendEmail(email,
+      `${locName} invited you to their referral program`,
+      inviteEmailHtml(name, locName, token));
+    return em.ok ? { ok: true, channel: 'email' } : { ok: false, channel: 'email', error: em.error };
+  }
+  if (phone) {
+    const sms = await sendSms(phone, inviteSmsBody(name, locName, token));
+    return sms.ok ? { ok: true, channel: 'sms' } : { ok: false, channel: 'sms', error: sms.error };
+  }
+  return { ok: false, channel: 'none', error: 'Lead source has no phone or email' };
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
 app.post('/admin/lead-sources/invite', requireAuth, requireAdmin, async (req, res) => {
   const b = req.body || {};
   const { location_id, company_id, source_type, name } = b;
@@ -1218,8 +1284,12 @@ app.post('/admin/lead-sources/invite', requireAuth, requireAdmin, async (req, re
     return res.status(400).json({ error: 'location_id, company_id, source_type and name are required' });
   }
   if (!UUID_RE.test(String(company_id))) return res.status(400).json({ error: 'Invalid company id' });
-  const phone = toE164(b.phone);
-  if (!phone) return res.status(400).json({ error: 'Invalid phone number' });
+  const rawPhone = String(b.phone || '').trim();
+  const phone = rawPhone ? toE164(rawPhone) : null;
+  if (rawPhone && !phone) return res.status(400).json({ error: 'Invalid phone number' });
+  const email = String(b.email || '').trim().toLowerCase() || null;
+  if (email && !EMAIL_RE.test(email)) return res.status(400).json({ error: 'Invalid email address' });
+  if (!phone && !email) return res.status(400).json({ error: 'A phone number or email is required' });
   const shapeErr = leadSourceStructureError(b);
   if (shapeErr) return res.status(400).json({ error: shapeErr });
 
@@ -1232,6 +1302,7 @@ app.post('/admin/lead-sources/invite', requireAuth, requireAdmin, async (req, re
     source_type: String(source_type),
     name: String(name).trim(),
     phone,
+    email,
     split_by_payer: split,
     referral_basis: split ? null : b.referral_basis,
     referral_rate: split ? null : Number(b.referral_rate),
@@ -1257,7 +1328,7 @@ app.post('/admin/lead-sources/invite', requireAuth, requireAdmin, async (req, re
     });
     const body = await cr.json().catch(() => null);
     if (!cr.ok) {
-      if (cr.status === 409) return res.status(409).json({ error: 'A lead source with this phone number already exists for this location' });
+      if (cr.status === 409) return res.status(409).json({ error: 'A lead source with this phone or email already exists for this location' });
       const msg = (body && (body.message || body.error)) || 'create lead source failed';
       return res.status(cr.status).json({ error: msg });
     }
@@ -1265,9 +1336,15 @@ app.post('/admin/lead-sources/invite', requireAuth, requireAdmin, async (req, re
 
     const locs = await sbGet(`locations?id=eq.${encodeURIComponent(String(location_id))}&select=name`);
     const locName = (locs && locs[0] && locs[0].name) || 'A restoration company';
-    const sms = await sendSms(phone, inviteSmsBody(row.name, locName, inviteToken));
-    if (!sms.ok) console.warn('[lead-source invite] SMS failed:', sms.error);
-    return res.status(200).json({ ok: true, lead_source: leadSource, sms_sent: sms.ok, ...(sms.ok ? {} : { sms_error: sms.error }) });
+    const d = await deliverInvite(row, locName, inviteToken);
+    if (!d.ok) console.warn('[lead-source invite] send failed:', d.error);
+    // sms_sent/sms_error kept for older app builds that predate the email channel.
+    return res.status(200).json({
+      ok: true, lead_source: leadSource,
+      invite_sent: d.ok, channel: d.channel,
+      sms_sent: d.ok,
+      ...(d.ok ? {} : { send_error: d.error, sms_error: d.error }),
+    });
   } catch (err) {
     console.error('[lead-source invite error]', err.message);
     res.status(502).json({ error: err.message });
@@ -1278,7 +1355,7 @@ app.post('/admin/lead-sources/resend', requireAuth, requireAdmin, async (req, re
   const id = String((req.body || {}).lead_source_id || '');
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid lead source id' });
   try {
-    const rows = await sbGet(`lead_sources?id=eq.${id}&select=id,name,phone,location_id,status,invite_token,invite_count`);
+    const rows = await sbGet(`lead_sources?id=eq.${id}&select=id,name,phone,email,location_id,status,invite_token,invite_count`);
     const ls = rows && rows[0];
     if (!ls) return res.status(404).json({ error: 'Lead source not found' });
     if (ls.status === 'signed_up') return res.status(400).json({ error: 'This lead source has already signed up' });
@@ -1287,8 +1364,8 @@ app.post('/admin/lead-sources/resend', requireAuth, requireAdmin, async (req, re
     if (!token) token = crypto.randomBytes(24).toString('hex');
     const locs = await sbGet(`locations?id=eq.${encodeURIComponent(String(ls.location_id))}&select=name`);
     const locName = (locs && locs[0] && locs[0].name) || 'A restoration company';
-    const sms = await sendSms(ls.phone, inviteSmsBody(ls.name, locName, token));
-    if (!sms.ok) return res.status(502).json({ error: sms.error });
+    const d = await deliverInvite(ls, locName, token);
+    if (!d.ok) return res.status(502).json({ error: d.error });
 
     const pr = await fetch(`${SUPABASE_URL}/rest/v1/lead_sources?id=eq.${id}`, {
       method: 'PATCH',
@@ -1298,7 +1375,7 @@ app.post('/admin/lead-sources/resend', requireAuth, requireAdmin, async (req, re
         invite_count: (Number(ls.invite_count) || 0) + 1, updated_at: new Date().toISOString() }),
     });
     if (!pr.ok) console.warn('[lead-source resend] row update failed', pr.status);
-    return res.status(200).json({ ok: true, sms_sent: true });
+    return res.status(200).json({ ok: true, sms_sent: true, invite_sent: true, channel: d.channel });
   } catch (err) {
     console.error('[lead-source resend error]', err.message);
     res.status(502).json({ error: err.message });
