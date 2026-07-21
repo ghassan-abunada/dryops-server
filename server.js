@@ -33,6 +33,22 @@ const TWILIO_FROM_NUMBER = (process.env.TWILIO_FROM_NUMBER || '').trim();
 // the lead source has a phone; otherwise they go out by email.
 const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim();
 const EMAIL_FROM = (process.env.EMAIL_FROM || '').trim();
+// Lead-source portal field encryption (full TIN / bank numbers). 32-byte
+// base64 key per version; AES-256-GCM with AAD binding ciphertext to
+// row+field. Rotation: add LEAD_ENC_KEY_V2, flip LEAD_ENC_CURRENT, keep V1
+// for reads until no v1: prefixes remain.
+const LEAD_ENC_KEYS = {};
+for (const [env, ver] of [['LEAD_ENC_KEY_V1', 'v1'], ['LEAD_ENC_KEY_V2', 'v2']]) {
+  const raw = (process.env[env] || '').trim();
+  if (!raw) continue;
+  const buf = Buffer.from(raw, 'base64');
+  if (buf.length === 32) LEAD_ENC_KEYS[ver] = buf;
+  else console.warn(`WARNING: ${env} is not 32 bytes of base64 — ignored`);
+}
+const LEAD_ENC_CURRENT = LEAD_ENC_KEYS.v2 ? 'v2' : 'v1';
+if (!LEAD_ENC_KEYS[LEAD_ENC_CURRENT]) {
+  console.warn('WARNING: LEAD_ENC_KEY_V1 not set — lead-source portal signup/bank endpoints will 503 until it is.');
+}
 // CallRail (call tracking). API key + account id for pulling numbers/calls;
 // a separate shared secret gates the post-call webhook (?token=... in the URL).
 const CALLRAIL_API_KEY = (process.env.CALLRAIL_API_KEY || '').trim();
@@ -1392,9 +1408,9 @@ const INVITE_TOKEN_RE = /^[a-f0-9]{48}$/;
 async function leadSourceByToken(token) {
   if (!INVITE_TOKEN_RE.test(token)) return null;
   const rows = await sbGet(
-    `lead_sources?invite_token=eq.${token}&select=id,name,phone,email,source_type,status,` +
+    `lead_sources?invite_token=eq.${token}&select=id,user_id,name,phone,email,source_type,status,` +
     `split_by_payer,referral_basis,referral_rate,ins_basis,ins_rate,oop_basis,oop_rate,` +
-    `percent_scope,location_id,lead_source_companies(name)`);
+    `percent_scope,location_id,lead_source_companies(name,address)`);
   return (rows && rows[0]) || null;
 }
 
@@ -1409,12 +1425,14 @@ app.get('/referral/info', async (req, res) => {
       email: ls.email,
       source_type: ls.source_type,
       status: ls.status,
+      has_account: !!ls.user_id,
       split_by_payer: ls.split_by_payer,
       referral_basis: ls.referral_basis, referral_rate: ls.referral_rate,
       ins_basis: ls.ins_basis, ins_rate: ls.ins_rate,
       oop_basis: ls.oop_basis, oop_rate: ls.oop_rate,
       percent_scope: ls.percent_scope,
       company_name: (ls.lead_source_companies && ls.lead_source_companies.name) || null,
+      company_address: (ls.lead_source_companies && ls.lead_source_companies.address) || null,
       location_name: (locs && locs[0] && locs[0].name) || 'A restoration company',
     });
   } catch (err) {
@@ -1455,6 +1473,367 @@ app.post('/referral/signup', async (req, res) => {
   } catch (err) {
     console.error('[referral signup error]', err.message);
     res.status(502).json({ error: err.message });
+  }
+});
+
+// ── Lead source PORTAL ───────────────────────────────────────────────────────
+// Partners get Supabase auth accounts with profiles.role='lead_source' — a
+// role in NO RLS allow-list (plus a blanket restrictive deny policy), so they
+// can read nothing via PostgREST. Everything below serves them via the service
+// key, strictly scoped to their own lead_sources row.
+
+function encField(plain, aad) {
+  const key = LEAD_ENC_KEYS[LEAD_ENC_CURRENT];
+  if (!key) throw new Error('encryption key not configured');
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv('aes-256-gcm', key, iv);
+  c.setAAD(Buffer.from(aad));
+  const ct = Buffer.concat([c.update(String(plain), 'utf8'), c.final()]);
+  return [LEAD_ENC_CURRENT, iv.toString('base64'), c.getAuthTag().toString('base64'), ct.toString('base64')].join(':');
+}
+function decField(stored, aad) {
+  const [v, iv, tag, ct] = String(stored).split(':');
+  const key = LEAD_ENC_KEYS[v];
+  if (!key) throw new Error(`unknown encryption key version ${v}`);
+  const d = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64'));
+  d.setAAD(Buffer.from(aad));
+  d.setAuthTag(Buffer.from(tag, 'base64'));
+  return Buffer.concat([d.update(Buffer.from(ct, 'base64')), d.final()]).toString('utf8');
+}
+
+// ABA routing checksum: 3(d1+d4+d7) + 7(d2+d5+d8) + (d3+d6+d9) ≡ 0 (mod 10).
+function isValidRouting(v) {
+  const d = String(v || '').replace(/\D/g, '');
+  if (d.length !== 9) return false;
+  const n = d.split('').map(Number);
+  return (3 * (n[0] + n[3] + n[6]) + 7 * (n[1] + n[4] + n[7]) + (n[2] + n[5] + n[8])) % 10 === 0;
+}
+
+const W9_TAX_CLASSES = [
+  'Individual/sole proprietor', 'C corporation', 'S corporation',
+  'Partnership', 'Trust/estate', 'LLC', 'Other',
+];
+
+// requireAuth must run first. Positive-only 60s cache keyed by userId.
+const LS_CACHE_TTL_MS = 60 * 1000;
+const LS_CACHE_MAX = 500;
+const leadSourceCache = new Map();
+async function requireLeadSource(req, res, next) {
+  const cached = leadSourceCache.get(req.userId);
+  if (cached && cached.expiresAt > Date.now()) { req.leadSource = cached.row; return next(); }
+  leadSourceCache.delete(req.userId);
+  try {
+    const rows = await sbGet(
+      `lead_sources?user_id=eq.${req.userId}&status=eq.signed_up` +
+      `&select=id,name,email,phone,location_id,company_id,source_type,split_by_payer,` +
+      `referral_basis,referral_rate,ins_basis,ins_rate,oop_basis,oop_rate,percent_scope,` +
+      `w9_legal_name,w9_business_name,w9_tax_class,w9_tin_type,w9_tin_last4,w9_certified_at`);
+    const ls = rows && rows[0];
+    if (!ls) return res.status(403).json({ error: 'Portal access required' });
+    // Belt-and-braces: the profile must actually carry the portal role.
+    const prof = await sbGet(`profiles?id=eq.${req.userId}&select=role`);
+    if (!prof || !prof[0] || prof[0].role !== 'lead_source') {
+      return res.status(403).json({ error: 'Portal access required' });
+    }
+    if (leadSourceCache.size >= LS_CACHE_MAX) {
+      leadSourceCache.delete(leadSourceCache.keys().next().value);
+    }
+    leadSourceCache.set(req.userId, { row: ls, expiresAt: Date.now() + LS_CACHE_TTL_MS });
+    req.leadSource = ls;
+    next();
+  } catch (err) {
+    console.error('[lead-source auth error]', err.message);
+    res.status(502).json({ error: 'Verification failed' });
+  }
+}
+
+async function sbAdmin(method, path, body, prefer) {
+  const r = await fetch(`${SUPABASE_URL}${path}`, {
+    method,
+    headers: {
+      apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json', ...(prefer ? { Prefer: prefer } : {}),
+    },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+  const j = await r.json().catch(() => null);
+  return { ok: r.ok, status: r.status, body: j };
+}
+
+// Full signup: contact + W-9 + bank + password → provisions the account.
+// Public, invite-token-gated. Old signed-up rows without an account can also
+// complete this (their token was never nulled).
+app.post('/portal/signup', async (req, res) => {
+  const b = req.body || {};
+  if (!LEAD_ENC_KEYS[LEAD_ENC_CURRENT]) {
+    return res.status(503).json({ error: 'Portal signup is not configured yet (encryption key missing).' });
+  }
+  try {
+    const ls = await leadSourceByToken(String(b.token || '').trim());
+    if (!ls) return res.status(404).json({ error: 'This invite link is invalid or has expired.' });
+    const linked = await sbGet(`lead_sources?id=eq.${ls.id}&select=user_id`);
+    if (linked && linked[0] && linked[0].user_id) {
+      return res.status(409).json({ error: 'This invite already has an account — log in instead.' });
+    }
+
+    // Contact
+    const name = String(b.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+    const email = String(b.email || '').trim().toLowerCase();
+    if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'A valid email is required (it becomes your login).' });
+    const rawPhone = String(b.phone || '').trim();
+    const phone = rawPhone ? toE164(rawPhone) : null;
+    if (rawPhone && !phone) return res.status(400).json({ error: 'Invalid phone number' });
+
+    // W-9
+    const w9 = b.w9 || {};
+    const legalName = String(w9.legal_name || '').trim();
+    const taxClass = String(w9.tax_class || '').trim();
+    const w9Address = String(w9.address || '').trim();
+    const tinType = w9.tin_type === 'ein' ? 'ein' : 'ssn';
+    const tin = String(w9.tin || '').replace(/\D/g, '');
+    const signature = String(w9.signature || '').trim();
+    if (!legalName) return res.status(400).json({ error: 'W-9: legal name is required' });
+    if (!W9_TAX_CLASSES.includes(taxClass)) return res.status(400).json({ error: 'W-9: pick a federal tax classification' });
+    if (!w9Address) return res.status(400).json({ error: 'W-9: address is required' });
+    if (tin.length !== 9) return res.status(400).json({ error: `W-9: ${tinType === 'ein' ? 'EIN' : 'SSN'} must be 9 digits` });
+    if (!signature) return res.status(400).json({ error: 'W-9: type your name to sign' });
+    if (!w9.certified) return res.status(400).json({ error: 'W-9: the certification must be accepted' });
+
+    // Bank
+    const bank = b.bank || {};
+    const routing = String(bank.routing || '').replace(/\D/g, '');
+    const account = String(bank.account || '').replace(/\D/g, '');
+    const acctType = bank.account_type === 'savings' ? 'savings' : 'checking';
+    const bankName = String(bank.bank_name || '').trim() || null;
+    if (!isValidRouting(routing)) return res.status(400).json({ error: 'Bank: routing number is not a valid 9-digit ABA number' });
+    if (account.length < 4 || account.length > 17) return res.status(400).json({ error: 'Bank: account number must be 4–17 digits' });
+
+    // Password
+    const password = String(b.password || '');
+    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+
+    // 1) Create the auth user (handle_new_user auto-creates a technician profile).
+    const created = await sbAdmin('POST', '/auth/v1/admin/users', {
+      email, password, email_confirm: true, user_metadata: { full_name: name },
+    });
+    if (!created.ok) {
+      const msg = (created.body && (created.body.msg || created.body.message || created.body.error_description)) || '';
+      if (created.status === 422 || /already/i.test(msg)) {
+        return res.status(409).json({ error: 'An account with this email already exists — log in instead.' });
+      }
+      return res.status(502).json({ error: msg || 'Account creation failed' });
+    }
+    const uid = created.body && created.body.id;
+    const rollback = async () => {
+      await sbAdmin('DELETE', `/auth/v1/admin/users/${uid}`).catch(() => {});
+      await sbAdmin('DELETE', `/rest/v1/lead_source_secure?lead_source_id=eq.${ls.id}`).catch(() => {});
+      leadSourceCache.delete(uid);
+    };
+
+    // 2) Force the portal role + zero locations, then VERIFY it landed.
+    const prof = await sbAdmin('POST', '/rest/v1/profiles?on_conflict=id', {
+      id: uid, full_name: name, role: 'lead_source',
+      location_id: null, location_name: null, location_ids: [], location_names: [],
+    }, 'resolution=merge-duplicates,return=representation');
+    const landedRole = prof.ok && Array.isArray(prof.body) && prof.body[0] && prof.body[0].role;
+    if (landedRole !== 'lead_source') {
+      console.error('[portal signup] role verification failed', prof.status, JSON.stringify(prof.body || {}).slice(0, 200));
+      await rollback();
+      return res.status(502).json({ error: 'Account provisioning failed — nothing was created, please try again.' });
+    }
+
+    // 3) Encrypted secrets.
+    const sec = await sbAdmin('POST', '/rest/v1/lead_source_secure?on_conflict=lead_source_id', {
+      lead_source_id: ls.id,
+      tin_enc: encField(tin, `${ls.id}:tin`),
+      bank_routing_enc: encField(routing, `${ls.id}:bank_routing`),
+      bank_account_enc: encField(account, `${ls.id}:bank_account`),
+      bank_account_last4: account.slice(-4),
+      bank_account_type: acctType,
+      bank_name: bankName,
+      updated_at: new Date().toISOString(),
+    }, 'resolution=merge-duplicates,return=minimal');
+    if (!sec.ok) {
+      console.error('[portal signup] secure upsert failed', sec.status);
+      await rollback();
+      return res.status(502).json({ error: 'Account provisioning failed — nothing was created, please try again.' });
+    }
+
+    // 4) Commit: link the account, store W-9 metadata, spend the token.
+    const now = new Date().toISOString();
+    const fin = await sbAdmin('PATCH', `/rest/v1/lead_sources?id=eq.${ls.id}`, {
+      name, phone, email,
+      user_id: uid, invite_token: null,
+      status: 'signed_up', signed_up_at: ls.status === 'signed_up' ? undefined : now,
+      w9_legal_name: legalName,
+      w9_business_name: String(w9.business_name || '').trim() || null,
+      w9_tax_class: taxClass,
+      w9_address: w9Address,
+      w9_tin_type: tinType,
+      w9_tin_last4: tin.slice(-4),
+      w9_signature: signature,
+      w9_certified_at: now,
+      updated_at: now,
+    }, 'return=minimal');
+    if (!fin.ok) {
+      console.error('[portal signup] lead_sources link failed', fin.status);
+      await rollback();
+      return res.status(502).json({ error: 'Account provisioning failed — nothing was created, please try again.' });
+    }
+
+    return res.status(200).json({ ok: true, email });
+  } catch (err) {
+    console.error('[portal signup error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Simplified job status for partners — no internal stage taxonomy leaks.
+function partnerJobStatus(stage) {
+  if (stage === 'Lost') return 'Lost';
+  if (stage === 'Completed') return 'Complete';
+  return 'In progress';
+}
+
+app.get('/portal/me', requireAuth, requireLeadSource, async (req, res) => {
+  try {
+    const ls = req.leadSource;
+    const [locs, cos, secs] = await Promise.all([
+      sbGet(`locations?id=eq.${encodeURIComponent(String(ls.location_id))}&select=name`),
+      ls.company_id ? sbGet(`lead_source_companies?id=eq.${ls.company_id}&select=name`) : Promise.resolve([]),
+      sbGet(`lead_source_secure?lead_source_id=eq.${ls.id}&select=bank_name,bank_account_type,bank_account_last4`),
+    ]);
+    const sec = (secs && secs[0]) || null;
+    res.json({
+      name: ls.name, email: ls.email, phone: ls.phone,
+      source_type: ls.source_type,
+      company_name: (cos && cos[0] && cos[0].name) || null,
+      location_name: (locs && locs[0] && locs[0].name) || 'A restoration company',
+      split_by_payer: ls.split_by_payer,
+      referral_basis: ls.referral_basis, referral_rate: ls.referral_rate,
+      ins_basis: ls.ins_basis, ins_rate: ls.ins_rate,
+      oop_basis: ls.oop_basis, oop_rate: ls.oop_rate,
+      percent_scope: ls.percent_scope,
+      w9: ls.w9_certified_at ? {
+        legal_name: ls.w9_legal_name, tax_class: ls.w9_tax_class,
+        tin_type: ls.w9_tin_type, tin_last4: ls.w9_tin_last4,
+        certified_at: ls.w9_certified_at,
+      } : null,
+      bank: sec && sec.bank_account_last4 ? {
+        bank_name: sec.bank_name, account_type: sec.bank_account_type,
+        account_last4: sec.bank_account_last4,
+      } : null,
+    });
+  } catch (err) {
+    console.error('[portal me error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.get('/portal/leads', requireAuth, requireLeadSource, async (req, res) => {
+  try {
+    const [jobs, payouts] = await Promise.all([
+      sbGet(`jobs?lead_source_id=eq.${req.leadSource.id}&select=id,client_name,created_at,date_start,stage&order=created_at.desc&limit=200`),
+      sbGet(`lead_source_payouts?lead_source_id=eq.${req.leadSource.id}&select=job_id,amount,status,paid_at`),
+    ]);
+    const payoutByJob = new Map();
+    for (const p of payouts || []) if (p.job_id) payoutByJob.set(p.job_id, p);
+    res.json({
+      leads: (jobs || []).map(j => {
+        const p = payoutByJob.get(j.id);
+        return {
+          id: j.id,
+          client_name: j.client_name,
+          date: j.date_start || j.created_at,
+          status: partnerJobStatus(j.stage),
+          payout: p ? { amount: Number(p.amount), status: p.status, paid_at: p.paid_at } : null,
+        };
+      }),
+    });
+  } catch (err) {
+    console.error('[portal leads error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.get('/portal/payouts', requireAuth, requireLeadSource, async (req, res) => {
+  try {
+    const rows = await sbGet(
+      `lead_source_payouts?lead_source_id=eq.${req.leadSource.id}` +
+      `&select=id,amount,status,paid_at,note,created_at,jobs(client_name)&order=created_at.desc&limit=500`);
+    res.json({
+      payouts: (rows || []).map(p => ({
+        id: p.id, amount: Number(p.amount), status: p.status, paid_at: p.paid_at,
+        note: p.note, created_at: p.created_at,
+        client_name: (p.jobs && p.jobs.client_name) || null,
+      })),
+    });
+  } catch (err) {
+    console.error('[portal payouts error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/portal/bank', requireAuth, requireLeadSource, async (req, res) => {
+  if (!LEAD_ENC_KEYS[LEAD_ENC_CURRENT]) return res.status(503).json({ error: 'Not configured' });
+  const b = req.body || {};
+  const routing = String(b.routing || '').replace(/\D/g, '');
+  const account = String(b.account || '').replace(/\D/g, '');
+  const acctType = b.account_type === 'savings' ? 'savings' : 'checking';
+  const bankName = String(b.bank_name || '').trim() || null;
+  if (!isValidRouting(routing)) return res.status(400).json({ error: 'Routing number is not a valid 9-digit ABA number' });
+  if (account.length < 4 || account.length > 17) return res.status(400).json({ error: 'Account number must be 4–17 digits' });
+  try {
+    const lsId = req.leadSource.id;
+    const r = await sbAdmin('POST', '/rest/v1/lead_source_secure?on_conflict=lead_source_id', {
+      lead_source_id: lsId,
+      bank_routing_enc: encField(routing, `${lsId}:bank_routing`),
+      bank_account_enc: encField(account, `${lsId}:bank_account`),
+      bank_account_last4: account.slice(-4),
+      bank_account_type: acctType,
+      bank_name: bankName,
+      updated_at: new Date().toISOString(),
+    }, 'resolution=merge-duplicates,return=minimal');
+    if (!r.ok) return res.status(502).json({ error: 'Could not save bank details' });
+    res.json({ ok: true, bank: { bank_name: bankName, account_type: acctType, account_last4: account.slice(-4) } });
+  } catch (err) {
+    console.error('[portal bank error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Owner-side reveal for manual ACH entry. Admin: any; owner: own locations only.
+// Every reveal is audited. Values are returned once and never logged.
+app.post('/admin/lead-sources/bank-reveal', requireAuth, requireAdmin, async (req, res) => {
+  const id = String((req.body || {}).lead_source_id || '');
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid lead source id' });
+  try {
+    const lsRows = await sbGet(`lead_sources?id=eq.${id}&select=id,location_id`);
+    const ls = lsRows && lsRows[0];
+    if (!ls) return res.status(404).json({ error: 'Lead source not found' });
+    const prof = await sbGet(`profiles?id=eq.${req.userId}&select=role,location_id,location_ids`);
+    const p = prof && prof[0];
+    if (p && p.role === 'owner') {
+      const mine = (p.location_ids && p.location_ids.length ? p.location_ids : [p.location_id]).filter(Boolean);
+      if (!mine.includes(ls.location_id)) return res.status(403).json({ error: 'Not your location' });
+    }
+    const secs = await sbGet(`lead_source_secure?lead_source_id=eq.${id}&select=bank_routing_enc,bank_account_enc,bank_name,bank_account_type`);
+    const sec = secs && secs[0];
+    if (!sec || !sec.bank_routing_enc || !sec.bank_account_enc) {
+      return res.status(404).json({ error: 'No bank details on file' });
+    }
+    await sbAdmin('POST', '/rest/v1/bank_reveal_audit', {
+      lead_source_id: id, revealed_by: req.userId,
+    }, 'return=minimal');
+    res.json({
+      routing_number: decField(sec.bank_routing_enc, `${id}:bank_routing`),
+      account_number: decField(sec.bank_account_enc, `${id}:bank_account`),
+      bank_name: sec.bank_name, account_type: sec.bank_account_type,
+    });
+  } catch (err) {
+    console.error('[bank reveal error]', err.message);
+    res.status(502).json({ error: 'Reveal failed' });
   }
 });
 
