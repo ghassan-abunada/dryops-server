@@ -762,7 +762,7 @@ app.post('/webhooks/jobnimbus/payments', async (req, res) => {
 // range filter, verified working) and upserts complete rows. The first run
 // after deploy automatically catches up from each table's max(last_synced).
 const RECONCILE_INTERVAL_MS = 10 * 60 * 1000;
-const RECONCILE_OVERLAP_MS = 6 * 60 * 60 * 1000;      // re-pull window overlap
+const RECONCILE_OVERLAP_MS = 24 * 60 * 60 * 1000;     // re-pull window overlap
 const RECONCILE_MAX_LOOKBACK_MS = 45 * 24 * 60 * 60 * 1000;
 
 const sbHeaders = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
@@ -835,13 +835,24 @@ function jobRefFor(rec, jobMap) {
 }
 
 // Since-cursor per table: catch up from the newest last_synced (minus overlap).
-async function reconcileSinceSecs(table) {
+// Gotcha: webhooks also bump last_synced, so that cursor alone can leave older
+// webhook-created rows amount-less forever (slim payloads). Guard: also look
+// back to the oldest recent row whose amount column is still NULL and widen
+// the window to include it — those rows get re-pulled until they heal.
+async function reconcileSinceSecs(table, amountCol) {
   const now = Date.now();
-  let since = now - RECONCILE_MAX_LOOKBACK_MS;
+  const floor = now - RECONCILE_MAX_LOOKBACK_MS;
+  let since = floor;
   try {
     const rows = await sbSelect(table, 'select=last_synced&order=last_synced.desc.nullslast&limit=1');
     const last = rows?.[0]?.last_synced ? new Date(rows[0].last_synced).getTime() : NaN;
     if (!isNaN(last)) since = Math.max(since, last - RECONCILE_OVERLAP_MS);
+
+    const floorISO = new Date(floor).toISOString();
+    const nullRows = await sbSelect(table,
+      `select=jn_created&${amountCol}=is.null&jn_created=gt.${encodeURIComponent(floorISO)}&order=jn_created.asc&limit=1`);
+    const oldestNull = nullRows?.[0]?.jn_created ? new Date(nullRows[0].jn_created).getTime() : NaN;
+    if (!isNaN(oldestNull)) since = Math.min(since, Math.max(floor, oldestNull - RECONCILE_OVERLAP_MS));
   } catch (err) {
     console.error(`[jn-reconcile] ${table} cursor lookup failed, using max lookback:`, err.message);
   }
@@ -854,7 +865,10 @@ async function reconcileFinancials() {
   reconcileRunning = true;
   const nowISO = new Date().toISOString();
   try {
-    const [invSince, paySince] = await Promise.all([reconcileSinceSecs('invoices'), reconcileSinceSecs('payments')]);
+    const [invSince, paySince] = await Promise.all([
+      reconcileSinceSecs('invoices', 'total'),
+      reconcileSinceSecs('payments', 'amount'),
+    ]);
     const [invoices, payments] = await Promise.all([
       jnFetchUpdatedSince('/v2/invoices', invSince),
       jnFetchUpdatedSince('/payments', paySince),
