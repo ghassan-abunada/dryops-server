@@ -1305,6 +1305,42 @@ app.post('/admin/lead-sources/resend', requireAuth, requireAdmin, async (req, re
   }
 });
 
+// Google Places address autocomplete, proxied so the Maps key stays server-side.
+// Used by the app's address fields (e.g. new lead-source company). Same
+// admin/owner gating as the rest of /admin. Requires the "Places API" to be
+// enabled on the GOOGLE_MAPS_KEY project (Geocoding alone is not enough).
+app.get('/admin/places/autocomplete', requireAuth, requireAdmin, async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (q.length < 3) return res.json({ predictions: [] });
+  if (!GOOGLE_MAPS_KEY) return res.json({ predictions: [], error: 'Maps key not configured' });
+  try {
+    const params = new URLSearchParams({
+      input: q.slice(0, 200),
+      key: GOOGLE_MAPS_KEY,
+      types: 'address',
+      components: 'country:us',
+    });
+    // Session token groups the keystrokes of one lookup for Google's billing.
+    const session = String(req.query.session || '').slice(0, 64);
+    if (session) params.set('sessiontoken', session);
+    const r = await fetch(`https://maps.googleapis.com/maps/api/place/autocomplete/json?${params}`);
+    const d = await r.json().catch(() => null);
+    if (!d || (d.status !== 'OK' && d.status !== 'ZERO_RESULTS')) {
+      console.warn('[places autocomplete] status', d && d.status, (d && d.error_message) || '');
+      return res.json({ predictions: [] }); // degrade to manual typing
+    }
+    return res.json({
+      predictions: (d.predictions || []).slice(0, 5).map(p => ({
+        description: p.description,
+        place_id: p.place_id,
+      })),
+    });
+  } catch (err) {
+    console.error('[places autocomplete error]', err.message);
+    return res.json({ predictions: [] });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
 });
