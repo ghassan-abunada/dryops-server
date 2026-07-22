@@ -146,6 +146,22 @@ async function requireAdmin(req, res, next) {
   }
 }
 
+// Must run after requireAuth. Admin ONLY — unlike requireAdmin, owners are NOT
+// admitted. Used for the user-lifecycle endpoints (list/ban/delete/password):
+// the app exposes those to admins only, and letting owners at them would allow
+// modifying other owners outside the UI's rules.
+async function requireStrictAdmin(req, res, next) {
+  try {
+    const rows = await sbGet(`profiles?id=eq.${req.userId}&select=role`);
+    const role = Array.isArray(rows) && rows[0] ? rows[0].role : null;
+    if (role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+    next();
+  } catch (err) {
+    console.error('[strict-admin check error]', err.message);
+    res.status(502).json({ error: 'Role verification failed' });
+  }
+}
+
 // Like requireAdmin but also allows the executive role — used ONLY for the
 // CallRail endpoints (executives manage call tracking; they get no other writes).
 async function requireCallAccess(req, res, next) {
@@ -1038,10 +1054,22 @@ app.use('/jnfiles', requireAuth, async (req, res) => {
 // ── Invite user (creates Supabase account via Admin API) ─────────────────────
 // Admin/owner only.
 app.post('/invite-user', requireAuth, requireAdmin, async (req, res) => {
-  const { email, role, location_id, location_name, full_name } = req.body;
+  const { email, role, location_id, location_name, full_name, app_role_id } = req.body;
   if (!email) return res.status(400).json({ error: 'email is required' });
 
   try {
+    // Custom app role: resolve its base_role (server-authoritative). The
+    // invite metadata role is clamped by handle_new_user anyway; the trusted
+    // path is the profile PATCH below, after the auth user exists.
+    let inviteRole = role;
+    let appRoleId = null;
+    if (app_role_id) {
+      const ar = await sbGet(`app_roles?id=eq.${encodeURIComponent(app_role_id)}&select=base_role`);
+      const base = Array.isArray(ar) && ar[0] ? ar[0].base_role : null;
+      if (!base) return res.status(400).json({ error: 'app_role_id not found' });
+      inviteRole = base;
+      appRoleId = app_role_id;
+    }
     const r = await fetch(`${SUPABASE_URL}/auth/v1/invite`, {
       method: 'POST',
       headers: {
@@ -1051,12 +1079,27 @@ app.post('/invite-user', requireAuth, requireAdmin, async (req, res) => {
       },
       body: JSON.stringify({
         email,
-        data: { role, location_id, location_name, full_name,
+        data: { role: inviteRole, location_id, location_name, full_name,
                 location_ids: req.body.location_ids, location_names: req.body.location_names },
         redirect_to: WEB_APP_URL,
       }),
     });
     const body = await r.json();
+    // handle_new_user clamps metadata roles; set the real role + bundle via
+    // service key once the profile row exists (same statement → satisfies the
+    // app-role consistency trigger).
+    if (r.ok && appRoleId && body && body.id) {
+      const pr = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${body.id}`, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ role: inviteRole, app_role_id: appRoleId, updated_at: new Date().toISOString() }),
+      });
+      if (!pr.ok) {
+        const t = await pr.text();
+        console.error('[invite-user] app-role patch failed', pr.status, t.slice(0, 200));
+        return res.status(502).json({ error: 'invite sent but custom role assignment failed', detail: t.slice(0, 200) });
+      }
+    }
     res.status(r.status).json(body);
   } catch (err) {
     console.error('[invite-user error]', err.message);
@@ -1077,10 +1120,20 @@ function genTempPassword() {
 }
 
 app.post('/admin/create-user', requireAuth, requireAdmin, async (req, res) => {
-  const { email, full_name, role, location_id, location_name, location_ids, location_names } = req.body;
+  const { email, full_name, role, location_id, location_name, location_ids, location_names, app_role_id } = req.body;
   if (!email) return res.status(400).json({ error: 'email is required' });
   const allowedRoles = ['owner', 'technician', 'technician_2', 'executive', 'admin'];
-  const finalRole = allowedRoles.includes(role) ? role : 'technician';
+  let finalRole = allowedRoles.includes(role) ? role : 'technician';
+  // Custom app role: server-authoritative — profiles.role is forced to the
+  // bundle's base_role (the consistency trigger requires the pair to match).
+  let appRoleId = null;
+  if (app_role_id) {
+    const ar = await sbGet(`app_roles?id=eq.${encodeURIComponent(app_role_id)}&select=base_role`);
+    const base = Array.isArray(ar) && ar[0] ? ar[0].base_role : null;
+    if (!base) return res.status(400).json({ error: 'app_role_id not found' });
+    finalRole = base;
+    appRoleId = app_role_id;
+  }
   const tempPassword = genTempPassword();
 
   try {
@@ -1102,6 +1155,7 @@ app.post('/admin/create-user', requireAuth, requireAdmin, async (req, res) => {
     //    technician row; overwrite it via service role).
     const profile = {
       id: created.id, full_name: full_name || null, role: finalRole,
+      app_role_id: appRoleId,
       location_id: location_id || null, location_name: location_name || null,
       location_ids: location_ids || [], location_names: location_names || [],
       updated_at: new Date().toISOString(),
@@ -1120,6 +1174,164 @@ app.post('/admin/create-user', requireAuth, requireAdmin, async (req, res) => {
     return res.status(200).json({ ok: true, user_id: created.id, email, temp_password: tempPassword });
   } catch (err) {
     console.error('[create-user error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ── Admin user management (admin ONLY — requireStrictAdmin) ──────────────────
+// GoTrue admin API helper (service key).
+async function gotrueAdmin(method, path, body) {
+  const r = await fetch(`${SUPABASE_URL}/auth/v1/admin/${path}`, {
+    method,
+    headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let json = null;
+  try { json = await r.json(); } catch { /* empty body */ }
+  return { ok: r.ok, status: r.status, body: json };
+}
+
+// Lifecycle endpoints must never act on the caller themselves or on admins.
+// Sends the error response and returns false when the target is off-limits.
+async function assertActionableTarget(req, res, targetId) {
+  if (!targetId) { res.status(400).json({ error: 'user id required' }); return false; }
+  if (targetId === req.userId) {
+    res.status(400).json({ error: 'You cannot perform this action on your own account' });
+    return false;
+  }
+  const rows = await sbGet(`profiles?id=eq.${encodeURIComponent(targetId)}&select=role`);
+  const role = Array.isArray(rows) && rows[0] ? rows[0].role : null;
+  if (role === 'admin') {
+    res.status(403).json({ error: 'Admin accounts cannot be modified here' });
+    return false;
+  }
+  return true;
+}
+
+// Rich user list: auth users (email, last sign-in, ban state) merged with
+// profiles (name, role, custom app role, locations). lead_source portal
+// accounts are excluded — they're managed from the Referrals screen.
+app.get('/admin/users', requireAuth, requireStrictAdmin, async (req, res) => {
+  try {
+    const users = [];
+    for (let page = 1; page <= 10; page++) {
+      const { ok, body } = await gotrueAdmin('GET', `users?page=${page}&per_page=100`);
+      if (!ok) return res.status(502).json({ error: 'failed to list auth users' });
+      const batch = (body && body.users) || [];
+      users.push(...batch);
+      if (batch.length < 100) break;
+    }
+    const profiles = (await sbGet('profiles?select=id,full_name,role,app_role_id,location_id,location_name,location_ids,location_names')) || [];
+    const byId = new Map(profiles.map(p => [p.id, p]));
+    const now = Date.now();
+    const out = [];
+    for (const u of users) {
+      const p = byId.get(u.id) || {};
+      if (p.role === 'lead_source') continue;
+      const banned = u.banned_until && new Date(u.banned_until).getTime() > now;
+      const status = banned ? 'deactivated' : (u.invited_at && !u.last_sign_in_at ? 'invited' : 'active');
+      out.push({
+        id: u.id,
+        email: u.email,
+        created_at: u.created_at,
+        last_sign_in_at: u.last_sign_in_at || null,
+        invited_at: u.invited_at || null,
+        banned_until: banned ? u.banned_until : null,
+        status,
+        full_name: p.full_name || null,
+        role: p.role || null,
+        app_role_id: p.app_role_id || null,
+        location_ids: (p.location_ids && p.location_ids.length)
+          ? p.location_ids
+          : (p.location_id ? [p.location_id] : []),
+        location_names: (p.location_names && p.location_names.length)
+          ? p.location_names
+          : (p.location_name ? [p.location_name] : []),
+      });
+    }
+    res.json({ users: out });
+  } catch (err) {
+    console.error('[admin users error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Ban ≈ deactivate. Bans block new token issuance, not tokens already in the
+// wild (≤1h) — the best-effort sessions delete closes live sessions where the
+// GoTrue version supports it.
+app.post('/admin/users/:id/deactivate', requireAuth, requireStrictAdmin, async (req, res) => {
+  try {
+    if (!(await assertActionableTarget(req, res, req.params.id))) return;
+    const { ok, status, body } = await gotrueAdmin('PUT', `users/${req.params.id}`, { ban_duration: '87600h' });
+    if (!ok) return res.status(status).json({ error: (body && (body.msg || body.message)) || 'deactivate failed' });
+    try { await gotrueAdmin('DELETE', `users/${req.params.id}/sessions`); } catch { /* best effort */ }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[deactivate error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/admin/users/:id/reactivate', requireAuth, requireStrictAdmin, async (req, res) => {
+  try {
+    if (!(await assertActionableTarget(req, res, req.params.id))) return;
+    const { ok, status, body } = await gotrueAdmin('PUT', `users/${req.params.id}`, { ban_duration: 'none' });
+    if (!ok) return res.status(status).json({ error: (body && (body.msg || body.message)) || 'reactivate failed' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[reactivate error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.delete('/admin/users/:id', requireAuth, requireStrictAdmin, async (req, res) => {
+  try {
+    if (!(await assertActionableTarget(req, res, req.params.id))) return;
+    const { ok, status, body } = await gotrueAdmin('DELETE', `users/${req.params.id}`);
+    if (!ok) return res.status(status).json({ error: (body && (body.msg || body.message)) || 'delete failed' });
+    // profiles.id FK cascades from auth.users; defensive cleanup is idempotent.
+    try {
+      await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(req.params.id)}`, {
+        method: 'DELETE',
+        headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+      });
+    } catch { /* cascade already handled it */ }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[delete user error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/admin/users/:id/reset-password', requireAuth, requireStrictAdmin, async (req, res) => {
+  try {
+    if (!(await assertActionableTarget(req, res, req.params.id))) return;
+    const tempPassword = genTempPassword();
+    const { ok, status, body } = await gotrueAdmin('PUT', `users/${req.params.id}`, { password: tempPassword });
+    if (!ok) return res.status(status).json({ error: (body && (body.msg || body.message)) || 'reset failed' });
+    try { await gotrueAdmin('DELETE', `users/${req.params.id}/sessions`); } catch { /* best effort */ }
+    res.json({ ok: true, temp_password: tempPassword });
+  } catch (err) {
+    console.error('[reset-password error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/admin/users/:id/resend-invite', requireAuth, requireStrictAdmin, async (req, res) => {
+  try {
+    const { ok, body } = await gotrueAdmin('GET', `users/${req.params.id}`);
+    if (!ok || !body || !body.email) return res.status(404).json({ error: 'user not found' });
+    if (body.last_sign_in_at) return res.status(400).json({ error: 'User is already active — nothing to resend' });
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/invite`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: body.email, data: body.user_metadata || {}, redirect_to: WEB_APP_URL }),
+    });
+    const inv = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: inv.msg || inv.message || 'resend failed' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[resend-invite error]', err.message);
     res.status(502).json({ error: err.message });
   }
 });
