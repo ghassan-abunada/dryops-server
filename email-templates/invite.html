@@ -1,0 +1,160 @@
+<!--
+  DryOps — "Invite user" email template
+  Paste this HTML into: Supabase Dashboard → Authentication → Emails →
+  Templates → "Invite user" → Message body (source/HTML view).
+
+  Template variables (Supabase GoTrue / Go text-template):
+    {{ .ConfirmationURL }}   full accept-invite action link (confirms + redirects)
+    {{ .Email }}             the invited email address
+    {{ .Data.full_name }}    metadata sent by /invite-user
+    {{ .Data.role }}         "admin" | "owner" | "technician" | "executive"
+  (location is deliberately NOT shown — assignments can change and some roles
+   have none)
+
+  Email-client notes: table layout + inline styles for Outlook; the <style>
+  block only progressively enhances (dark mode, hover). Safe to edit copy.
+-->
+<!DOCTYPE html>
+<html lang="en" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <title>You're invited to DryOps</title>
+  <!--[if mso]>
+  <noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript>
+  <![endif]-->
+  <style>
+    body { margin: 0; padding: 0; width: 100% !important; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table { border-collapse: collapse; }
+    img { border: 0; line-height: 100%; outline: none; text-decoration: none; -ms-interpolation-mode: bicubic; }
+    a { text-decoration: none; }
+    .cta:hover { background-color: #075985 !important; }
+    @media (max-width: 620px) {
+      .container { width: 100% !important; }
+      .px { padding-left: 24px !important; padding-right: 24px !important; }
+      .h1 { font-size: 26px !important; line-height: 32px !important; }
+    }
+    @media (prefers-color-scheme: dark) {
+      .bg { background-color: #0A0F1A !important; }
+      .card { background-color: #131C2E !important; }
+      .ink { color: #F1F5F9 !important; }
+      .ink2 { color: #CBD5E1 !important; }
+      .ink3 { color: #94A3B8 !important; }
+      .detail { background-color: #0F1728 !important; border-color: #1E293B !important; }
+      .divider { border-color: #1E293B !important; }
+      .fallback { background-color: #0F1728 !important; }
+    }
+  </style>
+</head>
+<body class="bg" style="margin:0; padding:0; background-color:#F1F5F9;">
+  <!-- Preheader (hidden preview text) -->
+  <div style="display:none; max-height:0; overflow:hidden; mso-hide:all; font-size:1px; line-height:1px; color:#F1F5F9; opacity:0;">
+    Your DryOps account is ready — accept your invitation to get started.&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;
+  </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="bg" style="background-color:#F1F5F9;">
+    <tr>
+      <td align="center" style="padding:32px 12px;">
+
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" class="container" style="width:600px; max-width:600px;">
+
+          <!-- Header band -->
+          <tr>
+            <td align="center" style="background-color:#1C2333; border-radius:16px 16px 0 0; padding:34px 40px;">
+              <span style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:26px; font-weight:800; letter-spacing:-0.5px; color:#F1F5F9;">Dry<span style="color:#38BDF8;">Ops</span></span>
+            </td>
+          </tr>
+
+          <!-- Card body -->
+          <tr>
+            <td class="card px" style="background-color:#FFFFFF; padding:40px 48px 8px 48px;">
+              <div style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:12px; font-weight:700; letter-spacing:1.5px; text-transform:uppercase; color:#0369A1;">You're invited</div>
+              <h1 class="h1 ink" style="margin:10px 0 0 0; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:30px; line-height:36px; font-weight:800; color:#0F172A;">Welcome to the team!</h1>
+
+              <p class="ink2" style="margin:22px 0 0 0; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:16px; line-height:26px; color:#334155;">
+                {{ if .Data.full_name }}Hi {{ .Data.full_name }},{{ else }}Hi there,{{ end }}
+              </p>
+              <p class="ink2" style="margin:14px 0 0 0; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:16px; line-height:26px; color:#334155;">
+                You've been invited to join <strong style="color:#0F172A;">DryOps</strong> — the hub where the team manages jobs, drying logs, invoicing, and performance stats, all in one place. Accept your invitation below to set your password and get started.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Details card -->
+          <tr>
+            <td class="card px" style="background-color:#FFFFFF; padding:26px 48px 6px 48px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="detail" style="background-color:#F8FAFC; border:1px solid #E2E8F0; border-radius:12px;">
+                <tr>
+                  <td style="padding:18px 22px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:12px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:#94A3B8; padding-bottom:4px;">Your role</td>
+                      </tr>
+                      <tr>
+                        <td class="ink" style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:17px; font-weight:700; color:#0F172A; text-transform:capitalize;">{{ if .Data.role }}{{ .Data.role }}{{ else }}Team member{{ end }}</td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- CTA button (bulletproof) -->
+          <tr>
+            <td class="card px" align="center" style="background-color:#FFFFFF; padding:30px 48px 8px 48px;">
+              <!--[if mso]>
+              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="{{ .ConfirmationURL }}" style="height:52px;v-text-anchor:middle;width:320px;" arcsize="24%" strokecolor="#0369A1" fillcolor="#0369A1">
+                <w:anchorlock/>
+                <center style="color:#ffffff;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:16px;font-weight:700;">Accept your invitation</center>
+              </v:roundrect>
+              <![endif]-->
+              <!--[if !mso]><!-- -->
+              <a href="{{ .ConfirmationURL }}" class="cta" style="display:inline-block; background-color:#0369A1; color:#FFFFFF; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:16px; font-weight:700; line-height:52px; text-align:center; text-decoration:none; width:320px; max-width:80%; border-radius:12px; box-shadow:0 2px 6px rgba(3,105,161,0.25);">Accept your invitation</a>
+              <!--<![endif]-->
+            </td>
+          </tr>
+
+          <!-- Fallback link -->
+          <tr>
+            <td class="card px" style="background-color:#FFFFFF; padding:18px 48px 6px 48px;">
+              <p class="ink3" style="margin:0; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#94A3B8;">
+                Button not working? Copy and paste this link into your browser:
+              </p>
+              <p class="fallback" style="margin:8px 0 0 0; padding:12px 14px; background-color:#F8FAFC; border-radius:8px; font-family:'Courier New',monospace; font-size:12px; line-height:18px; color:#0369A1; word-break:break-all;">
+                <a href="{{ .ConfirmationURL }}" style="color:#0369A1; text-decoration:none;">{{ .ConfirmationURL }}</a>
+              </p>
+            </td>
+          </tr>
+
+          <!-- Security note -->
+          <tr>
+            <td class="card px" style="background-color:#FFFFFF; border-radius:0 0 0 0; padding:22px 48px 34px 48px;">
+              <div style="border-top:1px solid #E2E8F0; padding-top:20px;" class="divider">
+                <p class="ink3" style="margin:0; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#94A3B8;">
+                  This invitation was sent to <strong style="color:#334155;">{{ .Email }}</strong> and is unique to you. If you weren't expecting it, you can safely ignore this email — no account will be created.
+                </p>
+              </div>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td align="center" style="padding:26px 40px 8px 40px;">
+              <div style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:14px; font-weight:800; color:#334155;">Dry<span style="color:#0369A1;">Ops</span></div>
+              <div class="ink3" style="font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:12px; line-height:18px; color:#94A3B8; margin-top:6px;">
+                Water damage restoration operations<br>
+                <a href="https://dryops.app" style="color:#94A3B8; text-decoration:underline;">dryops.app</a>
+              </div>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
