@@ -288,6 +288,7 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   set('tested', pick('cf_string_8', 'Tested or Not Tested'));
   set('insurer', pick('cf_string_9'));
   set('cat', pick('cf_string_18'));
+  set('sales_rep', pick('sales_rep_name')); // JN built-in display name, e.g. "Jane Smith"
   set('date_loss', jnToDate(job.cf_date_1));
   set('date_start', jnToDate(job.start_date));
   set('record_type', recordType || undefined);
@@ -1002,6 +1003,91 @@ if (SUPABASE_SERVICE_KEY) {
   setTimeout(reconcileFinancials, 15 * 1000); // catch-up shortly after boot
   setInterval(reconcileFinancials, RECONCILE_INTERVAL_MS);
 }
+
+// ── Sales-rep backfill ────────────────────────────────────────────────────────
+// One-time: pull every JN job, extract sales_rep_name, and fill jobs.sales_rep
+// for rows that don't have one yet. The webhook keeps new jobs current; this
+// covers everything created before the sales_rep mapping existed. Updates are
+// batched one PATCH per (rep, ≤80 jn_ids) — never an upsert, so it can't create
+// skeleton rows for JN jobs we don't track.
+let salesRepBackfillRunning = false;
+let lastSalesRepBackfill = null;
+
+async function backfillSalesReps() {
+  if (salesRepBackfillRunning) return;
+  salesRepBackfillRunning = true;
+  lastSalesRepBackfill = { phase: 'started', at: new Date().toISOString() };
+  try {
+    // All local jobs still missing a rep (paged: PostgREST caps a response at max-rows).
+    const missing = [];
+    for (let offset = 0; ; offset += 1000) {
+      const page = await sbSelect('jobs', `select=jn_id&sales_rep=is.null&order=jn_id&limit=1000&offset=${offset}`);
+      missing.push(...page);
+      if (page.length < 1000) break;
+    }
+    const missingIds = new Set(missing.map(r => r.jn_id));
+    console.log(`[salesrep-backfill] ${missingIds.size} local jobs missing sales_rep`);
+    if (missingIds.size === 0) {
+      lastSalesRepBackfill = { phase: 'done', updated: 0, at: new Date().toISOString() };
+      return;
+    }
+
+    // Everything JN has (jnFetchUpdatedSince pages + advances past the ES 10k cap).
+    const jnJobs = await jnFetchUpdatedSince('/jobs', 0);
+    console.log(`[salesrep-backfill] fetched ${jnJobs.length} JN jobs`);
+    const idsByRep = new Map(); // rep name -> [jn_id]
+    for (const j of jnJobs) {
+      const id = String(j.jnid || j.id || j.recid || '');
+      const rep = typeof j.sales_rep_name === 'string' ? j.sales_rep_name.trim() : '';
+      if (!id || !rep || !missingIds.has(id)) continue;
+      if (!idsByRep.has(rep)) idsByRep.set(rep, []);
+      idsByRep.get(rep).push(id);
+    }
+
+    let updated = 0;
+    for (const [rep, ids] of idsByRep) {
+      for (let i = 0; i < ids.length; i += 80) {
+        const chunk = ids.slice(i, i + 80).map(id => `"${id}"`).join(',');
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?jn_id=in.(${encodeURIComponent(chunk)})`, {
+          method: 'PATCH',
+          headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+          body: JSON.stringify({ sales_rep: rep }),
+        });
+        if (!r.ok) throw new Error(`jobs patch ${r.status} ${(await r.text()).slice(0, 200)}`);
+        updated += Math.min(80, ids.length - i);
+      }
+    }
+    console.log(`[salesrep-backfill] done — set sales_rep on ${updated} jobs across ${idsByRep.size} reps`);
+    lastSalesRepBackfill = { phase: 'done', updated, reps: idsByRep.size, at: new Date().toISOString() };
+  } catch (err) {
+    console.error('[salesrep-backfill] failed:', err.message);
+    lastSalesRepBackfill = { phase: 'error', error: err.message, at: new Date().toISOString() };
+  } finally {
+    salesRepBackfillRunning = false;
+  }
+}
+
+// Auto-run once shortly after boot, but only while the column is essentially
+// unpopulated (no job has a rep yet) — after the first successful run this is
+// a no-op fetch of one row per boot.
+if (SUPABASE_SERVICE_KEY) {
+  setTimeout(async () => {
+    try {
+      const any = await sbSelect('jobs', 'select=id&sales_rep=not.is.null&limit=1');
+      if (!any.length) backfillSalesReps();
+    } catch (err) { console.error('[salesrep-backfill] boot check failed:', err.message); }
+  }, 30 * 1000);
+}
+
+// Manual re-run (e.g. after JN rep reassignments): fills NULLs only.
+app.post('/admin/jobs/backfill-sales-rep', requireAuth, requireAdmin, async (req, res) => {
+  if (salesRepBackfillRunning) return res.status(409).json({ error: 'Backfill already running', last: lastSalesRepBackfill });
+  backfillSalesReps(); // runs in background
+  res.status(202).json({ ok: true, started: true });
+});
+app.get('/admin/jobs/backfill-sales-rep', requireAuth, requireAdmin, (req, res) => {
+  res.json({ running: salesRepBackfillRunning, last: lastSalesRepBackfill });
+});
 
 // ── JobNimbus photo download proxy ───────────────────────────────────────────
 // GET /jnphoto/:jnid — follows the JN redirect and streams the image binary
