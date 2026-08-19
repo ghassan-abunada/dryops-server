@@ -1032,8 +1032,32 @@ async function backfillSalesReps() {
       return;
     }
 
-    // Everything JN has (jnFetchUpdatedSince pages + advances past the ES 10k cap).
-    const jnJobs = await jnFetchUpdatedSince('/jobs', 0);
+    // Everything JN has, pulled in month-sized date_created windows. NOT
+    // jnFetchUpdatedSince: its moving-cursor pagination assumes results come
+    // back ordered by date_updated, but JN returns them unordered — on the
+    // first run the cursor leapt past most of the history and left Jan–May
+    // at ~0% coverage. Fixed windows have no ordering assumption, and no
+    // month is anywhere near the ES 10k from+size cap.
+    const jnJobs = [];
+    const cur = new Date(Date.UTC(2024, 0, 1));
+    while (cur < new Date()) {
+      const gte = Math.floor(cur.getTime() / 1000);
+      cur.setUTCMonth(cur.getUTCMonth() + 1);
+      const lt = Math.floor(cur.getTime() / 1000);
+      const filter = encodeURIComponent(JSON.stringify({ must: [{ range: { date_created: { gte, lt } } }] }));
+      let count = Infinity;
+      for (let from = 0; from < 10000 && from < count; from += 500) {
+        const r = await fetch(`${JN_BASE}/jobs?size=500&from=${from}&filter=${filter}`, {
+          headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+        });
+        if (!r.ok) throw new Error(`JN /jobs ${r.status}`);
+        const data = await r.json();
+        const page = data?.results ?? data?.data ?? [];
+        count = data?.count ?? data?.total ?? page.length;
+        jnJobs.push(...page);
+        if (page.length < 500) break;
+      }
+    }
     console.log(`[salesrep-backfill] fetched ${jnJobs.length} JN jobs`);
     const idsByRep = new Map(); // rep name -> [jn_id]
     for (const j of jnJobs) {
@@ -1067,20 +1091,23 @@ async function backfillSalesReps() {
   }
 }
 
-// Auto-run once shortly after boot, but only while the column is essentially
-// unpopulated. Threshold, NOT zero: live webhook events stamp reps on a few
-// jobs within seconds of boot, so an is-empty check races and skips (that
-// exact race ate the first run). A completed backfill leaves tens of
-// thousands populated, so <1000 can only mean it hasn't really run.
+// Auto-run once shortly after boot, but only while coverage is clearly
+// incomplete. Ratio, NOT an absolute count: live webhook events stamp reps
+// within seconds of boot (an is-empty check raced and skipped run #1), and a
+// partial run can leave thousands populated (run #2's pagination bug did).
+// A completed backfill covers well over 30% of all jobs; below that, run.
 if (SUPABASE_SERVICE_KEY) {
   setTimeout(async () => {
     try {
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?select=id&sales_rep=not.is.null&limit=1`, {
-        method: 'HEAD', headers: { ...sbHeaders, Prefer: 'count=exact' },
-      });
-      const count = Number((r.headers.get('content-range') || '').split('/')[1] || 0);
-      if (count < 1000) backfillSalesReps();
-      else console.log(`[salesrep-backfill] boot check: ${count} jobs already have sales_rep — skipping`);
+      const countOf = async (q) => {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?select=id${q}&limit=1`, {
+          method: 'HEAD', headers: { ...sbHeaders, Prefer: 'count=exact' },
+        });
+        return Number((r.headers.get('content-range') || '').split('/')[1] || 0);
+      };
+      const [withRep, total] = await Promise.all([countOf('&sales_rep=not.is.null'), countOf('')]);
+      if (total > 0 && withRep / total < 0.3) backfillSalesReps();
+      else console.log(`[salesrep-backfill] boot check: ${withRep}/${total} jobs have sales_rep — skipping`);
     } catch (err) { console.error('[salesrep-backfill] boot check failed:', err.message); }
   }, 30 * 1000);
 }
