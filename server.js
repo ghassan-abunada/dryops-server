@@ -1068,13 +1068,19 @@ async function backfillSalesReps() {
 }
 
 // Auto-run once shortly after boot, but only while the column is essentially
-// unpopulated (no job has a rep yet) — after the first successful run this is
-// a no-op fetch of one row per boot.
+// unpopulated. Threshold, NOT zero: live webhook events stamp reps on a few
+// jobs within seconds of boot, so an is-empty check races and skips (that
+// exact race ate the first run). A completed backfill leaves tens of
+// thousands populated, so <1000 can only mean it hasn't really run.
 if (SUPABASE_SERVICE_KEY) {
   setTimeout(async () => {
     try {
-      const any = await sbSelect('jobs', 'select=id&sales_rep=not.is.null&limit=1');
-      if (!any.length) backfillSalesReps();
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?select=id&sales_rep=not.is.null&limit=1`, {
+        method: 'HEAD', headers: { ...sbHeaders, Prefer: 'count=exact' },
+      });
+      const count = Number((r.headers.get('content-range') || '').split('/')[1] || 0);
+      if (count < 1000) backfillSalesReps();
+      else console.log(`[salesrep-backfill] boot check: ${count} jobs already have sales_rep — skipping`);
     } catch (err) { console.error('[salesrep-backfill] boot check failed:', err.message); }
   }, 30 * 1000);
 }
