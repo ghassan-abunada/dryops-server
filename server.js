@@ -1122,6 +1122,197 @@ app.get('/admin/jobs/backfill-sales-rep', requireAuth, requireAdmin, (req, res) 
   res.json({ running: salesRepBackfillRunning, last: lastSalesRepBackfill });
 });
 
+// ── JobNimbus files mirror (photos-per-job metric) ───────────────────────────
+// The exec "Photos" column and rep Docs % (see supabase/add_jn_files_photo_
+// metrics.sql in the app repo) count app-uploaded `photos` rows plus JN-native
+// image files. JN file metadata was never persisted (files.tsx pulls it live
+// per job) and there is no JN file webhook — automations are unreliable (see
+// financials reconcile above) — so this mirrors JN *image* files into
+// public.jn_files by periodic pull: a 10-min incremental loop plus a one-time
+// windowed backfill. Hard-deleted JN files that never reappear in /files
+// results leave stale rows (is_active:false payloads ARE handled); a periodic
+// full re-list isn't worth that cost for a metric.
+
+const isJnImage = (f) => (f.jnid || f.id) && f.subtype === 'image'; // exact filter files.tsx uses
+
+function jnFileRow(f, jobMap, nowISO) {
+  const ref = (Array.isArray(f.related) ? f.related : []).find(x => x && x.type === 'job' && x.id);
+  return {
+    jn_id: String(f.jnid ?? f.id),
+    job_jn_id: ref ? String(ref.id) : null,
+    job_id: jobRefFor(f, jobMap).job_id,
+    subtype: f.subtype ?? null,
+    content_type: f.content_type ?? null,
+    filename: f.filename ?? null,
+    is_active: f.is_active !== undefined ? !!f.is_active : true,
+    jn_created: jnToISO(f.date_created) ?? null,
+    jn_updated: jnToISO(f.date_updated ?? f.date_modified) ?? null,
+    last_synced: nowISO,
+  };
+}
+
+// Duplicate jn_ids within one bulk INSERT make ON CONFLICT fail ("cannot
+// affect row a second time"), and both pull paths can return a record twice
+// (cursor overlap / window overlap) — dedupe before upserting.
+async function upsertJnFileRows(rows) {
+  const uniq = [...new Map(rows.map(r => [r.jn_id, r])).values()];
+  for (let i = 0; i < uniq.length; i += 500) await sbBulkUpsert('jn_files', uniq.slice(i, i + 500));
+  return uniq.length;
+}
+
+// Re-link mirror rows whose job hadn't synced yet when the file arrived.
+async function relinkJnFiles() {
+  const orphans = await sbSelect('jn_files', 'select=jn_id,job_jn_id&job_id=is.null&job_jn_id=not.is.null&limit=1000');
+  if (!orphans.length) return 0;
+  const jobJnIds = [...new Set(orphans.map(o => o.job_jn_id))];
+  const map = new Map();
+  for (let i = 0; i < jobJnIds.length; i += 100) {
+    const chunk = jobJnIds.slice(i, i + 100).map(id => `"${id}"`).join(',');
+    const rows = await sbSelect('jobs', `jn_id=in.(${encodeURIComponent(chunk)})&select=jn_id,id`);
+    for (const row of rows) map.set(row.jn_id, row.id);
+  }
+  const byJob = new Map(); // resolved job uuid -> [file jn_id]
+  for (const o of orphans) {
+    const jobId = map.get(o.job_jn_id);
+    if (!jobId) continue;
+    if (!byJob.has(jobId)) byJob.set(jobId, []);
+    byJob.get(jobId).push(o.jn_id);
+  }
+  let linked = 0;
+  for (const [jobId, fileIds] of byJob) {
+    for (let i = 0; i < fileIds.length; i += 80) {
+      const chunk = fileIds.slice(i, i + 80).map(id => `"${id}"`).join(',');
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/jn_files?jn_id=in.(${encodeURIComponent(chunk)})`, {
+        method: 'PATCH',
+        headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ job_id: jobId }),
+      });
+      if (!r.ok) throw new Error(`jn_files patch ${r.status} ${(await r.text()).slice(0, 200)}`);
+      linked += Math.min(80, fileIds.length - i);
+    }
+  }
+  return linked;
+}
+
+let jnFilesReconcileRunning = false;
+async function reconcileJnFiles() {
+  if (jnFilesReconcileRunning) return;
+  jnFilesReconcileRunning = true;
+  const nowISO = new Date().toISOString();
+  try {
+    // Cursor: newest last_synced minus overlap, floored at max lookback. The
+    // unordered-results caveat on jnFetchUpdatedSince (see sales-rep backfill)
+    // is acceptable here: the window is ≤45 days, upserts are idempotent, and
+    // the 24h overlap self-heals; deep history is backfillJnFiles' job.
+    const floor = Date.now() - RECONCILE_MAX_LOOKBACK_MS;
+    let since = floor;
+    try {
+      const rows = await sbSelect('jn_files', 'select=last_synced&order=last_synced.desc.nullslast&limit=1');
+      const last = rows?.[0]?.last_synced ? new Date(rows[0].last_synced).getTime() : NaN;
+      if (!isNaN(last)) since = Math.max(floor, last - RECONCILE_OVERLAP_MS);
+    } catch (err) {
+      console.error('[jnfiles-reconcile] cursor lookup failed, using max lookback:', err.message);
+    }
+    const files = (await jnFetchUpdatedSince('/files', Math.floor(since / 1000))).filter(isJnImage);
+    const jobMap = await resolveJobRefs(files);
+    const upserted = await upsertJnFileRows(files.map(f => jnFileRow(f, jobMap, nowISO)));
+    const linked = await relinkJnFiles();
+    console.log(`[jnfiles-reconcile] upserted ${upserted} image files, re-linked ${linked}`);
+  } catch (err) {
+    console.error('[jnfiles-reconcile] failed:', err.message);
+  } finally {
+    jnFilesReconcileRunning = false;
+  }
+}
+
+// One-time backfill: fixed date_created windows from 2024-01-01 (same epoch as
+// the sales-rep backfill — fixed windows have no ordering assumption, unlike
+// jnFetchUpdatedSince). Unlike jobs, photo volume in a month CAN exceed the ES
+// from+size 10k cap, so a window reporting >9000 records is split in half and
+// recursed instead of paging past the cap.
+let jnFilesBackfillRunning = false;
+let lastJnFilesBackfill = null;
+
+async function jnFilesWindow(gte, lt, out, depth = 0) {
+  const filter = encodeURIComponent(JSON.stringify({ must: [{ range: { date_created: { gte, lt } } }] }));
+  let count = Infinity;
+  for (let from = 0; from < 10000 && from < count; from += 500) {
+    const r = await fetch(`${JN_BASE}/files?size=500&from=${from}&filter=${filter}`, {
+      headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+    });
+    if (!r.ok) throw new Error(`JN /files ${r.status}`);
+    const data = await r.json();
+    const page = data?.results ?? data?.data ?? [];
+    count = data?.count ?? data?.total ?? page.length;
+    if (from === 0 && count > 9000 && depth < 12 && lt - gte > 3600) {
+      const mid = Math.floor((gte + lt) / 2);
+      await jnFilesWindow(gte, mid, out, depth + 1);
+      await jnFilesWindow(mid, lt, out, depth + 1);
+      return;
+    }
+    out.push(...page.filter(isJnImage));
+    if (page.length < 500) break;
+  }
+}
+
+async function backfillJnFiles() {
+  if (jnFilesBackfillRunning) return;
+  jnFilesBackfillRunning = true;
+  lastJnFilesBackfill = { phase: 'started', at: new Date().toISOString() };
+  try {
+    const files = [];
+    const cur = new Date(Date.UTC(2024, 0, 1));
+    while (cur < new Date()) {
+      const gte = Math.floor(cur.getTime() / 1000);
+      cur.setUTCMonth(cur.getUTCMonth() + 1);
+      const lt = Math.floor(cur.getTime() / 1000);
+      await jnFilesWindow(gte, lt, files);
+    }
+    console.log(`[jnfiles-backfill] fetched ${files.length} JN image files`);
+    const nowISO = new Date().toISOString();
+    const jobMap = await resolveJobRefs(files);
+    const upserted = await upsertJnFileRows(files.map(f => jnFileRow(f, jobMap, nowISO)));
+    const linked = await relinkJnFiles();
+    console.log(`[jnfiles-backfill] done — upserted ${upserted} files, re-linked ${linked}`);
+    lastJnFilesBackfill = { phase: 'done', upserted, linked, at: new Date().toISOString() };
+  } catch (err) {
+    console.error('[jnfiles-backfill] failed:', err.message);
+    lastJnFilesBackfill = { phase: 'error', error: err.message, at: new Date().toISOString() };
+  } finally {
+    jnFilesBackfillRunning = false;
+  }
+}
+
+// Boot order matters: the empty-table backfill check MUST run before the
+// reconcile loop's first pass, or the loop's 45-day rows would make the table
+// non-empty and the backfill would never auto-run. An is-empty check is safe
+// here (unlike sales-rep's ratio check): nothing else writes jn_files, so rows
+// exist only if a backfill or reconcile already ran.
+if (SUPABASE_SERVICE_KEY) {
+  setTimeout(async () => {
+    try {
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/jn_files?select=jn_id&limit=1`, {
+        method: 'HEAD', headers: { ...sbHeaders, Prefer: 'count=exact' },
+      });
+      const total = Number((r.headers.get('content-range') || '').split('/')[1] || 0);
+      if (total === 0) backfillJnFiles(); // runs in background; overlap with reconcile is idempotent
+      else console.log(`[jnfiles-backfill] boot check: ${total} rows in jn_files — skipping`);
+    } catch (err) { console.error('[jnfiles-backfill] boot check failed:', err.message); }
+  }, 20 * 1000);
+  setTimeout(reconcileJnFiles, 60 * 1000);
+  setInterval(reconcileJnFiles, RECONCILE_INTERVAL_MS);
+}
+
+// Manual re-run (e.g. after bulk JN photo imports outside the 45-day window).
+app.post('/admin/jn-files/backfill', requireAuth, requireAdmin, async (req, res) => {
+  if (jnFilesBackfillRunning) return res.status(409).json({ error: 'Backfill already running', last: lastJnFilesBackfill });
+  backfillJnFiles(); // runs in background
+  res.status(202).json({ ok: true, started: true });
+});
+app.get('/admin/jn-files/backfill', requireAuth, requireAdmin, (req, res) => {
+  res.json({ running: jnFilesBackfillRunning, last: lastJnFilesBackfill });
+});
+
 // ── JobNimbus photo download proxy ───────────────────────────────────────────
 // GET /jnphoto/:jnid — follows the JN redirect and streams the image binary
 // INTENTIONALLY UNAUTHENTICATED: this URL is used directly as an <img> /
