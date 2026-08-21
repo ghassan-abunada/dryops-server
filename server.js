@@ -238,6 +238,20 @@ function webhookTokenOk(req) {
 }
 
 // JobNimbus timestamps are unix seconds; be tolerant of ISO strings too.
+// JN account renames leave old name stamps behind, and DryOps groups metrics
+// by sales_rep NAME — so alias all known variants of one human to a single
+// canonical name at every ingestion point (webhook + backfill). One-time DB
+// updates applied when an alias is added; this map keeps future syncs from
+// re-splitting them.
+const REP_NAME_ALIASES = {
+  'Dylan Haycock PPO': 'Dylan Haycock', // same JN user (mc3jgr05pje9aho8vpmd1ba),
+  'Dylan Haycock APO': 'Dylan Haycock', // renamed APO→PPO; merged 2026-08-21
+};
+function normalizeRepName(n) {
+  const t = typeof n === 'string' ? n.trim() : n;
+  return (t && REP_NAME_ALIASES[t]) || t;
+}
+
 function jnToISO(v) {
   if (v === undefined || v === null || v === '') return undefined;
   if (typeof v === 'number') return v > 0 ? new Date(v * 1000).toISOString() : undefined;
@@ -288,7 +302,7 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   set('tested', pick('cf_string_8', 'Tested or Not Tested'));
   set('insurer', pick('cf_string_9'));
   set('cat', pick('cf_string_18'));
-  set('sales_rep', pick('sales_rep_name')); // JN built-in display name, e.g. "Jane Smith"
+  set('sales_rep', normalizeRepName(pick('sales_rep_name'))); // JN built-in display name, e.g. "Jane Smith"
   set('date_loss', jnToDate(job.cf_date_1));
   set('date_start', jnToDate(job.start_date));
   set('record_type', recordType || undefined);
@@ -1068,7 +1082,7 @@ async function backfillSalesReps() {
     const idsByRep = new Map(); // rep name -> [jn_id]
     for (const j of jnJobs) {
       const id = String(j.jnid || j.id || j.recid || '');
-      const rep = typeof j.sales_rep_name === 'string' ? j.sales_rep_name.trim() : '';
+      const rep = normalizeRepName(typeof j.sales_rep_name === 'string' ? j.sales_rep_name.trim() : '');
       if (!id || !rep || !missingIds.has(id)) continue;
       if (!idsByRep.has(rep)) idsByRep.set(rep, []);
       idsByRep.get(rep).push(id);
