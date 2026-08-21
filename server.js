@@ -1140,6 +1140,9 @@ app.get('/admin/jobs/backfill-sales-rep', requireAuth, requireAdmin, (req, res) 
 //   * kept fresh by a 10-min loop that pulls files updated since the cursor
 //     and RECOUNTS just the touched jobs. Recounts are absolute, so photo
 //     deletions/deactivations self-heal whenever any file on the job changes.
+// Each recount stores photo_count (images) AND doc_count (non-image files,
+// e.g. the signed work authorization) from the same fetch — Docs % requires
+// ≥5 photos and ≥1 document (see add_doc_requirement.sql).
 // No JN file webhook exists and automations are unreliable (see financials
 // reconcile above) — pull is the only sound mechanism.
 
@@ -1148,14 +1151,16 @@ app.get('/admin/jobs/backfill-sales-rep', requireAuth, requireAdmin, (req, res) 
 const isJnImage = (f) =>
   (f.jnid || f.id) && (f.subtype === 'image' || (typeof f.content_type === 'string' && f.content_type.startsWith('image/')));
 
-// One JN call per job; returns the job's image-file count (or null on error).
-async function jnCountImagesForJob(jobJnId) {
+// One JN call per job; splits the job's files into photos (images) and docs
+// (everything else with a jnid — e.g. the signed work authorization PDF).
+async function jnCountFilesForJob(jobJnId) {
   const r = await fetch(`${JN_BASE}/files?size=200&related=${encodeURIComponent(jobJnId)}`, {
     headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
   });
   if (!r.ok) throw new Error(`JN /files related=${jobJnId} ${r.status}`);
-  const data = await r.json();
-  return (data?.files ?? []).filter(isJnImage).length;
+  const files = ((await r.json())?.files ?? []).filter(f => f.jnid || f.id);
+  const photos = files.filter(isJnImage).length;
+  return { photos, docs: files.length - photos };
 }
 
 // rows: [{ job_id, jn_id, photo_count, last_synced }] — sbBulkUpsert conflicts
@@ -1178,8 +1183,8 @@ async function recountJobs(jobRows, tag) {
     while (idx < jobRows.length) {
       const job = jobRows[idx++];
       try {
-        const n = await jnCountImagesForJob(job.jn_id);
-        out.push({ job_id: job.id, jn_id: job.jn_id, photo_count: n, last_synced: nowISO });
+        const { photos, docs } = await jnCountFilesForJob(job.jn_id);
+        out.push({ job_id: job.id, jn_id: job.jn_id, photo_count: photos, doc_count: docs, last_synced: nowISO });
       } catch (err) {
         failed++;
         if (failed <= 3) console.error(`[${tag}] count failed for job ${job.jn_id}:`, err.message);
@@ -1227,22 +1232,27 @@ async function reconcileJnPhotoCounts() {
   }
 }
 
-// One-time backfill: count JN photos for every job we track (~40k jobs → one
-// JN call each, ~30-40 min at 4 workers). Resumable: jobs that already have a
-// count row are skipped, so a crash/restart continues where it left off.
+// One-time backfill: count JN photos+docs for every job we track (~40k jobs →
+// one JN call each, ~30-40 min at 4 workers). Resumable: jobs whose row has a
+// non-null doc_count are skipped (doc_count was added after photo_count, so
+// null also marks rows seeded before docs existed), and a crash/restart
+// continues where it left off. force=true recounts everything WITHOUT
+// deleting first — no data gap while it runs.
 let jnPhotosBackfillRunning = false;
 let lastJnPhotosBackfill = null;
 
-async function backfillJnPhotoCounts() {
+async function backfillJnPhotoCounts(force = false) {
   if (jnPhotosBackfillRunning) return;
   jnPhotosBackfillRunning = true;
-  lastJnPhotosBackfill = { phase: 'started', at: new Date().toISOString() };
+  lastJnPhotosBackfill = { phase: 'started', force, at: new Date().toISOString() };
   try {
     const have = new Set();
-    for (let offset = 0; ; offset += 1000) {
-      const page = await sbSelect('jn_photo_counts', `select=jn_id&order=jn_id&limit=1000&offset=${offset}`);
-      page.forEach(r => have.add(r.jn_id));
-      if (page.length < 1000) break;
+    if (!force) {
+      for (let offset = 0; ; offset += 1000) {
+        const page = await sbSelect('jn_photo_counts', `select=jn_id&doc_count=not.is.null&order=jn_id&limit=1000&offset=${offset}`);
+        page.forEach(r => have.add(r.jn_id));
+        if (page.length < 1000) break;
+      }
     }
     const todo = [];
     for (let offset = 0; ; offset += 1000) {
@@ -1275,13 +1285,14 @@ async function backfillJnPhotoCounts() {
 if (SUPABASE_SERVICE_KEY) {
   setTimeout(async () => {
     try {
-      const countOf = async (table) => {
-        const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?select=jn_id&limit=1`, {
+      const countOf = async (table, q = '') => {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?select=jn_id${q}&limit=1`, {
           method: 'HEAD', headers: { ...sbHeaders, Prefer: 'count=exact' },
         });
         return Number((r.headers.get('content-range') || '').split('/')[1] || 0);
       };
-      const [counted, jobs] = await Promise.all([countOf('jn_photo_counts'), countOf('jobs')]);
+      // doc_count non-null = seeded since docs were added; null rows re-seed.
+      const [counted, jobs] = await Promise.all([countOf('jn_photo_counts', '&doc_count=not.is.null'), countOf('jobs')]);
       if (jobs > 0 && counted / jobs < 0.9) backfillJnPhotoCounts();
       else console.log(`[jnphotos-backfill] boot check: ${counted}/${jobs} jobs counted — skipping`);
     } catch (err) { console.error('[jnphotos-backfill] boot check failed:', err.message); }
@@ -1290,18 +1301,11 @@ if (SUPABASE_SERVICE_KEY) {
   setInterval(reconcileJnPhotoCounts, RECONCILE_INTERVAL_MS);
 }
 
-// Manual full recount (e.g. after bulk JN photo deletions): pass ?full=1 to
-// recount ALL jobs, otherwise only jobs missing a row are counted.
+// Manual recount (e.g. after bulk JN photo deletions): ?full=1 recounts ALL
+// jobs in place (no delete — no data gap), otherwise only unseeded jobs.
 app.post('/admin/jn-photos/backfill', requireAuth, requireAdmin, async (req, res) => {
   if (jnPhotosBackfillRunning) return res.status(409).json({ error: 'Backfill already running', last: lastJnPhotosBackfill });
-  if (req.query.full === '1') {
-    try {
-      await fetch(`${SUPABASE_URL}/rest/v1/jn_photo_counts?jn_id=not.is.null`, { method: 'DELETE', headers: sbHeaders });
-    } catch (err) {
-      return res.status(502).json({ error: `reset failed: ${err.message}` });
-    }
-  }
-  backfillJnPhotoCounts(); // runs in background
+  backfillJnPhotoCounts(req.query.full === '1'); // runs in background
   res.status(202).json({ ok: true, started: true, full: req.query.full === '1' });
 });
 app.get('/admin/jn-photos/backfill', requireAuth, requireAdmin, (req, res) => {
