@@ -1341,7 +1341,12 @@ app.get('/admin/jn-photos/backfill', requireAuth, requireAdmin, (req, res) => {
 // the manual-override contract). `esigned`/`esign` on proposals are dead
 // fields (zero true account-wide) — signature_status is the real state.
 
-const WORKAUTH_RE = /work\s*authorization/i;
+// A signed authorization-to-perform-work is not always titled "Work
+// Authorization": several offices use services-contract templates instead
+// (verified 2026-08-21 — e.g. Seattle signs "Mitigation Services Contract" on
+// nearly every job). Count those too; testing/abatement contracts,
+// certificates, and releases stay excluded.
+const WORKAUTH_RE = /work\s*authorization|mitigation\s+services\s+contract|construction\s*(and|\/)\s*remediation|pack\s*out\s+and\s+pack\s*back/i;
 const WORKAUTH_RANK = { 'Not Requested': 1, 'Requested': 2, 'Partially Signed': 3, 'Fully Signed': 4 };
 
 // template_id → is_workauth. Seeded from jn_proposal_templates (reloaded every
