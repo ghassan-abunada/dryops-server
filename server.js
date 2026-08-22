@@ -1335,69 +1335,21 @@ app.get('/admin/jn-photos/backfill', requireAuth, requireAdmin, (req, res) => {
 // Signed'), date_signed, and template_id — and signing bumps date_updated, so
 // the same seed + reconcile machinery as jn_photo_counts applies (~110k
 // proposals account-wide, ~500/day; median create→sign is ~2 min).
-// One JN quirk: the public API returns template_id but a NULL template_name,
-// so templates are classified once by regexing a sample proposal's
-// template_json and cached in jn_proposal_templates (see that table's SQL for
-// the manual-override contract). `esigned`/`esign` on proposals are dead
-// fields (zero true account-wide) — signature_status is the real state.
-
-// A signed authorization-to-perform-work is not always titled "Work
-// Authorization": several offices use services-contract templates instead
-// (verified 2026-08-21 — e.g. Seattle signs "Mitigation Services Contract" on
-// nearly every job). Count those too; testing/abatement contracts,
-// certificates, and releases stay excluded.
-const WORKAUTH_RE = /work\s*authorization|mitigation\s+services\s+contract|construction\s*(and|\/)\s*remediation|pack\s*out\s+and\s+pack\s*back/i;
+// `esigned`/`esign` on proposals are dead fields (zero true account-wide) —
+// signature_status is the real state.
+//
+// ANY live custom document counts — no template gating (owner decision
+// 2026-08-21). Template-name classification proved unreliable: offices sign
+// differently-titled documents for the same purpose ("Work Authorization",
+// "Mitigation Services Contract", "Construction/Remediation Contract", …),
+// and the public API returns a NULL template_name, so every rule needed
+// body-regex sampling and still missed variants. The jn_proposal_templates
+// table is retired (kept in the DB, unread).
 const WORKAUTH_RANK = { 'Not Requested': 1, 'Requested': 2, 'Partially Signed': 3, 'Fully Signed': 4 };
 
-// template_id → is_workauth. Seeded from jn_proposal_templates (reloaded every
-// reconcile tick so manual overrides land without a restart) and grown lazily
-// as unseen template_ids appear.
-const workauthTemplates = new Map();
-async function loadWorkauthTemplates() {
-  const rows = await sbSelect('jn_proposal_templates', 'select=template_id,is_workauth&limit=1000');
-  for (const r of rows) workauthTemplates.set(r.template_id, !!r.is_workauth);
-}
-
-const workauthClassifyInflight = new Map(); // dedupe concurrent classifications
-function classifyWorkauthTemplate(templateId) {
-  if (workauthClassifyInflight.has(templateId)) return workauthClassifyInflight.get(templateId);
-  const p = (async () => {
-    const filter = encodeURIComponent(JSON.stringify({ must: [{ term: { template_id: templateId } }] }));
-    const r = await fetch(`${JN_BASE}/proposals?size=1&fields=template_json&filter=${filter}`, {
-      headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
-    });
-    if (!r.ok) throw new Error(`JN /proposals template sample ${r.status}`);
-    const html = (await r.json())?.results?.[0]?.template_json || '';
-    const isWa = WORKAUTH_RE.test(html);
-    const name = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) || null;
-    // ignore-duplicates: a human override already in the table always wins.
-    const up = await fetch(`${SUPABASE_URL}/rest/v1/jn_proposal_templates?on_conflict=template_id`, {
-      method: 'POST',
-      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=minimal' },
-      body: JSON.stringify([{ template_id: templateId, name, is_workauth: isWa }]),
-    });
-    if (!up.ok) throw new Error(`jn_proposal_templates upsert ${up.status}`);
-    workauthTemplates.set(templateId, isWa);
-    return isWa;
-  })();
-  workauthClassifyInflight.set(templateId, p);
-  // .then(clean, clean) — not .finally(): the derived promise must swallow the
-  // rejection or a failed classification trips an unhandled-rejection warning
-  // (callers still see the rejection through the returned `p`).
-  const clean = () => workauthClassifyInflight.delete(templateId);
-  p.then(clean, clean);
-  return p;
-}
-
-async function isWorkauthTemplate(templateId) {
-  if (!templateId) return false;
-  if (workauthTemplates.has(templateId)) return workauthTemplates.get(templateId);
-  return classifyWorkauthTemplate(templateId);
-}
-
-// One JN call per job: reduce its live proposals to the best work-auth status.
-// "Best" = highest WORKAUTH_RANK — a job can carry several WAs (re-issues);
-// one fully signed one satisfies the requirement.
+// One JN call per job: reduce its live proposals to the best signature status.
+// "Best" = highest WORKAUTH_RANK — a job can carry several documents
+// (re-issues); one fully signed one satisfies the requirement.
 async function jnWorkauthForJob(jobJnId) {
   const fields = 'jnid,template_id,signature_status,date_signed,date_sign_requested,is_active,is_archived';
   const r = await fetch(`${JN_BASE}/proposals?size=100&related=${encodeURIComponent(jobJnId)}&fields=${fields}`, {
@@ -1407,7 +1359,6 @@ async function jnWorkauthForJob(jobJnId) {
   const props = ((await r.json())?.results ?? []).filter(p => p.jnid && p.is_active !== false && !p.is_archived);
   let best = null;
   for (const p of props) {
-    if (!(await isWorkauthTemplate(p.template_id))) continue;
     if (!best || (WORKAUTH_RANK[p.signature_status] || 0) > (WORKAUTH_RANK[best.signature_status] || 0)) best = p;
   }
   if (!best) return { status: 'Missing', signed_at: null, requested_at: null, proposal_jnid: null };
@@ -1459,7 +1410,6 @@ async function reconcileJnWorkauth() {
     if (isNaN(last)) { console.log('[jnworkauth-reconcile] table empty — waiting for backfill'); return; }
     const since = Math.max(Date.now() - RECONCILE_MAX_LOOKBACK_MS, last - JN_WORKAUTH_OVERLAP_MS);
 
-    await loadWorkauthTemplates(); // pick up manual is_workauth overrides
     // fields keeps template_json (5-50KB each) out of the pull; date_updated
     // must stay in the list for jnFetchUpdatedSince's cursor.
     const props = await jnFetchUpdatedSince('/proposals', Math.floor(since / 1000), '&fields=jnid,related,date_updated');
@@ -1498,7 +1448,6 @@ async function backfillJnWorkauth(force = false) {
   jnWorkauthBackfillRunning = true;
   lastJnWorkauthBackfill = { phase: 'started', force, at: new Date().toISOString() };
   try {
-    await loadWorkauthTemplates();
     const have = new Set();
     if (!force) {
       for (let offset = 0; ; offset += 1000) {
