@@ -879,20 +879,22 @@ async function sbBulkUpsert(table, rows) {
 // Pull all records modified since `sinceSecs` (unix). Pages with from/size and,
 // if the ES 10k window cap is hit, advances the date cursor and keeps going.
 // Response array key varies by endpoint: invoices/payments use results/data,
-// /files uses `files`.
-async function jnFetchUpdatedSince(path, sinceSecs) {
+// /files uses `files`, /activities uses `activity`. `extraQuery` is appended verbatim (e.g. '&fields=…' to
+// slim heavy payloads like proposals' template_json) — include date_updated in
+// any fields list or the cursor can't advance.
+async function jnFetchUpdatedSince(path, sinceSecs, extraQuery = '') {
   const out = [];
   let cursor = sinceSecs;
   for (let guard = 0; guard < 20; guard++) {
     const filter = encodeURIComponent(JSON.stringify({ must: [{ range: { date_updated: { gte: cursor } } }] }));
     let count = Infinity, fetched = 0, pageMax = cursor;
     for (let from = 0; from + 500 <= 10000 && fetched < count; from += 500) {
-      const r = await fetch(`${JN_BASE}${path}?size=500&from=${from}&filter=${filter}`, {
+      const r = await fetch(`${JN_BASE}${path}?size=500&from=${from}&filter=${filter}${extraQuery}`, {
         headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
       });
       if (!r.ok) throw new Error(`JN ${path} ${r.status}`);
       const data = await r.json();
-      const page = data?.results ?? data?.data ?? data?.files ?? [];
+      const page = data?.results ?? data?.data ?? data?.activity ?? data?.files ?? [];
       count = data?.count ?? data?.total ?? page.length;
       out.push(...page);
       fetched += page.length;
@@ -1324,6 +1326,449 @@ app.post('/admin/jn-photos/backfill', requireAuth, requireAdmin, async (req, res
 });
 app.get('/admin/jn-photos/backfill', requireAuth, requireAdmin, (req, res) => {
   res.json({ running: jnPhotosBackfillRunning, last: lastJnPhotosBackfill });
+});
+
+// ── JobNimbus work-authorization status ──────────────────────────────────────
+// Landed Mitigation/Contents/Rebuild jobs require a signed work authorization.
+// JN's "Custom Documents" are `proposal` records: GET /proposals exposes
+// signature_status ('Not Requested'|'Requested'|'Partially Signed'|'Fully
+// Signed'), date_signed, and template_id — and signing bumps date_updated, so
+// the same seed + reconcile machinery as jn_photo_counts applies (~110k
+// proposals account-wide, ~500/day; median create→sign is ~2 min).
+// One JN quirk: the public API returns template_id but a NULL template_name,
+// so templates are classified once by regexing a sample proposal's
+// template_json and cached in jn_proposal_templates (see that table's SQL for
+// the manual-override contract). `esigned`/`esign` on proposals are dead
+// fields (zero true account-wide) — signature_status is the real state.
+
+const WORKAUTH_RE = /work\s*authorization/i;
+const WORKAUTH_RANK = { 'Not Requested': 1, 'Requested': 2, 'Partially Signed': 3, 'Fully Signed': 4 };
+
+// template_id → is_workauth. Seeded from jn_proposal_templates (reloaded every
+// reconcile tick so manual overrides land without a restart) and grown lazily
+// as unseen template_ids appear.
+const workauthTemplates = new Map();
+async function loadWorkauthTemplates() {
+  const rows = await sbSelect('jn_proposal_templates', 'select=template_id,is_workauth&limit=1000');
+  for (const r of rows) workauthTemplates.set(r.template_id, !!r.is_workauth);
+}
+
+const workauthClassifyInflight = new Map(); // dedupe concurrent classifications
+function classifyWorkauthTemplate(templateId) {
+  if (workauthClassifyInflight.has(templateId)) return workauthClassifyInflight.get(templateId);
+  const p = (async () => {
+    const filter = encodeURIComponent(JSON.stringify({ must: [{ term: { template_id: templateId } }] }));
+    const r = await fetch(`${JN_BASE}/proposals?size=1&fields=template_json&filter=${filter}`, {
+      headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+    });
+    if (!r.ok) throw new Error(`JN /proposals template sample ${r.status}`);
+    const html = (await r.json())?.results?.[0]?.template_json || '';
+    const isWa = WORKAUTH_RE.test(html);
+    const name = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) || null;
+    // ignore-duplicates: a human override already in the table always wins.
+    const up = await fetch(`${SUPABASE_URL}/rest/v1/jn_proposal_templates?on_conflict=template_id`, {
+      method: 'POST',
+      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=minimal' },
+      body: JSON.stringify([{ template_id: templateId, name, is_workauth: isWa }]),
+    });
+    if (!up.ok) throw new Error(`jn_proposal_templates upsert ${up.status}`);
+    workauthTemplates.set(templateId, isWa);
+    return isWa;
+  })();
+  workauthClassifyInflight.set(templateId, p);
+  // .then(clean, clean) — not .finally(): the derived promise must swallow the
+  // rejection or a failed classification trips an unhandled-rejection warning
+  // (callers still see the rejection through the returned `p`).
+  const clean = () => workauthClassifyInflight.delete(templateId);
+  p.then(clean, clean);
+  return p;
+}
+
+async function isWorkauthTemplate(templateId) {
+  if (!templateId) return false;
+  if (workauthTemplates.has(templateId)) return workauthTemplates.get(templateId);
+  return classifyWorkauthTemplate(templateId);
+}
+
+// One JN call per job: reduce its live proposals to the best work-auth status.
+// "Best" = highest WORKAUTH_RANK — a job can carry several WAs (re-issues);
+// one fully signed one satisfies the requirement.
+async function jnWorkauthForJob(jobJnId) {
+  const fields = 'jnid,template_id,signature_status,date_signed,date_sign_requested,is_active,is_archived';
+  const r = await fetch(`${JN_BASE}/proposals?size=100&related=${encodeURIComponent(jobJnId)}&fields=${fields}`, {
+    headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+  });
+  if (!r.ok) throw new Error(`JN /proposals related=${jobJnId} ${r.status}`);
+  const props = ((await r.json())?.results ?? []).filter(p => p.jnid && p.is_active !== false && !p.is_archived);
+  let best = null;
+  for (const p of props) {
+    if (!(await isWorkauthTemplate(p.template_id))) continue;
+    if (!best || (WORKAUTH_RANK[p.signature_status] || 0) > (WORKAUTH_RANK[best.signature_status] || 0)) best = p;
+  }
+  if (!best) return { status: 'Missing', signed_at: null, requested_at: null, proposal_jnid: null };
+  return {
+    status: WORKAUTH_RANK[best.signature_status] ? best.signature_status : 'Not Requested',
+    signed_at: best.date_signed ? new Date(best.date_signed * 1000).toISOString() : null,
+    requested_at: best.date_sign_requested ? new Date(best.date_sign_requested * 1000).toISOString() : null,
+    proposal_jnid: best.jnid,
+  };
+}
+
+async function upsertJnWorkauth(rows) {
+  const uniq = [...new Map(rows.map(r => [r.jn_id, r])).values()];
+  for (let i = 0; i < uniq.length; i += 500) await sbBulkUpsert('jn_workauth', uniq.slice(i, i + 500));
+  return uniq.length;
+}
+
+// Recheck a batch of jobs [{id, jn_id}] — same worker-pool shape as
+// recountJobs; per-job errors are skipped so one flaky call can't sink a batch.
+async function recheckWorkauthJobs(jobRows, tag) {
+  const nowISO = new Date().toISOString();
+  const out = [];
+  let failed = 0, idx = 0;
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    while (idx < jobRows.length) {
+      const job = jobRows[idx++];
+      try {
+        const wa = await jnWorkauthForJob(job.jn_id);
+        out.push({ job_id: job.id, jn_id: job.jn_id, ...wa, last_synced: nowISO });
+      } catch (err) {
+        failed++;
+        if (failed <= 3) console.error(`[${tag}] recheck failed for job ${job.jn_id}:`, err.message);
+      }
+    }
+  }));
+  return { rows: out, failed };
+}
+
+const JN_WORKAUTH_OVERLAP_MS = 2 * 60 * 60 * 1000;
+
+let jnWorkauthReconcileRunning = false;
+async function reconcileJnWorkauth() {
+  if (jnWorkauthReconcileRunning) return;
+  jnWorkauthReconcileRunning = true;
+  try {
+    // Empty table = backfill hasn't seeded yet — skip (the backfill covers all).
+    const rows = await sbSelect('jn_workauth', 'select=last_synced&order=last_synced.desc.nullslast&limit=1');
+    const last = rows?.[0]?.last_synced ? new Date(rows[0].last_synced).getTime() : NaN;
+    if (isNaN(last)) { console.log('[jnworkauth-reconcile] table empty — waiting for backfill'); return; }
+    const since = Math.max(Date.now() - RECONCILE_MAX_LOOKBACK_MS, last - JN_WORKAUTH_OVERLAP_MS);
+
+    await loadWorkauthTemplates(); // pick up manual is_workauth overrides
+    // fields keeps template_json (5-50KB each) out of the pull; date_updated
+    // must stay in the list for jnFetchUpdatedSince's cursor.
+    const props = await jnFetchUpdatedSince('/proposals', Math.floor(since / 1000), '&fields=jnid,related,date_updated');
+    const touched = new Set();
+    for (const p of props) {
+      const ref = (Array.isArray(p.related) ? p.related : []).find(x => x && x.type === 'job' && x.id);
+      if (ref) touched.add(String(ref.id));
+    }
+    const ids = [...touched];
+    const jobRows = [];
+    for (let i = 0; i < ids.length; i += 100) {
+      const chunk = ids.slice(i, i + 100).map(id => `"${id}"`).join(',');
+      jobRows.push(...await sbSelect('jobs', `jn_id=in.(${encodeURIComponent(chunk)})&select=id,jn_id`));
+    }
+    const { rows: waRows, failed } = await recheckWorkauthJobs(jobRows, 'jnworkauth-reconcile');
+    await upsertJnWorkauth(waRows);
+    console.log(`[jnworkauth-reconcile] ${props.length} changed proposals → rechecked ${waRows.length}/${jobRows.length} jobs${failed ? ` (${failed} failed)` : ''}`);
+  } catch (err) {
+    console.error('[jnworkauth-reconcile] failed:', err.message);
+  } finally {
+    jnWorkauthReconcileRunning = false;
+  }
+}
+
+const WORKAUTH_RECORD_TYPES = '"Mitigation","Contents","Rebuild"';
+
+// One-time backfill over Mitigation/Contents/Rebuild jobs (the types that
+// require a WA). Resumable: jobs that already have a jn_workauth row are
+// skipped unless force=true, which rechecks everything in place (no delete —
+// no data gap).
+let jnWorkauthBackfillRunning = false;
+let lastJnWorkauthBackfill = null;
+
+async function backfillJnWorkauth(force = false) {
+  if (jnWorkauthBackfillRunning) return;
+  jnWorkauthBackfillRunning = true;
+  lastJnWorkauthBackfill = { phase: 'started', force, at: new Date().toISOString() };
+  try {
+    await loadWorkauthTemplates();
+    const have = new Set();
+    if (!force) {
+      for (let offset = 0; ; offset += 1000) {
+        const page = await sbSelect('jn_workauth', `select=jn_id&order=jn_id&limit=1000&offset=${offset}`);
+        page.forEach(r => have.add(r.jn_id));
+        if (page.length < 1000) break;
+      }
+    }
+    const todo = [];
+    for (let offset = 0; ; offset += 1000) {
+      const page = await sbSelect('jobs', `select=id,jn_id&record_type=in.(${encodeURIComponent(WORKAUTH_RECORD_TYPES)})&order=jn_id&limit=1000&offset=${offset}`);
+      todo.push(...page.filter(j => j.jn_id && !have.has(j.jn_id)));
+      if (page.length < 1000) break;
+    }
+    console.log(`[jnworkauth-backfill] ${todo.length} jobs to check (${have.size} already done)`);
+    let done = 0, failedTotal = 0;
+    for (let i = 0; i < todo.length; i += 500) {
+      const { rows, failed } = await recheckWorkauthJobs(todo.slice(i, i + 500), 'jnworkauth-backfill');
+      await upsertJnWorkauth(rows);
+      done += rows.length; failedTotal += failed;
+      console.log(`[jnworkauth-backfill] progress ${done}/${todo.length}${failedTotal ? ` (${failedTotal} failed)` : ''}`);
+      lastJnWorkauthBackfill = { phase: 'running', done, total: todo.length, failed: failedTotal, at: new Date().toISOString() };
+    }
+    console.log(`[jnworkauth-backfill] done — checked ${done} jobs${failedTotal ? `, ${failedTotal} failed` : ''}`);
+    lastJnWorkauthBackfill = { phase: 'done', done, failed: failedTotal, at: new Date().toISOString() };
+  } catch (err) {
+    console.error('[jnworkauth-backfill] failed:', err.message);
+    lastJnWorkauthBackfill = { phase: 'error', error: err.message, at: new Date().toISOString() };
+  } finally {
+    jnWorkauthBackfillRunning = false;
+  }
+}
+
+// Boot: auto-backfill while coverage is clearly incomplete; reconcile no-ops on
+// an empty table, so boot order isn't load-bearing.
+if (SUPABASE_SERVICE_KEY) {
+  setTimeout(async () => {
+    try {
+      const countOf = async (table, q = '') => {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?select=jn_id${q}&limit=1`, {
+          method: 'HEAD', headers: { ...sbHeaders, Prefer: 'count=exact' },
+        });
+        return Number((r.headers.get('content-range') || '').split('/')[1] || 0);
+      };
+      const [checked, jobs] = await Promise.all([
+        countOf('jn_workauth'),
+        countOf('jobs', `&record_type=in.(${encodeURIComponent(WORKAUTH_RECORD_TYPES)})`),
+      ]);
+      if (jobs > 0 && checked / jobs < 0.9) backfillJnWorkauth();
+      else console.log(`[jnworkauth-backfill] boot check: ${checked}/${jobs} jobs checked — skipping`);
+    } catch (err) { console.error('[jnworkauth-backfill] boot check failed:', err.message); }
+  }, 30 * 1000);
+  setTimeout(reconcileJnWorkauth, 90 * 1000);
+  setInterval(reconcileJnWorkauth, RECONCILE_INTERVAL_MS);
+}
+
+// Manual recheck: ?full=1 rechecks ALL M/C/R jobs in place (e.g. after fixing
+// a template's is_workauth), otherwise only jobs without a row yet.
+app.post('/admin/jn-workauth/backfill', requireAuth, requireAdmin, async (req, res) => {
+  if (jnWorkauthBackfillRunning) return res.status(409).json({ error: 'Backfill already running', last: lastJnWorkauthBackfill });
+  backfillJnWorkauth(req.query.full === '1'); // runs in background
+  res.status(202).json({ ok: true, started: true, full: req.query.full === '1' });
+});
+app.get('/admin/jn-workauth/backfill', requireAuth, requireAdmin, (req, res) => {
+  res.json({ running: jnWorkauthBackfillRunning, last: lastJnWorkauthBackfill });
+});
+
+// ── JobNimbus note counts (Pain Points notes metric) ─────────────────────────
+// "Avg notes per In-Production job" needs a per-job count of JN notes; nothing
+// queryable exists (the app's Activity tab reads JN live, the `notes` table is
+// dead). Same seed + reconcile machinery as jn_photo_counts/jn_workauth, but
+// SCOPED to active In-Production jobs — the only denominator the metric uses —
+// so the backfill is a few hundred jobs, not 40k. Activities are JN's highest-
+// volume stream, so the reconcile also restricts rechecks to touched jobs that
+// are In Production or already cached, and a per-tick missing-row sweep seeds
+// jobs that entered In Production with zero notes (no activity would ever
+// touch them). Counting rules MUST mirror the Activity tab's filters in
+// app/(app)/jobs/[id]/notes.tsx so numbers match what users see there.
+
+const NOTES_HIDDEN_TYPES = new Set(['Job Modified', 'Attachment deleted', 'Task Created', 'Task Completed']);
+const notesHiddenAuthor = (n) => { const s = (n || '').trim(); return !s || s === 'None' || s.startsWith('Automation'); };
+
+// One job's visible activity, paged (busy jobs exceed one page), reduced to
+// counts. note_count (record_type_name === 'Note') is the metric's primary;
+// activity_count is stored alongside so switching later needs no re-seed.
+async function jnNotesForJob(jobJnId) {
+  const fields = 'jnid,record_type_name,created_by_name,date_created,is_active,is_archived';
+  let noteCount = 0, activityCount = 0, lastNote = 0;
+  for (let from = 0; from < 10000; from += 500) {
+    const r = await fetch(`${JN_BASE}/activities?size=500&from=${from}&related=${encodeURIComponent(jobJnId)}&fields=${fields}`, {
+      headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+    });
+    if (!r.ok) throw new Error(`JN /activities related=${jobJnId} ${r.status}`);
+    const data = await r.json();
+    const page = data?.activity ?? data?.results ?? [];
+    for (const a of page) {
+      if (a.is_active === false || a.is_archived) continue;
+      if (NOTES_HIDDEN_TYPES.has(a.record_type_name) || notesHiddenAuthor(a.created_by_name)) continue;
+      activityCount++;
+      if (a.record_type_name === 'Note') {
+        noteCount++;
+        if (typeof a.date_created === 'number' && a.date_created > lastNote) lastNote = a.date_created;
+      }
+    }
+    if (page.length < 500) break;
+  }
+  return {
+    note_count: noteCount,
+    activity_count: activityCount,
+    last_note_at: lastNote ? new Date(lastNote * 1000).toISOString() : null,
+  };
+}
+
+async function upsertJnNoteCounts(rows) {
+  const uniq = [...new Map(rows.map(r => [r.jn_id, r])).values()];
+  for (let i = 0; i < uniq.length; i += 500) await sbBulkUpsert('jn_note_counts', uniq.slice(i, i + 500));
+  return uniq.length;
+}
+
+// Recount a batch of jobs [{id, jn_id}] — the usual 4-worker pool; per-job
+// errors are skipped so one flaky call can't sink a batch.
+async function recheckNoteJobs(jobRows, tag) {
+  const nowISO = new Date().toISOString();
+  const out = [];
+  let failed = 0, idx = 0;
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    while (idx < jobRows.length) {
+      const job = jobRows[idx++];
+      try {
+        const counts = await jnNotesForJob(job.jn_id);
+        out.push({ job_id: job.id, jn_id: job.jn_id, ...counts, last_synced: nowISO });
+      } catch (err) {
+        failed++;
+        if (failed <= 3) console.error(`[${tag}] recheck failed for job ${job.jn_id}:`, err.message);
+      }
+    }
+  }));
+  return { rows: out, failed };
+}
+
+// All active In-Production jobs, paged.
+async function inProductionJobs() {
+  const out = [];
+  for (let offset = 0; ; offset += 1000) {
+    const page = await sbSelect('jobs', `select=id,jn_id&stage=eq.${encodeURIComponent('In Production')}&is_active=eq.true&order=jn_id&limit=1000&offset=${offset}`);
+    out.push(...page.filter(j => j.jn_id));
+    if (page.length < 1000) break;
+  }
+  return out;
+}
+
+const JN_NOTES_OVERLAP_MS = 2 * 60 * 60 * 1000;
+
+let jnNotesReconcileRunning = false;
+async function reconcileJnNoteCounts() {
+  if (jnNotesReconcileRunning) return;
+  jnNotesReconcileRunning = true;
+  try {
+    // Empty table = backfill hasn't seeded yet — skip (the backfill covers all).
+    const rows = await sbSelect('jn_note_counts', 'select=last_synced&order=last_synced.desc.nullslast&limit=1');
+    const last = rows?.[0]?.last_synced ? new Date(rows[0].last_synced).getTime() : NaN;
+    if (isNaN(last)) { console.log('[jnnotes-reconcile] table empty — waiting for backfill'); return; }
+    const since = Math.max(Date.now() - RECONCILE_MAX_LOOKBACK_MS, last - JN_NOTES_OVERLAP_MS);
+
+    const acts = await jnFetchUpdatedSince('/activities', Math.floor(since / 1000), '&fields=jnid,related,date_updated');
+    const touched = new Set();
+    for (const a of acts) {
+      const ref = (Array.isArray(a.related) ? a.related : []).find(x => x && x.type === 'job' && x.id);
+      if (ref) touched.add(String(ref.id));
+    }
+
+    // Cached jn_ids: bound the recheck set AND drive the missing-row sweep.
+    const cached = new Set();
+    for (let offset = 0; ; offset += 1000) {
+      const page = await sbSelect('jn_note_counts', `select=jn_id&order=jn_id&limit=1000&offset=${offset}`);
+      page.forEach(r => cached.add(r.jn_id));
+      if (page.length < 1000) break;
+    }
+    const inProd = await inProductionJobs();
+    const inProdByJnId = new Map(inProd.map(j => [j.jn_id, j]));
+
+    // Recheck = (touched ∩ (In Production ∪ cached)) ∪ (In Production \ cached).
+    // The last term is the missing-row sweep: zero-note jobs never appear in
+    // the activities pull, so they'd otherwise never get their 0-count row.
+    const jobRows = [];
+    const ids = [...touched].filter(id => !inProdByJnId.has(id) && cached.has(id));
+    for (let i = 0; i < ids.length; i += 100) {
+      const chunk = ids.slice(i, i + 100).map(id => `"${id}"`).join(',');
+      jobRows.push(...await sbSelect('jobs', `jn_id=in.(${encodeURIComponent(chunk)})&select=id,jn_id`));
+    }
+    for (const j of inProd) {
+      if (touched.has(j.jn_id) || !cached.has(j.jn_id)) jobRows.push(j);
+    }
+
+    const { rows: countRows, failed } = await recheckNoteJobs(jobRows, 'jnnotes-reconcile');
+    await upsertJnNoteCounts(countRows);
+    console.log(`[jnnotes-reconcile] ${acts.length} changed activities → rechecked ${countRows.length}/${jobRows.length} jobs${failed ? ` (${failed} failed)` : ''}`);
+  } catch (err) {
+    console.error('[jnnotes-reconcile] failed:', err.message);
+  } finally {
+    jnNotesReconcileRunning = false;
+  }
+}
+
+// Backfill: seed every active In-Production job. Resumable (jobs with a row
+// are skipped unless force=true, which rechecks in place — no data gap).
+let jnNotesBackfillRunning = false;
+let lastJnNotesBackfill = null;
+
+async function backfillJnNoteCounts(force = false) {
+  if (jnNotesBackfillRunning) return;
+  jnNotesBackfillRunning = true;
+  lastJnNotesBackfill = { phase: 'started', force, at: new Date().toISOString() };
+  try {
+    const have = new Set();
+    if (!force) {
+      for (let offset = 0; ; offset += 1000) {
+        const page = await sbSelect('jn_note_counts', `select=jn_id&order=jn_id&limit=1000&offset=${offset}`);
+        page.forEach(r => have.add(r.jn_id));
+        if (page.length < 1000) break;
+      }
+    }
+    const todo = (await inProductionJobs()).filter(j => !have.has(j.jn_id));
+    console.log(`[jnnotes-backfill] ${todo.length} jobs to count (${have.size} already done)`);
+    let done = 0, failedTotal = 0;
+    for (let i = 0; i < todo.length; i += 500) {
+      const { rows, failed } = await recheckNoteJobs(todo.slice(i, i + 500), 'jnnotes-backfill');
+      await upsertJnNoteCounts(rows);
+      done += rows.length; failedTotal += failed;
+      console.log(`[jnnotes-backfill] progress ${done}/${todo.length}${failedTotal ? ` (${failedTotal} failed)` : ''}`);
+      lastJnNotesBackfill = { phase: 'running', done, total: todo.length, failed: failedTotal, at: new Date().toISOString() };
+    }
+    console.log(`[jnnotes-backfill] done — counted ${done} jobs${failedTotal ? `, ${failedTotal} failed` : ''}`);
+    lastJnNotesBackfill = { phase: 'done', done, failed: failedTotal, at: new Date().toISOString() };
+  } catch (err) {
+    console.error('[jnnotes-backfill] failed:', err.message);
+    lastJnNotesBackfill = { phase: 'error', error: err.message, at: new Date().toISOString() };
+  } finally {
+    jnNotesBackfillRunning = false;
+  }
+}
+
+// Boot: backfill while coverage of the In-Production set is clearly incomplete.
+// Reconcile no-ops on an empty table, so boot order isn't load-bearing. First
+// tick staggered to 120s so it doesn't collide with the photos/workauth ticks.
+if (SUPABASE_SERVICE_KEY) {
+  setTimeout(async () => {
+    try {
+      const countOf = async (table, q = '') => {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?select=jn_id${q}&limit=1`, {
+          method: 'HEAD', headers: { ...sbHeaders, Prefer: 'count=exact' },
+        });
+        return Number((r.headers.get('content-range') || '').split('/')[1] || 0);
+      };
+      const [counted, inProd] = await Promise.all([
+        countOf('jn_note_counts'),
+        countOf('jobs', `&stage=eq.${encodeURIComponent('In Production')}&is_active=eq.true`),
+      ]);
+      if (inProd > 0 && counted / inProd < 0.9) backfillJnNoteCounts();
+      else console.log(`[jnnotes-backfill] boot check: ${counted} counted vs ${inProd} in production — skipping`);
+    } catch (err) { console.error('[jnnotes-backfill] boot check failed:', err.message); }
+  }, 40 * 1000);
+  setTimeout(reconcileJnNoteCounts, 120 * 1000);
+  setInterval(reconcileJnNoteCounts, RECONCILE_INTERVAL_MS);
+}
+
+// Manual recount: ?full=1 rechecks ALL In-Production jobs in place, otherwise
+// only jobs without a row yet.
+app.post('/admin/jn-note-counts/backfill', requireAuth, requireAdmin, async (req, res) => {
+  if (jnNotesBackfillRunning) return res.status(409).json({ error: 'Backfill already running', last: lastJnNotesBackfill });
+  backfillJnNoteCounts(req.query.full === '1'); // runs in background
+  res.status(202).json({ ok: true, started: true, full: req.query.full === '1' });
+});
+app.get('/admin/jn-note-counts/backfill', requireAuth, requireAdmin, (req, res) => {
+  res.json({ running: jnNotesBackfillRunning, last: lastJnNotesBackfill });
 });
 
 // ── JobNimbus photo download proxy ───────────────────────────────────────────
