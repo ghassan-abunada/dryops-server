@@ -579,7 +579,14 @@ function mapCallRow(call) {
 
 // Post-call webhook: CallRail POSTs each completed call here in real time.
 app.post('/webhooks/callrail/calls', async (req, res) => {
-  if (!callrailWebhookOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  if (!callrailWebhookOk(req)) {
+    // Loud on purpose: the Aug 2026 outage was invisible because rejected
+    // deliveries logged nothing — CallRail showed the webhook "live" while
+    // every POST 401'd. This line makes token drift show up in Railway logs.
+    console.warn('[callrail-webhook] rejected delivery:',
+      CALLRAIL_WEBHOOK_TOKEN ? 'token mismatch (check ?token= in the CallRail webhook URL)' : 'CALLRAIL_WEBHOOK_TOKEN env var is not set');
+    return res.status(401).json({ error: 'unauthorized' });
+  }
   let call = req.body;
   if (call && typeof call === 'object' && call.data && typeof call.data === 'object') call = call.data;
   if (Array.isArray(call)) call = call[0];
