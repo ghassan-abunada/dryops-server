@@ -1144,6 +1144,154 @@ app.get('/admin/jobs/backfill-sales-rep', requireAuth, requireAdmin, (req, res) 
   res.json({ running: salesRepBackfillRunning, last: lastSalesRepBackfill });
 });
 
+// ── JobNimbus deletion sweep ──────────────────────────────────────────────────
+// JN deletions are invisible to the API: GET /jobs/:id returns 404, the record
+// vanishes from /jobs search entirely (no is_active:false rows are ever
+// returned), and no webhook fires. So deleted jobs linger in Supabase forever.
+// This daily sweep removes them, in three stages so a flaky bulk pull can
+// never mass-delete:
+//   1. Pull every JN job jnid (fixed month windows over date_created — the
+//      backfill's proven pattern; a window that comes back incomplete aborts
+//      the whole sweep) and every local jobs.jn_id.
+//   2. candidates = local − JN. These are only *suspects*: each one is
+//      confirmed with a direct GET /jobs/:id, and ONLY a 404 counts as
+//      deleted (200 → bulk-pull miss, skip; other errors → skip).
+//   3. Confirmed rows are archived to public.deleted_jobs (full row as jsonb;
+//      see supabase/add_deleted_jobs_archive.sql in the app repo), then
+//      deleted from jobs. Children cascade; invoices/payments keep their rows
+//      with job_id nulled; Storage files are untouched.
+// Hard cap as a last-resort brake: more than DELETION_SWEEP_MAX confirmed
+// deletions in one run aborts before deleting anything.
+const DELETION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const DELETION_SWEEP_MAX = 300;          // confirmed deletions per run
+const DELETION_SWEEP_VERIFY_CAP = 800;   // candidate GETs per run
+
+let deletionSweepRunning = false;
+let lastDeletionSweep = null;
+
+// Every JN job jnid, via fixed month windows over date_created (no ordering
+// assumption — see the sales-rep backfill note). Throws if any window returns
+// fewer records than its reported count, so the caller never diffs against a
+// partial id set.
+async function jnFetchAllJobIds(startMs) {
+  const ids = new Set();
+  const cur = new Date(startMs);
+  cur.setUTCDate(1); cur.setUTCHours(0, 0, 0, 0);
+  while (cur < new Date()) {
+    const gte = Math.floor(cur.getTime() / 1000);
+    cur.setUTCMonth(cur.getUTCMonth() + 1);
+    const lt = Math.floor(cur.getTime() / 1000);
+    const filter = encodeURIComponent(JSON.stringify({ must: [{ range: { date_created: { gte, lt } } }] }));
+    let count = Infinity, fetched = 0;
+    for (let from = 0; from < 10000 && fetched < count; from += 500) {
+      const r = await fetch(`${JN_BASE}/jobs?size=500&from=${from}&filter=${filter}&fields=jnid`, {
+        headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+      });
+      if (!r.ok) throw new Error(`JN /jobs ${r.status}`);
+      const data = await r.json();
+      const page = data?.results ?? data?.data ?? [];
+      count = data?.count ?? data?.total ?? page.length;
+      for (const j of page) { const id = j.jnid || j.id || j.recid; if (id) ids.add(String(id)); }
+      fetched += page.length;
+      if (page.length < 500) break;
+    }
+    if (fetched < count) throw new Error(`window ${new Date(gte * 1000).toISOString().slice(0, 7)} incomplete: ${fetched}/${count}`);
+  }
+  return ids;
+}
+
+async function sweepDeletedJobs() {
+  if (deletionSweepRunning) return;
+  deletionSweepRunning = true;
+  lastDeletionSweep = { phase: 'started', at: new Date().toISOString() };
+  try {
+    // All local jobs (paged: PostgREST caps a response at max-rows). jn_created
+    // bounds the JN pull window; rows with a NULL jn_created are still safe —
+    // the per-id 404 check is what authorizes deletion, not the bulk diff.
+    const local = [];
+    for (let offset = 0; ; offset += 1000) {
+      const page = await sbSelect('jobs', `select=jn_id,jn_created&order=jn_id&limit=1000&offset=${offset}`);
+      local.push(...page);
+      if (page.length < 1000) break;
+    }
+    let startMs = Date.UTC(2015, 0, 1);
+    for (const r of local) {
+      const t = r.jn_created ? new Date(r.jn_created).getTime() : NaN;
+      if (!isNaN(t) && t < startMs) startMs = t;
+    }
+    startMs -= 45 * 24 * 60 * 60 * 1000; // pad: JN date_created can predate ours
+
+    const jnIds = await jnFetchAllJobIds(startMs);
+    if (jnIds.size === 0) throw new Error('JN returned zero job ids — refusing to diff');
+
+    const candidates = local.map(r => r.jn_id).filter(id => id && !jnIds.has(id));
+    console.log(`[deletion-sweep] ${local.length} local, ${jnIds.size} in JN, ${candidates.length} candidates`);
+
+    // Confirm each candidate individually — ONLY a 404 counts as deleted.
+    const confirmed = [];
+    let skipped = 0;
+    for (const id of candidates.slice(0, DELETION_SWEEP_VERIFY_CAP)) {
+      const r = await fetch(`${JN_BASE}/jobs/${encodeURIComponent(id)}`, {
+        headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+      });
+      if (r.status === 404) confirmed.push(id);
+      else { skipped++; if (!r.ok) console.warn(`[deletion-sweep] ${id} verify got ${r.status} — skipped`); }
+      await new Promise(t => setTimeout(t, 100)); // gentle on the JN API
+    }
+
+    if (confirmed.length > DELETION_SWEEP_MAX) {
+      throw new Error(`${confirmed.length} confirmed deletions exceeds cap ${DELETION_SWEEP_MAX} — aborting, investigate before raising the cap`);
+    }
+
+    // Archive full rows, then delete. Chunked so URLs stay under length limits.
+    let deleted = 0;
+    for (let i = 0; i < confirmed.length; i += 50) {
+      const chunk = confirmed.slice(i, i + 50);
+      const inList = encodeURIComponent(chunk.map(id => `"${id}"`).join(','));
+      const rows = await sbSelect('jobs', `select=*&jn_id=in.(${inList})`);
+      if (rows.length) {
+        const archive = rows.map(r => ({ jn_id: r.jn_id, job: r, deleted_at: new Date().toISOString() }));
+        const ar = await fetch(`${SUPABASE_URL}/rest/v1/deleted_jobs?on_conflict=jn_id`, {
+          method: 'POST',
+          headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
+          body: JSON.stringify(archive),
+        });
+        if (!ar.ok) throw new Error(`archive upsert ${ar.status} ${(await ar.text()).slice(0, 200)}`);
+      }
+      const dr = await fetch(`${SUPABASE_URL}/rest/v1/jobs?jn_id=in.(${inList})`, {
+        method: 'DELETE', headers: { ...sbHeaders, Prefer: 'return=minimal' },
+      });
+      if (!dr.ok) throw new Error(`jobs delete ${dr.status} ${(await dr.text()).slice(0, 200)}`);
+      deleted += chunk.length;
+    }
+
+    console.log(`[deletion-sweep] done — deleted ${deleted}, skipped ${skipped} unconfirmed`);
+    lastDeletionSweep = {
+      phase: 'done', local: local.length, jn: jnIds.size,
+      candidates: candidates.length, deleted, skipped, at: new Date().toISOString(),
+    };
+  } catch (err) {
+    console.error('[deletion-sweep] failed:', err.message);
+    lastDeletionSweep = { phase: 'error', error: err.message, at: new Date().toISOString() };
+  } finally {
+    deletionSweepRunning = false;
+  }
+}
+
+if (SUPABASE_SERVICE_KEY) {
+  setTimeout(sweepDeletedJobs, 90 * 1000); // first pass shortly after boot
+  setInterval(sweepDeletedJobs, DELETION_SWEEP_INTERVAL_MS);
+}
+
+app.post('/admin/jobs/deletion-sweep', requireAuth, requireAdmin, (req, res) => {
+  if (deletionSweepRunning) return res.status(409).json({ error: 'Sweep already running', last: lastDeletionSweep });
+  sweepDeletedJobs(); // runs in background
+  res.status(202).json({ ok: true, started: true });
+});
+app.get('/admin/jobs/deletion-sweep', requireAuth, requireAdmin, (req, res) => {
+  res.json({ running: deletionSweepRunning, last: lastDeletionSweep });
+});
+
 // ── JobNimbus photo counts (photos-per-job metric) ───────────────────────────
 // The exec "Photos" column and rep Docs % (see supabase/add_jn_photo_counts.sql
 // in the app repo) count app-uploaded `photos` rows plus JN-native photos.
