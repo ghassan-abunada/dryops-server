@@ -292,18 +292,21 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   set('name', job.name || undefined);
   set('number', job.number != null && job.number !== '' ? String(job.number) : undefined);
   set('address', addrParts.length ? addrParts.join(', ') : undefined);
-  set('claim_number', pick('cf_string_2'));
+  // ~2026-07-01 JN webhook payloads stopped carrying cf_string_*/cf_date_*
+  // keys and now send display-name keys only ("Claim Number", ...). API GET
+  // payloads still carry both, so every cf_ pick needs its display-name twin.
+  set('claim_number', pick('cf_string_2', 'Claim Number'));
   set('client_phone', pick('parent_mobile_phone'));
-  set('adjuster_name', pick('cf_string_3'));
-  set('adjuster_phone', pick('cf_string_4'));
-  set('adjuster_email', pick('cf_string_5'));
+  set('adjuster_name', pick('cf_string_3', 'Adjuster Name'));
+  set('adjuster_phone', pick('cf_string_4', 'Adjuster Number'));
+  set('adjuster_email', pick('cf_string_5', 'Adjuster Email'));
   set('lead_type', pick('cf_string_6', 'Lead Type'));
   set('insurance_type', pick('cf_string_7', 'Insurance or Not Insurance'));
   set('tested', pick('cf_string_8', 'Tested or Not Tested'));
-  set('insurer', pick('cf_string_9'));
-  set('cat', pick('cf_string_18'));
+  set('insurer', pick('cf_string_9', 'Insurance Company'));
+  set('cat', pick('cf_string_18', 'CAT'));
   set('sales_rep', normalizeRepName(pick('sales_rep_name'))); // JN built-in display name, e.g. "Jane Smith"
-  set('date_loss', jnToDate(job.cf_date_1));
+  set('date_loss', jnToDate(pick('cf_date_1', 'Date of Loss')));
   set('date_start', jnToDate(job.start_date));
   set('record_type', recordType || undefined);
   set('status', job.status_name || undefined);
