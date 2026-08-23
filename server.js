@@ -312,18 +312,18 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   set('jn_created', jnToISO(job.date_created));
   set('jn_updated', jnToISO(job.date_modified || job.date_updated));
 
-  // Resolve JobNimbus numeric location id -> our locations.id UUID.
+  // Resolve JobNimbus numeric location id -> our locations.id UUID. Unknown
+  // ids (a location created in JN after our seed) get a placeholder row
+  // auto-created so the job attaches immediately — an admin renames it later
+  // in Settings → Locations (JN's API exposes no location names anywhere).
   const jnLocRaw = job.location && (job.location.id ?? job.location);
   if (jnLocRaw != null && /^\d+$/.test(String(jnLocRaw))) {
     const jnLocId = Number(jnLocRaw);
     set('jn_location_id', jnLocId);
     try {
-      const lr = await fetch(`${SUPABASE_URL}/rest/v1/locations?jn_location_id=eq.${jnLocId}&select=id`, {
-        headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
-      });
-      const locs = await lr.json();
-      if (Array.isArray(locs) && locs[0] && locs[0].id) set('location_id', locs[0].id);
-    } catch (err) { console.error('[jn-webhook] location lookup error', err.message); }
+      const locUuid = await ensureLocationForJnId(jnLocId);
+      if (locUuid) set('location_id', locUuid);
+    } catch (err) { console.error('[jn-webhook] location resolve error', err.message); }
   }
 
   // What we already have for this job (drives the enrichment-only-when-needed
@@ -1291,6 +1291,69 @@ app.post('/admin/jobs/deletion-sweep', requireAuth, requireAdmin, (req, res) => 
 app.get('/admin/jobs/deletion-sweep', requireAuth, requireAdmin, (req, res) => {
   res.json({ running: deletionSweepRunning, last: lastDeletionSweep });
 });
+
+// ── Location self-heal ────────────────────────────────────────────────────────
+// The locations table was seeded once (July 2026 CSV); JN's API exposes no
+// location names, so a location created in JN afterwards has no local row and
+// its jobs sync with location_id NULL — invisible to location-scoped techs
+// and missing from every exec ranking. Two-part fix:
+//   * the job webhook calls ensureLocationForJnId() so new jobs attach to an
+//     auto-created placeholder row the moment they arrive;
+//   * this loop backfills placeholder rows for jn_location_ids already present
+//     on orphaned jobs and links those jobs, healing anything the webhook
+//     missed (downtime, races, pre-existing orphans).
+// Admins rename placeholders in Settings → Locations.
+
+// locations.id UUID for a JN numeric location id, creating a placeholder row
+// if none exists. ignore-duplicates guards the concurrent-webhook race (the
+// unique index on jn_location_id makes one insert win; both then re-read).
+async function ensureLocationForJnId(jnLocId) {
+  const rows = await sbSelect('locations', `jn_location_id=eq.${jnLocId}&select=id`);
+  if (rows[0] && rows[0].id) return rows[0].id;
+  const ins = await fetch(`${SUPABASE_URL}/rest/v1/locations?on_conflict=jn_location_id`, {
+    method: 'POST',
+    headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=minimal' },
+    body: JSON.stringify({ name: `New Location #${jnLocId} — needs name`, status: 'active', jn_location_id: jnLocId }),
+  });
+  if (!ins.ok) throw new Error(`locations insert ${ins.status} ${(await ins.text()).slice(0, 200)}`);
+  console.log(`[loc-heal] created placeholder location for JN #${jnLocId}`);
+  const again = await sbSelect('locations', `jn_location_id=eq.${jnLocId}&select=id`);
+  return again[0] ? again[0].id : null;
+}
+
+let locationHealRunning = false;
+async function healOrphanLocations() {
+  if (locationHealRunning) return;
+  locationHealRunning = true;
+  try {
+    const orphans = await sbSelect('jobs',
+      'select=jn_location_id&location_id=is.null&jn_location_id=not.is.null&limit=10000');
+    const ids = [...new Set(orphans.map(r => r.jn_location_id))];
+    if (!ids.length) return;
+    let linked = 0;
+    for (const jnLocId of ids) {
+      const locUuid = await ensureLocationForJnId(jnLocId);
+      if (!locUuid) continue;
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?jn_location_id=eq.${jnLocId}&location_id=is.null`, {
+        method: 'PATCH',
+        headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal,count=exact' },
+        body: JSON.stringify({ location_id: locUuid }),
+      });
+      if (!r.ok) { console.error(`[loc-heal] link failed for JN #${jnLocId}: ${r.status}`); continue; }
+      linked += Number((r.headers.get('content-range') || '').split('/')[1] || 0);
+    }
+    console.log(`[loc-heal] ${ids.length} orphan location ids, linked ${linked} jobs`);
+  } catch (err) {
+    console.error('[loc-heal] failed:', err.message);
+  } finally {
+    locationHealRunning = false;
+  }
+}
+
+if (SUPABASE_SERVICE_KEY) {
+  setTimeout(healOrphanLocations, 60 * 1000);
+  setInterval(healOrphanLocations, 6 * 60 * 60 * 1000);
+}
 
 // ── JobNimbus photo counts (photos-per-job metric) ───────────────────────────
 // The exec "Photos" column and rep Docs % (see supabase/add_jn_photo_counts.sql
