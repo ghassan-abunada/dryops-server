@@ -775,6 +775,56 @@ app.post('/admin/callrail/backfill', requireCallAccess, async (req, res) => {
   })();
 });
 
+// ── CallRail calls reconcile (periodic pull) ─────────────────────────────────
+// Calls were fed ONLY by the post-call webhook, and webhook delivery silently
+// died (Aug 2026: three weeks of zero calls until the exec page went blank).
+// Same lesson as the JN financials reconcile: webhooks are an optimization,
+// pull is the mechanism of record. Every 30 minutes pull the last few days of
+// calls from every account, upsert (merge-duplicates preserves the resolved
+// location_id/job_id on existing rows), and re-run the set-based resolver for
+// anything new. Missed webhooks now self-heal within one cycle.
+const CALLS_RECONCILE_INTERVAL_MS = 30 * 60 * 1000;
+const CALLS_RECONCILE_LOOKBACK_DAYS = 3;
+
+let callsReconcileRunning = false;
+async function reconcileCalls() {
+  if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return;
+  if (callsReconcileRunning || callrailBackfillRunning) return;
+  callsReconcileRunning = true;
+  try {
+    const end = new Date(Date.now() + 86400 * 1000); // tomorrow: timezone slack
+    const start = new Date(Date.now() - CALLS_RECONCILE_LOOKBACK_DAYS * 86400 * 1000);
+    const dateQ = `&start_date=${start.toISOString().slice(0, 10)}&end_date=${end.toISOString().slice(0, 10)}`;
+    const fields = 'source,medium,campaign,first_call,gclid';
+    let upserted = 0;
+    for (const acct of CALLRAIL_ACCOUNT_IDS) {
+      for (let page = 1; page <= 40; page++) {
+        const r = await fetchCallsPage(acct, page, fields, dateQ);
+        if (!r.ok) { console.error('[calls-reconcile] api', acct, r.status); break; }
+        const calls = (r.json && (r.json.calls || r.json.data)) || [];
+        const seen = new Set();
+        const rows = [];
+        for (const c of calls) {
+          const row = mapCallRow(c);
+          if (row.callrail_id && !seen.has(row.callrail_id)) { seen.add(row.callrail_id); rows.push(row); }
+        }
+        if (rows.length) { await sbUpsert('calls', rows, 'callrail_id'); upserted += rows.length; }
+        if (calls.length < 250) break;
+      }
+    }
+    if (upserted) await sbRpc('callrail_resolve_all'); // location/job/date_contacted for new rows
+    console.log(`[calls-reconcile] upserted ${upserted} calls (${CALLS_RECONCILE_LOOKBACK_DAYS}d window)`);
+  } catch (err) {
+    console.error('[calls-reconcile] failed:', err.message);
+  } finally {
+    callsReconcileRunning = false;
+  }
+}
+if (SUPABASE_SERVICE_KEY) {
+  setTimeout(reconcileCalls, 45 * 1000);
+  setInterval(reconcileCalls, CALLS_RECONCILE_INTERVAL_MS);
+}
+
 // ── JobNimbus invoice webhook ─────────────────────────────────────────────────
 // POST /webhooks/jobnimbus/invoices — same secret gate as the jobs webhook.
 app.post('/webhooks/jobnimbus/invoices', async (req, res) => {
