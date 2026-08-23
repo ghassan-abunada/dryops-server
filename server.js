@@ -1624,7 +1624,10 @@ async function jnWorkauthForJob(jobJnId) {
     headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
   });
   if (!r.ok) throw new Error(`JN /proposals related=${jobJnId} ${r.status}`);
-  const props = ((await r.json())?.results ?? []).filter(p => p.jnid && p.is_active !== false && !p.is_archived);
+  // Archived docs COUNT: JN bulk-archives documents after signing (verified
+  // 2026-08-23 — signed WAs flip is_archived ~a day later, which made whole
+  // offices read as 'Missing'). A Fully Signed doc proves the WA regardless.
+  const props = ((await r.json())?.results ?? []).filter(p => p.jnid && p.is_active !== false);
   let best = null;
   for (const p of props) {
     if (!best || (WORKAUTH_RANK[p.signature_status] || 0) > (WORKAUTH_RANK[best.signature_status] || 0)) best = p;
