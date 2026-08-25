@@ -3415,6 +3415,203 @@ app.post('/webhooks/jobnimbus/photo-report', async (req, res) => {
   );
 });
 
+// ── Power BI dataset sync (pull-on-refresh) ──────────────────────────────────
+// Power BI has no webhook for dataset refreshes, so this polls the
+// refresh-history API and re-pulls every model table (via DAX executeQueries)
+// into Supabase whenever a new successful refresh lands. Tables land as jsonb
+// rows in pbi_rows; measure definitions land in pbi_measures (schema:
+// supabase_pbi.sql).
+//
+// Auth is a service principal (client-credentials). Tenant prerequisites:
+//   - "Service principals can use Fabric APIs" enabled for the SP's group
+//   - "Dataset Execute Queries REST API" enabled
+//   - SP added to the workspace (Member) or given Build on the dataset
+// Inert until all PBI_* env vars are set.
+const PBI_TENANT_ID = (process.env.PBI_TENANT_ID || '').trim();
+const PBI_CLIENT_ID = (process.env.PBI_CLIENT_ID || '').trim();
+const PBI_CLIENT_SECRET = (process.env.PBI_CLIENT_SECRET || '').trim();
+const PBI_DATASET_IDS = (process.env.PBI_DATASET_IDS || process.env.PBI_DATASET_ID || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+const PBI_POLL_INTERVAL_MS = Number(process.env.PBI_POLL_INTERVAL_MS) || 15 * 60 * 1000;
+const PBI_CHUNK_ROWS = Number(process.env.PBI_CHUNK_ROWS) || 25000;
+const PBI_FALLBACK_SYNC_MS = 24 * 60 * 60 * 1000; // cadence when refresh history is unavailable (live/DirectQuery)
+
+let pbiTokenCache = { token: null, exp: 0 };
+async function pbiToken() {
+  if (pbiTokenCache.token && Date.now() < pbiTokenCache.exp - 5 * 60 * 1000) return pbiTokenCache.token;
+  const r = await fetch(`https://login.microsoftonline.com/${PBI_TENANT_ID}/oauth2/v2.0/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: PBI_CLIENT_ID,
+      client_secret: PBI_CLIENT_SECRET,
+      scope: 'https://analysis.windows.net/powerbi/api/.default',
+    }),
+  });
+  if (!r.ok) throw new Error(`AAD token ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  const j = await r.json();
+  pbiTokenCache = { token: j.access_token, exp: Date.now() + j.expires_in * 1000 };
+  return pbiTokenCache.token;
+}
+
+async function pbiApi(path) {
+  const r = await fetch(`https://api.powerbi.com/v1.0/myorg${path}`, {
+    headers: { Authorization: `Bearer ${await pbiToken()}` },
+  });
+  return r;
+}
+
+// Column keys come back as "Table[Column]" (or "[n]" for computed rows) — strip to bare names.
+function pbiStripKeys(row) {
+  const out = {};
+  for (const [k, v] of Object.entries(row)) {
+    const m = k.match(/\[([^\]]*)\]$/);
+    out[m ? m[1] : k] = v;
+  }
+  return out;
+}
+
+async function pbiDax(datasetId, query) {
+  const r = await fetch(`https://api.powerbi.com/v1.0/myorg/datasets/${datasetId}/executeQueries`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${await pbiToken()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ queries: [{ query }], serializerSettings: { includeNulls: true } }),
+  });
+  if (!r.ok) throw new Error(`executeQueries ${r.status}: ${(await r.text()).slice(0, 500)}`);
+  const j = await r.json();
+  const err = j.results?.[0]?.error;
+  if (err) throw new Error(`DAX error: ${JSON.stringify(err).slice(0, 500)}`);
+  return (j.results?.[0]?.tables?.[0]?.rows || []).map(pbiStripKeys);
+}
+
+const pbiSleep = ms => new Promise(res => setTimeout(res, ms));
+const pbiQuoteTable = name => `'${String(name).replace(/'/g, "''")}'`;
+
+async function pbiListTables(datasetId) {
+  const rows = await pbiDax(datasetId,
+    'EVALUATE SELECTCOLUMNS(FILTER(INFO.TABLES(), NOT [IsHidden]), "name", [Name])');
+  return rows.map(r => r.name)
+    .filter(n => n && !/^(DateTableTemplate|LocalDateTable)/.test(n));
+}
+
+async function pbiSbDeleteRows(datasetId, tableName) {
+  const q = `pbi_rows?dataset_id=eq.${encodeURIComponent(datasetId)}&table_name=eq.${encodeURIComponent(tableName)}`;
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, {
+    method: 'DELETE',
+    headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+  });
+  if (!r.ok) throw new Error(`delete pbi_rows ${r.status}`);
+}
+
+async function pbiPullTable(datasetId, tableName) {
+  const t = pbiQuoteTable(tableName);
+  const countRows = await pbiDax(datasetId, `EVALUATE ROW("n", COUNTROWS(${t}))`);
+  const total = Number(countRows[0]?.n) || 0;
+  let rows = [];
+  if (total <= PBI_CHUNK_ROWS) {
+    rows = await pbiDax(datasetId, `EVALUATE ${t}`);
+  } else {
+    // WINDOW without an explicit ORDER BY orders by all columns — deterministic
+    // enough that chunks from one sync don't overlap or skip rows.
+    for (let from = 1; from <= total; from += PBI_CHUNK_ROWS) {
+      const to = Math.min(from + PBI_CHUNK_ROWS - 1, total);
+      rows.push(...await pbiDax(datasetId, `EVALUATE WINDOW(${from}, ABS, ${to}, ABS, ALL(${t}))`));
+      await pbiSleep(600); // stay under the 120 req/min executeQueries cap
+    }
+  }
+  const synced_at = new Date().toISOString();
+  await pbiSbDeleteRows(datasetId, tableName);
+  for (let i = 0; i < rows.length; i += 500) {
+    await sbUpsert('pbi_rows', rows.slice(i, i + 500).map((row, j) => ({
+      dataset_id: datasetId, table_name: tableName, row_num: i + j + 1, row, synced_at,
+    })), 'dataset_id,table_name,row_num');
+  }
+  return rows.length;
+}
+
+async function pbiPullMeasures(datasetId) {
+  let rows;
+  try {
+    rows = (await pbiDax(datasetId, 'EVALUATE INFO.VIEW.MEASURES()'))
+      .map(r => ({ name: r.Name, table_name: r.Table, expression: r.Expression }));
+  } catch {
+    rows = (await pbiDax(datasetId, 'EVALUATE SELECTCOLUMNS(INFO.MEASURES(), "Name", [Name], "Expression", [Expression])'))
+      .map(r => ({ name: r.Name, table_name: null, expression: r.Expression }));
+  }
+  const synced_at = new Date().toISOString();
+  const clean = rows.filter(r => r.name);
+  for (let i = 0; i < clean.length; i += 500) {
+    await sbUpsert('pbi_measures', clean.slice(i, i + 500).map(r => ({ dataset_id: datasetId, ...r, synced_at })),
+      'dataset_id,name');
+  }
+  return clean.length;
+}
+
+async function pbiSyncDataset(datasetId, refreshEnd) {
+  const tables = await pbiListTables(datasetId);
+  let rowsSynced = 0;
+  for (const t of tables) {
+    try {
+      const n = await pbiPullTable(datasetId, t);
+      rowsSynced += n;
+      console.log(`[pbi-sync] ${datasetId} '${t}': ${n} rows`);
+    } catch (err) {
+      console.error(`[pbi-sync] ${datasetId} '${t}' failed:`, err.message);
+    }
+    await pbiSleep(600);
+  }
+  const measures = await pbiPullMeasures(datasetId).catch(err => {
+    console.error(`[pbi-sync] ${datasetId} measures failed:`, err.message); return 0;
+  });
+  await sbUpsert('pbi_sync_state', {
+    dataset_id: datasetId,
+    last_refresh_end: refreshEnd || null,
+    last_synced_at: new Date().toISOString(),
+    last_status: 'ok',
+    tables_synced: tables.length,
+    rows_synced: rowsSynced,
+  }, 'dataset_id');
+  console.log(`[pbi-sync] ${datasetId} done — ${tables.length} tables, ${rowsSynced} rows, ${measures} measures`);
+}
+
+let pbiSyncRunning = false;
+async function pbiPoll() {
+  if (pbiSyncRunning) return;
+  pbiSyncRunning = true;
+  try {
+    for (const datasetId of PBI_DATASET_IDS) {
+      try {
+        const state = (await sbGet(`pbi_sync_state?dataset_id=eq.${encodeURIComponent(datasetId)}&select=*`))?.[0];
+        const rr = await pbiApi(`/datasets/${datasetId}/refreshes?$top=10`);
+        if (rr.ok) {
+          const refreshes = (await rr.json()).value || [];
+          const latest = refreshes.find(x => x.status === 'Completed');
+          if (!latest) continue;
+          if (state?.last_refresh_end && new Date(latest.endTime) <= new Date(state.last_refresh_end)) continue;
+          console.log(`[pbi-sync] ${datasetId} new refresh at ${latest.endTime} — pulling`);
+          await pbiSyncDataset(datasetId, latest.endTime);
+        } else {
+          // No refresh history (live connection / DirectQuery) — sync on a fixed cadence instead.
+          const last = state?.last_synced_at ? new Date(state.last_synced_at).getTime() : 0;
+          if (Date.now() - last < PBI_FALLBACK_SYNC_MS) continue;
+          console.log(`[pbi-sync] ${datasetId} no refresh history (${rr.status}) — fallback sync`);
+          await pbiSyncDataset(datasetId, null);
+        }
+      } catch (err) {
+        console.error(`[pbi-sync] ${datasetId} failed:`, err.message);
+      }
+    }
+  } finally {
+    pbiSyncRunning = false;
+  }
+}
+if (SUPABASE_SERVICE_KEY && PBI_TENANT_ID && PBI_CLIENT_ID && PBI_CLIENT_SECRET && PBI_DATASET_IDS.length) {
+  setTimeout(pbiPoll, 60 * 1000);
+  setInterval(pbiPoll, PBI_POLL_INTERVAL_MS);
+  console.log(`[pbi-sync] enabled for ${PBI_DATASET_IDS.length} dataset(s), polling every ${Math.round(PBI_POLL_INTERVAL_MS / 60000)}m`);
+}
+
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
 });
