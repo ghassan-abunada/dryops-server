@@ -3122,8 +3122,8 @@ app.get('/admin/places/details', requireAuth, requireAdmin, async (req, res) => 
 // whenever a job's status changes to Work Complete. We then:
 //   1. pull the job, its primary contact, and every image file on the job;
 //   2. render a "<Record Type> Photo Report" PDF — brand logo + claim/contact
-//      header (matches the manual report layout), photos oldest-first, two per
-//      row with their filenames as bold captions;
+//      header (matches the manual report layout), photos oldest-first, two
+//      per row (no captions, per owner);
 //   3. upload the PDF(s) back onto the job's JN Files (related=[job jnid] —
 //      JN's /files POST wants related as an ARRAY OF JNID STRINGS, not
 //      {id,type} objects; the object form errors "invalid document").
@@ -3238,8 +3238,7 @@ function fmtCentral(unixSecs) {
 
 // One report document. Header (logo | claim/date/rep | name+address), centered
 // title, then photos two per row: one row on the title page, two per page
-// after, filename captions bold under each (left photo left-aligned, right
-// photo right-aligned) — matching the manual report.
+// after. No captions under photos (owner request 2026-08-25).
 function renderPhotoReportPdf(header, photos) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'LETTER', margin: 36, autoFirstPage: false });
@@ -3250,7 +3249,7 @@ function renderPhotoReportPdf(header, photos) {
 
     const M = 36, PAGE_W = 612, PAGE_H = 792, W = PAGE_W - 2 * M;
     const COL_W = 258, X_L = M, X_R = PAGE_W - M - COL_W;
-    const IMG_H = 300, ROW_H = IMG_H + 30;
+    const IMG_H = 300, ROW_H = IMG_H + 6; // no captions (owner request 2026-08-25)
 
     doc.addPage();
     if (header.logoBuf) { try { doc.image(header.logoBuf, M, 42, { fit: [130, 60] }); } catch (e) { /* bad logo bytes — render without */ } }
@@ -3280,8 +3279,6 @@ function renderPhotoReportPdf(header, photos) {
         } catch (e) {
           doc.font('Helvetica').fontSize(9).text(`[photo failed to embed: ${p.caption}]`, x, y, { width: COL_W });
         }
-        doc.font('Helvetica-Bold').fontSize(9)
-          .text(p.caption, x, y + IMG_H + 8, { width: COL_W, align: k === 0 ? 'left' : 'right', lineBreak: false });
       });
       y += ROW_H + 12;
     }
