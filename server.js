@@ -3117,6 +3117,289 @@ app.get('/admin/places/details', requireAuth, requireAdmin, async (req, res) => 
   }
 });
 
+// ── JobNimbus photo report (Work Complete → PDF → job Files) ─────────────────
+// A JobNimbus automation fires POST /webhooks/jobnimbus/photo-report?token=…
+// whenever a job's status changes to Work Complete. We then:
+//   1. pull the job, its primary contact, and every image file on the job;
+//   2. render a "<Record Type> Photo Report" PDF — brand logo + claim/contact
+//      header (matches the manual report layout), photos oldest-first, two per
+//      row with their filenames as bold captions;
+//   3. upload the PDF(s) back onto the job's JN Files (related=[job jnid] —
+//      JN's /files POST wants related as an ARRAY OF JNID STRINGS, not
+//      {id,type} objects; the object form errors "invalid document").
+// Reports must be emailable: photos are recompressed (sharp, ≤1400px JPEG
+// q72) and the report splits into "Part N of M" documents so no single PDF
+// exceeds ~18MB (owner requirement: stay under the 20MB email cap).
+// Re-fires are deliberate: every Work Complete transition uploads a fresh
+// report (owner decision 2026-08-25) — date-stamped filenames disambiguate.
+const PDFDocument = require('pdfkit');
+const sharp = require('sharp');
+
+const PHOTO_REPORT_MAX_PDF_BYTES = 17 * 1024 * 1024; // actual PDFs land ~2% over this estimate — 17MB keeps them safely under the 20MB email cap
+const PHOTO_REPORT_MAX_PHOTOS = 200; // JN /files page cap — same as jn_photo_counts
+
+// Franchise name before the territory suffix — port of the app's
+// lib/logos.ts brandOf(); keep the two in sync.
+function brandOfLocationName(name) {
+  let n = String(name || '').trim();
+  const cutters = [' of ', ' - ', ' – ', ' ('];
+  let idx = -1;
+  for (const c of cutters) {
+    const i = n.indexOf(c);
+    if (i > 0 && (idx === -1 || i < idx)) idx = i;
+  }
+  if (idx > 0) n = n.slice(0, idx);
+  return n.replace(/,?\s+(LLC\.?|Inc\.?)$/i, '').replace(/[,.]+$/, '').trim();
+}
+
+// Logo bytes for the job's location: per-location logo_url wins, then the
+// brand pack's full → light → icon variants (mirrors lib/logos.ts
+// resolveLogo). Normalized to PNG so pdfkit can embed any source format.
+async function photoReportLogoForJob(jobJnId) {
+  try {
+    if (!SUPABASE_SERVICE_KEY) return null;
+    const jobs = await sbSelect('jobs', `jn_id=eq.${encodeURIComponent(jobJnId)}&select=location_id&limit=1`);
+    const locId = jobs && jobs[0] && jobs[0].location_id;
+    if (!locId) return null;
+    const locs = await sbSelect('locations', `id=eq.${locId}&select=name,logo_url&limit=1`);
+    const loc = locs && locs[0];
+    if (!loc) return null;
+    let url = loc.logo_url || null;
+    if (!url) {
+      const rows = await sbSelect('brand_logos', `brand=eq.${encodeURIComponent(brandOfLocationName(loc.name))}&select=variant,url`);
+      const by = Object.fromEntries((rows || []).map(r => [r.variant, r.url]));
+      url = by.full || by.light || by.icon || null;
+    }
+    if (!url) return null;
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    return await sharp(buf).resize({ width: 400, withoutEnlargement: true }).png().toBuffer();
+  } catch (err) {
+    console.warn('[photo-report] logo unavailable:', err.message);
+    return null;
+  }
+}
+
+async function jnGetJobFull(jnid) {
+  const r = await fetch(`${JN_BASE}/jobs/${encodeURIComponent(jnid)}`, {
+    headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+  });
+  if (!r.ok) throw new Error(`JN /jobs/${jnid} ${r.status}`);
+  return r.json();
+}
+
+async function jnGetContactFull(contactId) {
+  const r = await fetch(`${JN_BASE}/contacts/${encodeURIComponent(contactId)}`, {
+    headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+  });
+  if (!r.ok) return null;
+  return r.json();
+}
+
+// Every image file on the job, oldest first — the same listing files.tsx and
+// jnCountFilesForJob use, so the report matches the app's Files tab.
+async function jnListJobImages(jobJnId) {
+  const r = await fetch(`${JN_BASE}/files?size=${PHOTO_REPORT_MAX_PHOTOS}&related=${encodeURIComponent(jobJnId)}`, {
+    headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+  });
+  if (!r.ok) throw new Error(`JN /files related=${jobJnId} ${r.status}`);
+  const files = (((await r.json()) || {}).files || []).filter(f => (f.jnid || f.id) && isJnImage(f));
+  files.sort((a, b) => (a.date_created || 0) - (b.date_created || 0));
+  return files;
+}
+
+async function jnDownloadFile(fileJnId) {
+  const r = await fetch(`${JN_BASE}/files/${encodeURIComponent(fileJnId)}`, {
+    headers: { Authorization: `bearer ${JN_TOKEN}` },
+  });
+  if (!r.ok) throw new Error(`JN file ${fileJnId} ${r.status}`);
+  return Buffer.from(await r.arrayBuffer());
+}
+
+async function jnUploadFile(jobJnId, filename, buf, description) {
+  const r = await fetch(`${JN_BASE}/files`, {
+    method: 'POST',
+    headers: { Authorization: `bearer ${JN_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ data: buf.toString('base64'), filename, description, related: [jobJnId] }),
+  });
+  if (!r.ok) throw new Error(`JN files upload ${r.status} ${(await r.text()).slice(0, 200)}`);
+  return ((await r.json()) || {}).jnid || null;
+}
+
+// "6/12/2026 3:02 PM CST" — Central time like the manual report template.
+function fmtCentral(unixSecs) {
+  if (!unixSecs) return '';
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', month: 'numeric', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short',
+  }).format(new Date(unixSecs * 1000)).replace(',', '');
+}
+
+// One report document. Header (logo | claim/date/rep | name+address), centered
+// title, then photos two per row: one row on the title page, two per page
+// after, filename captions bold under each (left photo left-aligned, right
+// photo right-aligned) — matching the manual report.
+function renderPhotoReportPdf(header, photos) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'LETTER', margin: 36, autoFirstPage: false });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const M = 36, PAGE_W = 612, PAGE_H = 792, W = PAGE_W - 2 * M;
+    const COL_W = 258, X_L = M, X_R = PAGE_W - M - COL_W;
+    const IMG_H = 300, ROW_H = IMG_H + 30;
+
+    doc.addPage();
+    if (header.logoBuf) { try { doc.image(header.logoBuf, M, 42, { fit: [130, 60] }); } catch (e) { /* bad logo bytes — render without */ } }
+    doc.font('Helvetica').fontSize(9).fillColor('black');
+    let cy = 46;
+    for (const line of [
+      `Claim Number:${header.claim || ''}`,
+      `Date Contacted: ${header.dateContacted || ''}`,
+      `Sales Rep: ${header.salesRep || ''}`,
+    ]) { doc.text(line, 218, cy, { width: 200 }); cy += 17; }
+    let ry = 44;
+    doc.font('Helvetica-Bold').text(header.name || '', 428, ry, { width: 148 });
+    ry += 15;
+    doc.font('Helvetica');
+    if (header.addr1) { doc.text(header.addr1, 428, ry, { width: 148 }); ry += 14; }
+    if (header.addr2) doc.text(header.addr2, 428, ry, { width: 148 });
+
+    doc.font('Helvetica-Bold').fontSize(13).text(header.title, M, 132, { width: W, align: 'center' });
+
+    let y = 168;
+    for (let i = 0; i < photos.length; i += 2) {
+      if (y + ROW_H > PAGE_H - M) { doc.addPage(); y = 40; }
+      photos.slice(i, i + 2).forEach((p, k) => {
+        const x = k === 0 ? X_L : X_R;
+        try {
+          doc.image(p.buf, x, y, { fit: [COL_W, IMG_H] });
+        } catch (e) {
+          doc.font('Helvetica').fontSize(9).text(`[photo failed to embed: ${p.caption}]`, x, y, { width: COL_W });
+        }
+        doc.font('Helvetica-Bold').fontSize(9)
+          .text(p.caption, x, y + IMG_H + 8, { width: COL_W, align: k === 0 ? 'left' : 'right', lineBreak: false });
+      });
+      y += ROW_H + 12;
+    }
+    doc.end();
+  });
+}
+
+// Full pipeline for one job. dryrun writes PDFs to os.tmpdir() instead of
+// uploading (hit the webhook with ?dryrun=1&force=1 to preview a job).
+async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
+  const job = await jnGetJobFull(jobJnId);
+  const contact = job && job.primary && job.primary.id ? await jnGetContactFull(job.primary.id) : null;
+  const name = [contact && contact.first_name, contact && contact.last_name].filter(Boolean).join(' ')
+    || (contact && contact.display_name) || (job && job.display_name) || 'Unknown';
+
+  const files = await jnListJobImages(jobJnId);
+  if (!files.length) { console.log('[photo-report]', jobJnId, 'has no photos — skipping'); return { photos: 0, uploaded: [] }; }
+
+  const logoBuf = await photoReportLogoForJob(jobJnId);
+
+  // Download + recompress with a small worker pool; slot by index so the
+  // oldest-first order survives concurrency.
+  const out = new Array(files.length).fill(null);
+  let next = 0, failed = 0;
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= files.length) break;
+      const f = files[i];
+      try {
+        const raw = await jnDownloadFile(f.jnid || f.id);
+        const buf = await sharp(raw).rotate()
+          .resize({ width: 1400, height: 1400, fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 72 }).toBuffer();
+        out[i] = { buf, caption: f.filename || f.name || `photo-${i + 1}.jpg` };
+      } catch (err) {
+        failed++;
+        if (failed <= 3) console.warn('[photo-report] photo skipped', f.jnid || f.id, err.message);
+      }
+    }
+  }));
+  const photos = out.filter(Boolean);
+  if (!photos.length) throw new Error(`all ${files.length} photo downloads failed`);
+
+  // Split into parts so each PDF stays under the email-safe cap. The estimate
+  // (compressed bytes + per-image overhead + fixed header allowance) tracks
+  // real pdfkit output closely because JPEGs embed byte-for-byte.
+  const baseBytes = 90 * 1024 + (logoBuf ? logoBuf.length : 0);
+  const groups = [];
+  let cur = [], bytes = baseBytes;
+  for (const p of photos) {
+    const add = p.buf.length + 1500;
+    if (cur.length && bytes + add > PHOTO_REPORT_MAX_PDF_BYTES) { groups.push(cur); cur = []; bytes = baseBytes; }
+    cur.push(p);
+    bytes += add;
+  }
+  if (cur.length) groups.push(cur);
+
+  const rt = (job && job.record_type_name) || 'Job';
+  const header = {
+    logoBuf,
+    claim: (job && job.cf_string_2) || '',
+    dateContacted: fmtCentral((contact && contact.date_created) || (job && job.date_created)),
+    salesRep: (job && job.sales_rep_name) || '',
+    name,
+    addr1: (job && job.address_line1) || '',
+    addr2: [job && job.city, job && job.state_text].filter(Boolean).join(', '),
+  };
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago' }).format(new Date());
+  const safeName = name.replace(/[\\/:*?"<>|]+/g, ' ').trim();
+
+  const uploaded = [];
+  for (let g = 0; g < groups.length; g++) {
+    const part = groups.length > 1 ? ` - Part ${g + 1} of ${groups.length}` : '';
+    const pdf = await renderPhotoReportPdf({ ...header, title: `${rt} Photo Report${part.replace(' - ', ' — ')}` }, groups[g]);
+    const filename = `Photo Report - ${safeName} - ${today}${part}.pdf`;
+    if (dryrun) {
+      const p = path.join(require('os').tmpdir(), filename);
+      require('fs').writeFileSync(p, pdf);
+      uploaded.push({ file: p, bytes: pdf.length });
+    } else {
+      const jnid = await jnUploadFile(jobJnId, filename, pdf, `Auto-generated ${rt.toLowerCase()} photo report (${groups[g].length} photos)`);
+      uploaded.push({ jnid, filename, bytes: pdf.length });
+    }
+  }
+  return { photos: photos.length, failed, parts: groups.length, uploaded };
+}
+
+// The URL for the JobNimbus automation (status = Work Complete → webhook):
+//   https://dryops-server-production.up.railway.app/webhooks/jobnimbus/photo-report?token=<JN_WEBHOOK_TOKEN>
+// Extras for manual runs: &force=1 skips the status guard, &dryrun=1 writes
+// the PDFs to the server's tmp dir (and responds synchronously) instead of
+// uploading to JobNimbus.
+app.post('/webhooks/jobnimbus/photo-report', async (req, res) => {
+  if (!webhookTokenOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  const rec = unwrapRecord(req.body) || {};
+  const jnid = rec.jnid || rec.id || req.query.jnid;
+  if (!jnid) {
+    console.warn('[photo-report] webhook without jnid; keys=', Object.keys(rec).slice(0, 30).join(','));
+    return res.status(400).json({ error: 'no job jnid in payload' });
+  }
+  const status = String(rec.status_name || '');
+  if (req.query.force !== '1' && !/work\s*complete/i.test(status)) {
+    console.log('[photo-report] ignoring status', JSON.stringify(status), 'for', jnid);
+    return res.json({ ok: true, skipped: `status ${status || '(none)'}` });
+  }
+  console.log('[photo-report] queued for', jnid, 'status=', status || '(forced)');
+  if (req.query.dryrun === '1') {
+    try { return res.json({ ok: true, dryrun: true, ...(await generatePhotoReport(String(jnid), { dryrun: true })) }); }
+    catch (err) { console.error('[photo-report] dryrun failed:', err.message); return res.status(500).json({ error: err.message }); }
+  }
+  res.status(202).json({ ok: true, queued: true });
+  generatePhotoReport(String(jnid)).then(
+    r => console.log('[photo-report]', jnid, 'done —', r.photos, 'photos →', r.parts, 'part(s)'),
+    err => console.error('[photo-report]', jnid, 'failed:', err.message),
+  );
+});
+
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
 });
