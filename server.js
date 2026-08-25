@@ -3415,6 +3415,274 @@ app.post('/webhooks/jobnimbus/photo-report', async (req, res) => {
   );
 });
 
+// ── Supplemental storage billing ─────────────────────────────────────────────
+// Replaces the Zapier/JN-automation flow that billed each in-storage Contents
+// job on its own rolling anniversary ("1 month after most recent invoice").
+// Instead, on the 1st of every month (America/Denver) this creates one DRAFT
+// supplemental storage invoice per eligible job, billing that calendar month.
+// Office staff review/send the drafts in JobNimbus as before.
+//
+// Eligible = record type in SUPP_RECORD_TYPES (default Contents), AND
+// ("In Storage?" cf_boolean_1 is true OR status is "In storage"), AND status
+// not in SUPP_EXCLUDED_STATUSES, AND "Supplemental Price" cf_double_1 > 0.
+// Jobs matching the storage criteria but missing a price are reported, not
+// billed. NOTE (measured 2026-08): ~1,185 jobs carry a stale In-Storage flag
+// while only ~150/month were actually billed under the anniversary system —
+// review the dryrun report and clean up flags BEFORE setting SUPP_BILLING_LIVE.
+//
+// Dedupe (both directions, so reruns/restarts are safe and manual invoices are
+// respected): a job is skipped for a month if it already has EITHER an invoice
+// with our external_id (supp-<jobJnid>-<YYYY-MM>) OR any single-line invoice
+// whose one item is the offsite-storage product with date_invoice inside that
+// month. Runs are logged to supplemental_billing_runs in Supabase.
+//
+// Env: SUPP_BILLING_LIVE=true enables real invoice creation (otherwise the
+// monthly run is a dryrun that only logs+records what it WOULD create);
+// SUPP_BILLING_DAY (default 1), SUPP_RECORD_TYPES / SUPP_EXCLUDED_STATUSES
+// (comma-separated overrides).
+const SUPP_BILLING_LIVE = process.env.SUPP_BILLING_LIVE === 'true';
+const SUPP_BILLING_DAY = Math.max(1, Math.min(28, parseInt(process.env.SUPP_BILLING_DAY || '1', 10) || 1));
+const SUPP_RECORD_TYPES = (process.env.SUPP_RECORD_TYPES || 'Contents')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const SUPP_EXCLUDED_STATUSES = (process.env.SUPP_EXCLUDED_STATUSES || 'Paid & Closed,PB complete,Lost,Non-Opportunity')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+// The JN catalog product used by every existing storage invoice (verified
+// 2026-08-25: all supplemental invoices since July use this item + template).
+const SUPP_STORAGE_ITEM_JNID = 'mestzfhuma6y3nosvqj9ctt';
+const SUPP_STORAGE_ITEM_NAME = 'Contents - Offsite Content Storage';
+const SUPP_IN_STORAGE_STATUS = 'in storage';
+const SUPP_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+  'August', 'September', 'October', 'November', 'December'];
+
+function denverNow() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Denver', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', hour12: false,
+  }).formatToParts(new Date());
+  const get = (t) => parseInt(parts.find(p => p.type === t)?.value, 10);
+  return { y: get('year'), m: get('month'), d: get('day'), h: get('hour') };
+}
+
+// Paginated JN pull with an ES filter (fields-slimmed). Caps at the ES
+// from+size window (10k) — far above the in-storage population (~1.2k).
+async function jnFetchFiltered(path, filterObj, fields) {
+  const filter = encodeURIComponent(JSON.stringify(filterObj));
+  const out = [];
+  for (let from = 0; from + 500 <= 10000; from += 500) {
+    const r = await fetch(`${JN_BASE}${path}?size=500&from=${from}&filter=${filter}&fields=${fields}`, {
+      headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+    });
+    if (!r.ok) throw new Error(`JN ${path} ${r.status}`);
+    const data = await r.json();
+    const page = data?.results ?? [];
+    out.push(...page);
+    if (page.length < 500 || out.length >= (data?.count ?? 0)) break;
+  }
+  return out;
+}
+
+async function suppFetchEligible() {
+  const fields = 'jnid,name,number,status_name,record_type_name,cf_boolean_1,cf_double_1,cf_long_1,is_active,is_archived';
+  const [flagged, inStatus] = await Promise.all([
+    jnFetchFiltered('/jobs', { must: [{ term: { cf_boolean_1: true } }] }, fields),
+    jnFetchFiltered('/jobs', { must: [{ term: { status_name: 'In storage' } }] }, fields),
+  ]);
+  const byId = new Map();
+  for (const j of [...flagged, ...inStatus]) if (j && j.jnid) byId.set(j.jnid, j);
+  const eligible = [], noPrice = [];
+  for (const j of byId.values()) {
+    if (j.is_active === false || j.is_archived === true) continue;
+    if (!SUPP_RECORD_TYPES.includes(String(j.record_type_name || '').toLowerCase())) continue;
+    const status = String(j.status_name || '').toLowerCase();
+    const inStorage = j.cf_boolean_1 === true || status === SUPP_IN_STORAGE_STATUS;
+    if (!inStorage || SUPP_EXCLUDED_STATUSES.includes(status)) continue;
+    const price = Number(j.cf_double_1);
+    if (price > 0) eligible.push(j);
+    else noPrice.push({ jnid: j.jnid, name: j.name, status: j.status_name });
+  }
+  return { eligible, noPrice };
+}
+
+function suppItemHasStorage(items) {
+  return (items || []).some(it => it && (it.jnid === SUPP_STORAGE_ITEM_JNID || /offsite content storage/i.test(it.name || '')));
+}
+
+// Build the draft-invoice payload, mirroring the shape of the invoices offices
+// create today. quantity×price shows per-vault pricing when it divides cleanly.
+function suppInvoicePayload(job, fullJob, monthKey, monthLabel, monthStartSecs) {
+  const total = Math.round(Number(job.cf_double_1) * 100) / 100;
+  const vaults = Number(job.cf_long_1) || 0;
+  let quantity = 1, price = total;
+  if (vaults >= 1) {
+    const per = Math.round((total / vaults) * 100) / 100;
+    if (Math.round(per * vaults * 100) / 100 === total) { quantity = vaults; price = per; }
+  }
+  const related = [];
+  const contact = (Array.isArray(fullJob?.related) ? fullJob.related : []).find(r => r && r.type === 'contact' && r.id);
+  if (contact) related.push({ id: contact.id });
+  related.push({ id: job.jnid });
+  const payload = {
+    related,
+    status: 1, // Draft — office reviews and sends, as with the old flow
+    date_invoice: monthStartSecs,
+    date_due: monthStartSecs,
+    external_id: `supp-${job.jnid}-${monthKey}`,
+    internal_note: `${monthLabel} Storage${vaults ? ` x ${vaults} vault${vaults === 1 ? '' : 's'}` : ''} (auto-created by DryOps)`,
+    sections: [{ index: 0, name: 'CONTENTS', description: '', showGroupTotal: true, group: 0 }],
+    items: [{
+      jnid: SUPP_STORAGE_ITEM_JNID,
+      name: SUPP_STORAGE_ITEM_NAME,
+      uom: 'Items',
+      item_type: 'material',
+      description: `Storage of Insured Contents:\n\nRelocate and store contents in climate-controlled, secure facility.\n\nMonth of: ${monthLabel}`,
+      quantity,
+      price,
+      cost: 0,
+      amount: total,
+    }],
+  };
+  if (fullJob?.location?.id !== undefined) payload.location = { id: fullJob.location.id };
+  return payload;
+}
+
+async function sbInsert(table, row) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: 'POST',
+    headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify(row),
+  });
+  if (!r.ok) { const t = await r.text(); throw new Error(`${r.status} ${t.slice(0, 300)}`); }
+}
+
+let suppRunActive = false;
+let lastSuppRun = null;
+
+// One billing pass for the month containing "now" (Denver). Idempotent: safe
+// to rerun any number of times within a month.
+async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
+  if (suppRunActive) throw new Error('supplemental billing run already in progress');
+  suppRunActive = true;
+  const startedAt = new Date().toISOString();
+  const { y, m } = denverNow();
+  const monthKey = `${y}-${String(m).padStart(2, '0')}`;
+  const monthLabel = `${MONTH_NAMES[m - 1]} ${y}`;
+  // 17:00 UTC = 10/11am Denver — unambiguously "the 1st" in every US zone
+  const monthStartSecs = Math.floor(Date.UTC(y, m - 1, 1, 17, 0, 0) / 1000);
+  const monthEndSecs = Math.floor(Date.UTC(m === 12 ? y + 1 : y, m === 12 ? 0 : m, 1, 0, 0, 0) / 1000);
+  console.log(`[supp-billing] ${dryrun ? 'DRYRUN' : 'LIVE'} run for ${monthLabel} (${trigger})`);
+  const report = { month: monthKey, mode: dryrun ? 'dryrun' : 'live', trigger, created: [], skipped: [], errors: [], no_price: [] };
+  try {
+    const { eligible, noPrice } = await suppFetchEligible();
+    report.no_price = noPrice;
+    console.log(`[supp-billing] ${eligible.length} eligible, ${noPrice.length} in storage but missing a price`);
+    let idx = 0;
+    const daySecs = 24 * 60 * 60;
+    await Promise.all(Array.from({ length: 4 }, async () => {
+      while (idx < eligible.length) {
+        const job = eligible[idx++];
+        try {
+          const r = await fetch(`${JN_BASE}/v2/invoices?size=100&related=${encodeURIComponent(job.jnid)}`, {
+            headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+          });
+          if (!r.ok) throw new Error(`invoices lookup ${r.status}`);
+          const invoices = ((await r.json())?.results ?? []).filter(i => i && i.is_active !== false);
+          const extId = `supp-${job.jnid}-${monthKey}`;
+          const autoDup = invoices.find(i => i.external_id === extId);
+          const manualDup = invoices.find(i => (i.items || []).length === 1 && suppItemHasStorage(i.items)
+            && i.date_invoice >= monthStartSecs - daySecs && i.date_invoice < monthEndSecs);
+          // staleness signal for the report: newest invoice touching storage
+          let lastStorage = 0;
+          for (const i of invoices) if (suppItemHasStorage(i.items) && (i.date_invoice || 0) > lastStorage) lastStorage = i.date_invoice;
+          const base = {
+            jnid: job.jnid, name: job.name, number: job.number, status: job.status_name,
+            total: Number(job.cf_double_1), vaults: Number(job.cf_long_1) || 0,
+            last_storage_invoice: lastStorage ? new Date(lastStorage * 1000).toISOString().slice(0, 10) : null,
+          };
+          if (autoDup || manualDup) {
+            report.skipped.push({ ...base, reason: autoDup ? 'already billed this month (auto)' : 'already billed this month (manual)' });
+            continue;
+          }
+          if (dryrun) { report.created.push({ ...base, dryrun: true }); continue; }
+          const fullR = await fetch(`${JN_BASE}/jobs/${job.jnid}`, { headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' } });
+          const fullJob = fullR.ok ? await fullR.json() : null;
+          const payload = suppInvoicePayload(job, fullJob, monthKey, monthLabel, monthStartSecs);
+          const create = await fetch(`${JN_BASE}/v2/invoices`, {
+            method: 'POST',
+            headers: { Authorization: `bearer ${JN_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const body = await create.text();
+          if (!create.ok) throw new Error(`invoice create ${create.status} ${body.slice(0, 200)}`);
+          let created; try { created = JSON.parse(body); } catch { created = {}; }
+          report.created.push({ ...base, invoice_jnid: created.jnid || null, invoice_number: created.number || null });
+          console.log(`[supp-billing] created #${created.number || '?'} $${base.total} for ${job.name}`);
+        } catch (err) {
+          report.errors.push({ jnid: job.jnid, name: job.name, error: err.message });
+          console.error(`[supp-billing] ${job.name}: ${err.message}`);
+        }
+      }
+    }));
+    console.log(`[supp-billing] done — ${report.created.length} ${dryrun ? 'would be created' : 'created'}, ${report.skipped.length} skipped, ${report.errors.length} errors`);
+    lastSuppRun = { month: monthKey, mode: report.mode, trigger, at: startedAt,
+      created: report.created.length, skipped: report.skipped.length, errors: report.errors.length };
+    try {
+      await sbInsert('supplemental_billing_runs', {
+        month: monthKey, mode: report.mode, trigger, started_at: startedAt, finished_at: new Date().toISOString(),
+        eligible_count: eligible.length, created_count: report.created.length,
+        skipped_count: report.skipped.length, error_count: report.errors.length, report,
+      });
+    } catch (err) { console.error('[supp-billing] run log insert failed:', err.message); }
+    return report;
+  } finally {
+    suppRunActive = false;
+  }
+}
+
+// Scheduler: every 30 min, if it's the billing day (Denver) at/after 7am and
+// this month hasn't run in the current mode yet, run. State lives in Supabase
+// so Railway restarts can't double-bill or skip a month that hasn't run.
+async function suppCheckDue() {
+  try {
+    const { d, h, y, m } = denverNow();
+    if (d !== SUPP_BILLING_DAY || h < 7) return;
+    const monthKey = `${y}-${String(m).padStart(2, '0')}`;
+    const mode = SUPP_BILLING_LIVE ? 'live' : 'dryrun';
+    const prior = await sbGet(`supplemental_billing_runs?month=eq.${monthKey}&mode=eq.${mode}&select=id&limit=1`);
+    if (Array.isArray(prior) && prior.length) return;
+    await suppRunBilling({ dryrun: !SUPP_BILLING_LIVE, trigger: 'schedule' });
+  } catch (err) {
+    console.error('[supp-billing] scheduled check failed:', err.message);
+  }
+}
+setTimeout(suppCheckDue, 3 * 60 * 1000); // catch up shortly after boot
+setInterval(suppCheckDue, SUPP_CHECK_INTERVAL_MS);
+
+// Manual/preview runs. Body: { "dryrun": false } to create real invoices now
+// (dedupe makes that safe to combine with the schedule). Default is dryrun.
+app.post('/admin/supplemental-billing/run', requireAuth, requireAdmin, async (req, res) => {
+  const dryrun = req.body && req.body.dryrun === false ? false : true;
+  try {
+    const report = await suppRunBilling({ dryrun, trigger: 'manual' });
+    res.json(report);
+  } catch (err) {
+    res.status(err.message.includes('in progress') ? 409 : 500).json({ error: err.message });
+  }
+});
+
+app.get('/admin/supplemental-billing/status', requireAuth, requireAdmin, async (req, res) => {
+  const runs = await sbGet('supplemental_billing_runs?select=month,mode,trigger,started_at,finished_at,eligible_count,created_count,skipped_count,error_count&order=started_at.desc&limit=12');
+  res.json({
+    live: SUPP_BILLING_LIVE,
+    billing_day: SUPP_BILLING_DAY,
+    record_types: SUPP_RECORD_TYPES,
+    excluded_statuses: SUPP_EXCLUDED_STATUSES,
+    running: suppRunActive,
+    last_run: lastSuppRun,
+    recent_runs: runs || [],
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
 });
