@@ -57,3 +57,15 @@ npm start
 - `JN_TOKEN` — JobNimbus bearer token (required; server exits at startup if missing)
 - `SUPABASE_URL` — Supabase project URL
 - `SUPABASE_SERVICE_KEY` — Supabase service role key (required; server exits at startup if missing)
+
+### Power BI sync (optional — inert unless all are set)
+- `PBI_TENANT_ID` / `PBI_CLIENT_ID` / `PBI_CLIENT_SECRET` — Azure AD service principal (client-credentials)
+- `PBI_DATASET_IDS` — comma-separated dataset (semantic model) IDs to mirror into Supabase (`PBI_DATASET_ID` also accepted)
+- `PBI_POLL_INTERVAL_MS` — refresh-history poll cadence (default 15 min)
+- `PBI_CHUNK_ROWS` — rows per DAX page for large tables (default 25000)
+
+Polls each dataset's refresh history; on a new completed refresh, dumps every
+non-hidden model table (DAX `EVALUATE` via executeQueries) into `pbi_rows` and
+measure definitions into `pbi_measures` (schema: `supabase_pbi.sql`). Tenant
+must allow service principals to use Fabric APIs + the Execute Queries API, and
+the SP needs workspace Member or dataset Build access.
