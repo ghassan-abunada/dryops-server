@@ -3251,25 +3251,42 @@ function renderPhotoReportPdf(header, photos) {
     const COL_W = 258, X_L = M, X_R = PAGE_W - M - COL_W;
     const IMG_H = 300, ROW_H = IMG_H + 6; // no captions (owner request 2026-08-25)
 
+    const INK = '#1a1a1a', MUTED = '#6b7076', RULE = '#d8dadd';
+
     doc.addPage();
-    if (header.logoBuf) { try { doc.image(header.logoBuf, M, 42, { fit: [130, 60] }); } catch (e) { /* bad logo bytes — render without */ } }
-    doc.font('Helvetica').fontSize(9).fillColor('black');
-    let cy = 46;
-    for (const line of [
-      `Claim Number:${header.claim || ''}`,
-      `Date Contacted: ${header.dateContacted || ''}`,
-      `Sales Rep: ${header.salesRep || ''}`,
-    ]) { doc.text(line, 218, cy, { width: 200 }); cy += 17; }
-    let ry = 44;
-    doc.font('Helvetica-Bold').text(header.name || '', 428, ry, { width: 148 });
-    ry += 15;
-    doc.font('Helvetica');
-    if (header.addr1) { doc.text(header.addr1, 428, ry, { width: 148 }); ry += 14; }
-    if (header.addr2) doc.text(header.addr2, 428, ry, { width: 148 });
+    // Top band: logo left, customer identity right-aligned.
+    if (header.logoBuf) { try { doc.image(header.logoBuf, M, 40, { fit: [150, 58] }); } catch (e) { /* bad logo bytes — render without */ } }
+    doc.font('Helvetica-Bold').fontSize(12).fillColor(INK)
+      .text(header.name || '', 306, 44, { width: 270, align: 'right' });
+    doc.font('Helvetica').fontSize(9).fillColor(MUTED);
+    let ry = 60;
+    if (header.addr1) { doc.text(header.addr1, 306, ry, { width: 270, align: 'right' }); ry += 13; }
+    if (header.addr2) doc.text(header.addr2, 306, ry, { width: 270, align: 'right' });
 
-    doc.font('Helvetica-Bold').fontSize(13).text(header.title, M, 132, { width: W, align: 'center' });
+    // Info band: label/value columns between two hairline rules.
+    doc.moveTo(M, 114).lineTo(PAGE_W - M, 114).lineWidth(0.7).strokeColor(RULE).stroke();
+    const fields = [
+      ['CLAIM NUMBER', header.claim],
+      ['INSURANCE', header.insurer],
+      ['DATE CONTACTED', header.dateContacted],
+      ['SALES REP', header.salesRep],
+    ].filter(([, v]) => v);
+    if (fields.length) {
+      const colW = W / fields.length;
+      fields.forEach(([label, value], i) => {
+        const x = M + i * colW;
+        doc.font('Helvetica-Bold').fontSize(6.5).fillColor(MUTED)
+          .text(label, x, 124, { width: colW - 10, characterSpacing: 0.8 });
+        doc.font('Helvetica').fontSize(9.5).fillColor(INK)
+          .text(String(value), x, 135, { width: colW - 10 });
+      });
+    }
+    doc.moveTo(M, 156).lineTo(PAGE_W - M, 156).lineWidth(0.7).strokeColor(RULE).stroke();
 
-    let y = 168;
+    doc.font('Helvetica-Bold').fontSize(14).fillColor(INK)
+      .text(header.title, M, 174, { width: W, align: 'center', characterSpacing: 0.3 });
+
+    let y = 206;
     for (let i = 0; i < photos.length; i += 2) {
       if (y + ROW_H > PAGE_H - M) { doc.addPage(); y = 40; }
       photos.slice(i, i + 2).forEach((p, k) => {
@@ -3341,6 +3358,7 @@ async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
   const header = {
     logoBuf,
     claim: (job && job.cf_string_2) || '',
+    insurer: ((job && job.cf_string_9) || '').trim(), // insurance provider (JN_FIELD_MAP: insurer → cf_string_9)
     dateContacted: fmtCentral((contact && contact.date_created) || (job && job.date_created)),
     salesRep: (job && job.sales_rep_name) || '',
     name,
