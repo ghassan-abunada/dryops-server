@@ -3453,6 +3453,12 @@ const SUPP_EXCLUDED_STATUSES = (process.env.SUPP_EXCLUDED_STATUSES || 'Paid & Cl
 const SUPP_STORAGE_ITEM_JNID = 'mestzfhuma6y3nosvqj9ctt';
 const SUPP_STORAGE_ITEM_NAME = 'Contents - Offsite Content Storage';
 const SUPP_IN_STORAGE_STATUS = 'in storage';
+// Owner 2026-08-26: a bulk status edit on 2026-01-03 left 16 jobs parked in
+// "In storage" — jobs whose status last changed on an ignored Denver date are
+// excluded from billing entirely. Comma-separated YYYY-MM-DD env override.
+const SUPP_IGNORE_STATUS_DATES = new Set((process.env.SUPP_IGNORE_STATUS_DATES || '2026-01-03')
+  .split(',').map(s => s.trim()).filter(Boolean));
+const denverDateOf = (secs) => new Date(secs * 1000).toLocaleDateString('en-CA', { timeZone: 'America/Denver' });
 const SUPP_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
   'August', 'September', 'October', 'November', 'December'];
@@ -3484,7 +3490,7 @@ async function jnFetchFiltered(path, filterObj, fields) {
 }
 
 async function suppFetchEligible() {
-  const fields = 'jnid,name,number,status_name,record_type_name,cf_boolean_1,cf_double_1,cf_long_1,is_active,is_archived';
+  const fields = 'jnid,name,number,status_name,record_type_name,cf_boolean_1,cf_double_1,cf_long_1,is_active,is_archived,date_status_change';
   const [flagged, inStatus] = await Promise.all([
     jnFetchFiltered('/jobs', { must: [{ term: { cf_boolean_1: true } }] }, fields),
     jnFetchFiltered('/jobs', { must: [{ term: { status_name: 'In storage' } }] }, fields),
@@ -3498,6 +3504,7 @@ async function suppFetchEligible() {
     const status = String(j.status_name || '').toLowerCase();
     const inStorage = j.cf_boolean_1 === true || status === SUPP_IN_STORAGE_STATUS;
     if (!inStorage || SUPP_EXCLUDED_STATUSES.includes(status)) continue;
+    if (j.date_status_change && SUPP_IGNORE_STATUS_DATES.has(denverDateOf(j.date_status_change))) continue;
     const price = Number(j.cf_double_1);
     // No price set → still billed, as a $0 PLACEHOLDER draft (owner decision
     // 2026-08-26): the empty draft lands in the office's invoice queue where
