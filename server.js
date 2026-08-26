@@ -3691,7 +3691,7 @@ async function suppNotifyReps(created, monthLabel, eligiblePool) {
     const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
   <h2 style="margin:0 0 8px">Supplemental storage drafts — ${escapeHtml(monthLabel)}</h2>
   <p style="line-height:1.5;color:#64748b;margin:0 0 12px">${escapeHtml(locName)}</p>
-  <p style="line-height:1.5">Draft supplemental storage invoices were created for ${jobs.length} job${jobs.length === 1 ? '' : 's'} at this location. Review each draft and send it to insurance. If a job is no longer in storage, delete the draft and turn its In&nbsp;Storage? flag off.</p>
+  <p style="line-height:1.5">Draft supplemental storage invoices were created for ${jobs.length} job${jobs.length === 1 ? '' : 's'} at this location. Review each draft and send it to insurance. If a job is no longer in storage, turn its In&nbsp;Storage? flag off and tag <strong>@contentscollections</strong> in a note on the job to have the draft deleted (most users can't delete drafts).</p>
   <table style="border-collapse:collapse;width:100%">${rows}</table>
   <p style="line-height:1.5;color:#64748b;font-size:13px;margin-top:16px">Sent automatically by DryOps supplemental billing.</p>
 </div>`;
