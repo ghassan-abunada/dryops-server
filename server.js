@@ -3593,15 +3593,16 @@ const SUPP_NOTIFY_REPS = process.env.SUPP_NOTIFY_REPS !== 'false';
 const SUPP_JOB_INVOICES_URL = (jnid) => `https://app.jobnimbus.com/job/${jnid}/payments-and-invoices`;
 
 async function jnFetchAccountUsers() {
+  // /account/users ignores size/from and always returns the full user list
+  // (verified 2026-08-26: every query shape returns all ~1,700 users) — one
+  // call, no pagination loop.
   const users = new Map();
-  for (let from = 0; ; from += 500) {
-    const r = await fetch(`${JN_BASE}/account/users?size=500&from=${from}`, {
-      headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
-    });
-    if (!r.ok) throw new Error(`JN /account/users ${r.status}`);
-    const page = (await r.json())?.users ?? [];
-    for (const u of page) users.set(u.id, { email: (u.email || '').trim(), name: `${u.first_name || ''} ${u.last_name || ''}`.trim() });
-    if (page.length < 500) break;
+  const r = await fetch(`${JN_BASE}/account/users`, {
+    headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+  });
+  if (!r.ok) throw new Error(`JN /account/users ${r.status}`);
+  for (const u of (await r.json())?.users ?? []) {
+    users.set(u.id, { email: (u.email || '').trim(), name: `${u.first_name || ''} ${u.last_name || ''}`.trim(), active: u.is_active !== false });
   }
   return users;
 }
@@ -3626,10 +3627,14 @@ async function suppNotifyReps(created, monthLabel, eligiblePool) {
     const t = repTally.get(locId);
     t.set(j.sales_rep, (t.get(j.sales_rep) || 0) + 1);
   }
+  // Most common rep for the location, preferring ACTIVE users with an email —
+  // 5 locations' overall-dominant rep was a deactivated JN user (2026-08-26),
+  // whose inbox nobody reads. Deactivated/email-less reps are a last resort.
   const dominantRep = (locId) => {
     const t = repTally.get(locId);
     if (!t || !t.size) return null;
-    return [...t.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    const ranked = [...t.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+    return ranked.find(id => { const u = users.get(id); return u && u.active && u.email; }) || ranked[0];
   };
 
   // location names from the DryOps locations table (best-effort)
