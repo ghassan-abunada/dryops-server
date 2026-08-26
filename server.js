@@ -832,6 +832,48 @@ if (SUPABASE_SERVICE_KEY) {
   setInterval(reconcileCalls, CALLS_RECONCILE_INTERVAL_MS);
 }
 
+// ── In-Storage flag webhook ──────────────────────────────────────────────────
+// POST /webhooks/jobnimbus/storage-flag?token=...&set=on|off — replaces the
+// Zapier zaps that flipped "In Storage?" (cf_boolean_1). The JobNimbus
+// automations keep their own trigger conditions (status → In storage sets it
+// on; PB complete / Paid & Closed clears it) and just point their webhook here
+// instead of hooks.zapier.com. Idempotent: already-in-state jobs are skipped,
+// so JN retries and duplicate deliveries are harmless.
+app.post('/webhooks/jobnimbus/storage-flag', async (req, res) => {
+  if (!webhookTokenOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  const set = String(req.query.set || '').toLowerCase();
+  if (set !== 'on' && set !== 'off') return res.status(400).json({ error: 'set must be "on" or "off"' });
+  const job = unwrapRecord(req.body);
+  const jnid = job && (job.jnid || job.id);
+  if (!jnid) {
+    console.warn('[storage-flag] no jnid; keys=', Object.keys(job || {}).slice(0, 30).join(','));
+    return res.status(400).json({ error: 'no job jnid in payload' });
+  }
+  const desired = set === 'on';
+  try {
+    // read current state so no-op deliveries don't burn a write (and log the
+    // status we acted on for the audit trail)
+    const cur = await fetch(`${JN_BASE}/jobs/${jnid}`, { headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' } });
+    if (!cur.ok) throw new Error(`job fetch ${cur.status}`);
+    const j = await cur.json();
+    if (j.cf_boolean_1 === desired) {
+      console.log(`[storage-flag] ${jnid} already ${set} (status=${j.status_name})`);
+      return res.json({ ok: true, jnid, set, changed: false });
+    }
+    const upd = await fetch(`${JN_BASE}/jobs/${jnid}`, {
+      method: 'PUT',
+      headers: { Authorization: `bearer ${JN_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ cf_boolean_1: desired }),
+    });
+    if (!upd.ok) throw new Error(`job update ${upd.status} ${(await upd.text()).slice(0, 200)}`);
+    console.log(`[storage-flag] ${jnid} → ${set} (status=${j.status_name}, ${j.name || ''})`);
+    res.json({ ok: true, jnid, set, changed: true });
+  } catch (err) {
+    console.error('[storage-flag]', jnid, err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // ── JobNimbus invoice webhook ─────────────────────────────────────────────────
 // POST /webhooks/jobnimbus/invoices — same secret gate as the jobs webhook.
 app.post('/webhooks/jobnimbus/invoices', async (req, res) => {
