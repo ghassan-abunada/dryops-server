@@ -104,3 +104,6 @@ server.js for eligibility rules and dedupe logic.
   (month, stage) tracked as mode `reminder-Nd` in supplemental_billing_runs.
   `POST /admin/supplemental-billing/send-reminders` fires the upcoming month's
   stage immediately.
+- In-Storage flag webhook: `POST /webhooks/jobnimbus/storage-flag?token=<JN_WEBHOOK_TOKEN>&set=on|off`
+  — the JN On/Off automations point here (instead of Zapier) and the server
+  flips cf_boolean_1; idempotent, skips already-in-state jobs.
