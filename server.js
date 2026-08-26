@@ -3576,6 +3576,15 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
     const { eligible, noPrice } = await suppFetchEligible();
     report.no_price = noPrice;
     console.log(`[supp-billing] ${eligible.length} eligible, ${noPrice.length} in storage but missing a price`);
+    // JN's search index lags writes by ~a minute (verified 2026-08-26), so a
+    // freshly created invoice may not show in the per-job lookup of an
+    // immediately following run. Also skip anything a prior LIVE run this
+    // month already logged as created — closes that double-billing window.
+    const priorBilled = new Set();
+    try {
+      const priorRuns = await sbGet(`supplemental_billing_runs?month=eq.${monthKey}&mode=eq.live&select=report`) || [];
+      for (const run of priorRuns) for (const c of run.report?.created || []) if (c.jnid && !c.dryrun) priorBilled.add(c.jnid);
+    } catch (err) { console.error('[supp-billing] prior-run lookup failed:', err.message); }
     let idx = 0;
     const daySecs = 24 * 60 * 60;
     await Promise.all(Array.from({ length: 4 }, async () => {
@@ -3599,8 +3608,9 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
             total: Number(job.cf_double_1), vaults: Number(job.cf_long_1) || 0,
             last_storage_invoice: lastStorage ? new Date(lastStorage * 1000).toISOString().slice(0, 10) : null,
           };
-          if (autoDup || manualDup) {
-            report.skipped.push({ ...base, reason: autoDup ? 'already billed this month (auto)' : 'already billed this month (manual)' });
+          if (autoDup || manualDup || priorBilled.has(job.jnid)) {
+            report.skipped.push({ ...base, reason: autoDup ? 'already billed this month (auto)'
+              : manualDup ? 'already billed this month (manual)' : 'already billed this month (prior run log)' });
             continue;
           }
           if (dryrun) { report.created.push({ ...base, dryrun: true }); continue; }
