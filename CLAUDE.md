@@ -70,6 +70,9 @@ server.js for eligibility rules and dedupe logic.
   Price" (invoice total), `cf_long_1` = "# of Vaults"
 - Storage catalog item: `mestzfhuma6y3nosvqj9ctt` ("Contents - Offsite Content
   Storage") — every existing supplemental invoice uses it
+- In-storage jobs with no Supplemental Price still get a draft — a $0
+  PLACEHOLDER marked in the internal note and line description for the office
+  to price before sending
 - Dedupe: skips a job/month if an invoice with external_id
   `supp-<jobJnid>-<YYYY-MM>` exists OR a single-line storage invoice is already
   dated in that month (manual invoices are respected)

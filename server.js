@@ -3424,9 +3424,9 @@ app.post('/webhooks/jobnimbus/photo-report', async (req, res) => {
 //
 // Eligible = record type in SUPP_RECORD_TYPES (default Contents), AND
 // ("In Storage?" cf_boolean_1 is true OR status is "In storage"), AND status
-// not in SUPP_EXCLUDED_STATUSES, AND "Supplemental Price" cf_double_1 > 0.
-// Jobs matching the storage criteria but missing a price are reported, not
-// billed. NOTE (measured 2026-08): ~1,185 jobs carry a stale In-Storage flag
+// not in SUPP_EXCLUDED_STATUSES. Jobs missing "Supplemental Price"
+// (cf_double_1) still get a draft — a $0 PLACEHOLDER marked for the office to
+// price before sending. NOTE (measured 2026-08): ~1,185 jobs carried a stale In-Storage flag
 // while only ~150/month were actually billed under the anniversary system —
 // review the dryrun report and clean up flags BEFORE setting SUPP_BILLING_LIVE.
 //
@@ -3499,8 +3499,12 @@ async function suppFetchEligible() {
     const inStorage = j.cf_boolean_1 === true || status === SUPP_IN_STORAGE_STATUS;
     if (!inStorage || SUPP_EXCLUDED_STATUSES.includes(status)) continue;
     const price = Number(j.cf_double_1);
+    // No price set → still billed, as a $0 PLACEHOLDER draft (owner decision
+    // 2026-08-26): the empty draft lands in the office's invoice queue where
+    // they set the real amount before sending, instead of the job silently
+    // storing for free.
     if (price > 0) eligible.push(j);
-    else noPrice.push({ jnid: j.jnid, name: j.name, status: j.status_name });
+    else noPrice.push({ ...j, placeholder: true });
   }
   return { eligible, noPrice };
 }
@@ -3526,10 +3530,11 @@ function suppLooksLikeSupplemental(inv, suppPrice) {
 // Build the draft-invoice payload, mirroring the shape of the invoices offices
 // create today. quantity×price shows per-vault pricing when it divides cleanly.
 function suppInvoicePayload(job, fullJob, monthKey, monthLabel, monthStartSecs) {
-  const total = Math.round(Number(job.cf_double_1) * 100) / 100;
+  const placeholder = !(Number(job.cf_double_1) > 0);
+  const total = placeholder ? 0 : Math.round(Number(job.cf_double_1) * 100) / 100;
   const vaults = Number(job.cf_long_1) || 0;
   let quantity = 1, price = total;
-  if (vaults >= 1) {
+  if (!placeholder && vaults >= 1) {
     const per = Math.round((total / vaults) * 100) / 100;
     if (Math.round(per * vaults * 100) / 100 === total) { quantity = vaults; price = per; }
   }
@@ -3543,14 +3548,17 @@ function suppInvoicePayload(job, fullJob, monthKey, monthLabel, monthStartSecs) 
     date_invoice: monthStartSecs,
     date_due: monthStartSecs,
     external_id: `supp-${job.jnid}-${monthKey}`,
-    internal_note: `${monthLabel} Storage${vaults ? ` x ${vaults} vault${vaults === 1 ? '' : 's'}` : ''} (auto-created by DryOps)`,
+    internal_note: placeholder
+      ? `${monthLabel} Storage — $0 PLACEHOLDER: set Supplemental Price on the job, then update this invoice (auto-created by DryOps)`
+      : `${monthLabel} Storage${vaults ? ` x ${vaults} vault${vaults === 1 ? '' : 's'}` : ''} (auto-created by DryOps)`,
     sections: [{ index: 0, name: 'CONTENTS', description: '', showGroupTotal: true, group: 0 }],
     items: [{
       jnid: SUPP_STORAGE_ITEM_JNID,
       name: SUPP_STORAGE_ITEM_NAME,
       uom: 'Items',
       item_type: 'material',
-      description: `Storage of Insured Contents:\n\nRelocate and store contents in climate-controlled, secure facility.\n\nMonth of: ${monthLabel}`,
+      description: `Storage of Insured Contents:\n\nRelocate and store contents in climate-controlled, secure facility.\n\nMonth of: ${monthLabel}`
+        + (placeholder ? '\n\n** PLACEHOLDER — Supplemental Price is not set on this job. Enter the storage amount before sending. **' : ''),
       quantity,
       price,
       cost: 0,
@@ -3590,8 +3598,9 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
   const report = { month: monthKey, mode: dryrun ? 'dryrun' : 'live', trigger, created: [], skipped: [], errors: [], no_price: [] };
   try {
     const { eligible, noPrice } = await suppFetchEligible();
-    report.no_price = noPrice;
-    console.log(`[supp-billing] ${eligible.length} eligible, ${noPrice.length} in storage but missing a price`);
+    report.no_price = noPrice.map(j => ({ jnid: j.jnid, name: j.name, status: j.status_name }));
+    const toBill = eligible.concat(noPrice); // unpriced jobs get $0 placeholder drafts
+    console.log(`[supp-billing] ${eligible.length} priced + ${noPrice.length} placeholder ($0) jobs to bill`);
     // JN's search index lags writes by ~a minute (verified 2026-08-26), so a
     // freshly created invoice may not show in the per-job lookup of an
     // immediately following run. Also skip anything a prior LIVE run this
@@ -3604,8 +3613,8 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
     let idx = 0;
     const daySecs = 24 * 60 * 60;
     await Promise.all(Array.from({ length: 4 }, async () => {
-      while (idx < eligible.length) {
-        const job = eligible[idx++];
+      while (idx < toBill.length) {
+        const job = toBill[idx++];
         try {
           const r = await fetch(`${JN_BASE}/v2/invoices?size=100&related=${encodeURIComponent(job.jnid)}`, {
             headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
@@ -3625,8 +3634,9 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
           }
           const base = {
             jnid: job.jnid, name: job.name, number: job.number, status: job.status_name,
-            total: Number(job.cf_double_1), vaults: Number(job.cf_long_1) || 0,
+            total: Number(job.cf_double_1) || 0, vaults: Number(job.cf_long_1) || 0,
             last_storage_invoice: lastStorage ? new Date(lastStorage * 1000).toISOString().slice(0, 10) : null,
+            ...(job.placeholder ? { placeholder: true } : {}),
           };
           if (autoDup || manualDup || priorBilled.has(job.jnid)) {
             report.skipped.push({ ...base, reason: autoDup ? 'already billed this month (auto)'
@@ -3659,7 +3669,7 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
     try {
       await sbInsert('supplemental_billing_runs', {
         month: monthKey, mode: report.mode, trigger, started_at: startedAt, finished_at: new Date().toISOString(),
-        eligible_count: eligible.length, created_count: report.created.length,
+        eligible_count: toBill.length, created_count: report.created.length,
         skipped_count: report.skipped.length, error_count: report.errors.length, report,
       });
     } catch (err) { console.error('[supp-billing] run log insert failed:', err.message); }
