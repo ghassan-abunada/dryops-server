@@ -3458,9 +3458,6 @@ const SUPP_IN_STORAGE_STATUS = 'in storage';
 // excluded from billing entirely. Comma-separated YYYY-MM-DD env override.
 const SUPP_IGNORE_STATUS_DATES = new Set((process.env.SUPP_IGNORE_STATUS_DATES || '2026-01-03')
   .split(',').map(s => s.trim()).filter(Boolean));
-// A job with zero invoices older than this many days is skipped (never had its
-// packout invoice — needs office review, not auto-billing).
-const SUPP_NO_INVOICE_MAX_AGE_DAYS = Math.max(1, parseInt(process.env.SUPP_NO_INVOICE_MAX_AGE_DAYS || '30', 10) || 30);
 const denverDateOf = (secs) => new Date(secs * 1000).toLocaleDateString('en-CA', { timeZone: 'America/Denver' });
 const SUPP_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
@@ -3493,7 +3490,7 @@ async function jnFetchFiltered(path, filterObj, fields) {
 }
 
 async function suppFetchEligible() {
-  const fields = 'jnid,name,number,status_name,record_type_name,cf_boolean_1,cf_double_1,cf_long_1,is_active,is_archived,date_status_change,date_created';
+  const fields = 'jnid,name,number,status_name,record_type_name,cf_boolean_1,cf_double_1,cf_long_1,is_active,is_archived,date_status_change';
   const [flagged, inStatus] = await Promise.all([
     jnFetchFiltered('/jobs', { must: [{ term: { cf_boolean_1: true } }] }, fields),
     jnFetchFiltered('/jobs', { must: [{ term: { status_name: 'In storage' } }] }, fields),
@@ -3631,19 +3628,6 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
           });
           if (!r.ok) throw new Error(`invoices lookup ${r.status}`);
           const invoices = ((await r.json())?.results ?? []).filter(i => i && i.is_active !== false);
-          // Owner 2026-08-26: a job with NO invoices at all that is 30+ days
-          // old never got its packout invoice — something is off (stale flag or
-          // stalled job). Don't auto-bill it; surface it in the report instead.
-          // Fresh no-invoice jobs (just packed out) stay billable.
-          if (!invoices.length && job.date_created
-              && (Date.now() / 1000 - job.date_created) > SUPP_NO_INVOICE_MAX_AGE_DAYS * 86400) {
-            report.skipped.push({
-              jnid: job.jnid, name: job.name, number: job.number, status: job.status_name,
-              total: Number(job.cf_double_1) || 0,
-              reason: `no invoices ever and job is ${SUPP_NO_INVOICE_MAX_AGE_DAYS}+ days old — needs office review`,
-            });
-            continue;
-          }
           const extId = `supp-${job.jnid}-${monthKey}`;
           const autoDup = invoices.find(i => i.external_id === extId);
           const suppPrice = Number(job.cf_double_1) || 0;
