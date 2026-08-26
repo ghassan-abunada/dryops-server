@@ -3490,7 +3490,7 @@ async function jnFetchFiltered(path, filterObj, fields) {
 }
 
 async function suppFetchEligible() {
-  const fields = 'jnid,name,number,status_name,record_type_name,cf_boolean_1,cf_double_1,cf_long_1,is_active,is_archived,date_status_change,sales_rep,sales_rep_name';
+  const fields = 'jnid,name,number,status_name,record_type_name,cf_boolean_1,cf_double_1,cf_long_1,is_active,is_archived,date_status_change,sales_rep,sales_rep_name,location';
   const [flagged, inStatus] = await Promise.all([
     jnFetchFiltered('/jobs', { must: [{ term: { cf_boolean_1: true } }] }, fields),
     jnFetchFiltered('/jobs', { must: [{ term: { status_name: 'In storage' } }] }, fields),
@@ -3606,24 +3606,60 @@ async function jnFetchAccountUsers() {
   return users;
 }
 
-// Group created drafts by sales rep and send one review email per rep.
+// One review email per LOCATION (owner 2026-08-26): all of a location's
+// drafted jobs go to the location's dominant sales rep — the rep most often
+// assigned across the location's in-storage jobs (tallied over the whole
+// eligible pool for a stable majority, not just this run's drafts).
 // Returns a summary array that goes into the run report.
-async function suppNotifyReps(created, monthLabel) {
+async function suppNotifyReps(created, monthLabel, eligiblePool) {
   const results = [];
   let users;
   try { users = await jnFetchAccountUsers(); }
   catch (err) { console.error('[supp-billing] user lookup for notifications failed:', err.message); return [{ ok: false, error: err.message }]; }
-  const byRep = new Map();
-  for (const c of created) {
-    const key = c.sales_rep || 'none';
-    if (!byRep.has(key)) byRep.set(key, []);
-    byRep.get(key).push(c);
+
+  // location id → dominant sales_rep id (mode over eligible in-storage jobs)
+  const repTally = new Map(); // locId → Map(repId → count)
+  for (const j of eligiblePool || []) {
+    const locId = (j.location && j.location.id != null) ? j.location.id : null;
+    if (locId == null || !j.sales_rep) continue;
+    if (!repTally.has(locId)) repTally.set(locId, new Map());
+    const t = repTally.get(locId);
+    t.set(j.sales_rep, (t.get(j.sales_rep) || 0) + 1);
   }
-  for (const [repId, jobs] of byRep) {
-    const rep = repId !== 'none' ? users.get(repId) : null;
+  const dominantRep = (locId) => {
+    const t = repTally.get(locId);
+    if (!t || !t.size) return null;
+    return [...t.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  };
+
+  // location names from the DryOps locations table (best-effort)
+  const locNames = new Map();
+  try {
+    const locIds = [...new Set(created.map(c => c.location_id).filter(id => id != null))];
+    if (locIds.length) {
+      const rows = await sbGet(`locations?jn_location_id=in.(${locIds.join(',')})&select=jn_location_id,name`) || [];
+      for (const r of rows) if (!locNames.has(r.jn_location_id)) locNames.set(r.jn_location_id, r.name);
+    }
+  } catch (err) { console.warn('[supp-billing] location name lookup failed:', err.message); }
+
+  const byLoc = new Map();
+  for (const c of created) {
+    const key = c.location_id != null ? c.location_id : 'none';
+    if (!byLoc.has(key)) byLoc.set(key, []);
+    byLoc.get(key).push(c);
+  }
+  for (const [locId, jobs] of byLoc) {
+    const locName = locId !== 'none' ? (locNames.get(locId) || `location ${locId}`) : 'unassigned location';
+    // dominant rep for the location; fall back to the most common rep among
+    // this run's drafts, then to any job's rep
+    const repId = (locId !== 'none' && dominantRep(locId))
+      || (jobs.map(j => j.sales_rep).filter(Boolean).sort((a, b) =>
+           jobs.filter(x => x.sales_rep === b).length - jobs.filter(x => x.sales_rep === a).length)[0])
+      || null;
+    const rep = repId ? users.get(repId) : null;
     if (!rep || !rep.email) {
-      results.push({ rep: jobs[0].sales_rep_name || '(no sales rep)', email: null, jobs: jobs.length, ok: false, error: 'no email on file' });
-      console.warn(`[supp-billing] no rep email for ${jobs.length} job(s) — rep: ${jobs[0].sales_rep_name || '(none)'}`);
+      results.push({ location: locName, rep: rep ? rep.name : '(no sales rep)', email: null, jobs: jobs.length, ok: false, error: 'no email on file' });
+      console.warn(`[supp-billing] no rep email for ${locName} — ${jobs.length} job(s) unnotified`);
       continue;
     }
     const rows = jobs.map(j => `<tr>
@@ -3632,13 +3668,15 @@ async function suppNotifyReps(created, monthLabel) {
     </tr>`).join('');
     const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
   <h2 style="margin:0 0 8px">Supplemental storage drafts — ${escapeHtml(monthLabel)}</h2>
-  <p style="line-height:1.5">Draft supplemental storage invoices were created for ${jobs.length} of your job${jobs.length === 1 ? '' : 's'}. Review each draft and send it to insurance. If a job is no longer in storage, delete the draft and turn its In&nbsp;Storage? flag off.</p>
+  <p style="line-height:1.5;color:#64748b;margin:0 0 12px">${escapeHtml(locName)}</p>
+  <p style="line-height:1.5">Draft supplemental storage invoices were created for ${jobs.length} job${jobs.length === 1 ? '' : 's'} at this location. Review each draft and send it to insurance. If a job is no longer in storage, delete the draft and turn its In&nbsp;Storage? flag off.</p>
   <table style="border-collapse:collapse;width:100%">${rows}</table>
   <p style="line-height:1.5;color:#64748b;font-size:13px;margin-top:16px">Sent automatically by DryOps supplemental billing.</p>
 </div>`;
-    const sent = await sendEmail(rep.email, `Supplemental storage drafts to review — ${monthLabel} (${jobs.length} job${jobs.length === 1 ? '' : 's'})`, html);
-    results.push({ rep: rep.name, email: rep.email, jobs: jobs.length, ok: sent.ok, ...(sent.ok ? {} : { error: sent.error }) });
-    console.log(`[supp-billing] notify ${rep.name} <${rep.email}> — ${jobs.length} job(s): ${sent.ok ? 'sent' : sent.error}`);
+    // subject is plain text — no HTML escaping
+    const sent = await sendEmail(rep.email, `Supplemental storage drafts to review — ${locName} — ${monthLabel} (${jobs.length} job${jobs.length === 1 ? '' : 's'})`, html);
+    results.push({ location: locName, rep: rep.name, email: rep.email, jobs: jobs.length, ok: sent.ok, ...(sent.ok ? {} : { error: sent.error }) });
+    console.log(`[supp-billing] notify ${locName} → ${rep.name} <${rep.email}> — ${jobs.length} job(s): ${sent.ok ? 'sent' : sent.error}`);
   }
   return results;
 }
@@ -3701,6 +3739,7 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
             total: Number(job.cf_double_1) || 0, vaults: Number(job.cf_long_1) || 0,
             last_storage_invoice: lastStorage ? new Date(lastStorage * 1000).toISOString().slice(0, 10) : null,
             sales_rep: job.sales_rep || null, sales_rep_name: job.sales_rep_name || null,
+            location_id: (job.location && job.location.id != null) ? job.location.id : null,
             ...(job.placeholder ? { placeholder: true } : {}),
           };
           if (autoDup || manualDup || priorBilled.has(job.jnid)) {
@@ -3730,7 +3769,7 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
     }));
     console.log(`[supp-billing] done — ${report.created.length} ${dryrun ? 'would be created' : 'created'}, ${report.skipped.length} skipped, ${report.errors.length} errors`);
     if (!dryrun && report.created.length && SUPP_NOTIFY_REPS) {
-      report.notifications = await suppNotifyReps(report.created, monthLabel);
+      report.notifications = await suppNotifyReps(report.created, monthLabel, toBill);
     }
     lastSuppRun = { month: monthKey, mode: report.mode, trigger, at: startedAt,
       created: report.created.length, skipped: report.skipped.length, errors: report.errors.length };
