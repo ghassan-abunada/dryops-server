@@ -3490,7 +3490,7 @@ async function jnFetchFiltered(path, filterObj, fields) {
 }
 
 async function suppFetchEligible() {
-  const fields = 'jnid,name,number,status_name,record_type_name,cf_boolean_1,cf_double_1,cf_long_1,is_active,is_archived,date_status_change';
+  const fields = 'jnid,name,number,status_name,record_type_name,cf_boolean_1,cf_double_1,cf_long_1,is_active,is_archived,date_status_change,sales_rep,sales_rep_name';
   const [flagged, inStatus] = await Promise.all([
     jnFetchFiltered('/jobs', { must: [{ term: { cf_boolean_1: true } }] }, fields),
     jnFetchFiltered('/jobs', { must: [{ term: { status_name: 'In storage' } }] }, fields),
@@ -3586,6 +3586,63 @@ async function sbInsert(table, row) {
   if (!r.ok) { const t = await r.text(); throw new Error(`${r.status} ${t.slice(0, 300)}`); }
 }
 
+// After a live run, email each sales rep the list of their jobs that just got
+// supplemental drafts (via the existing DryOps outbound email — sendEmail /
+// EMAIL_FROM). Set SUPP_NOTIFY_REPS=false to disable.
+const SUPP_NOTIFY_REPS = process.env.SUPP_NOTIFY_REPS !== 'false';
+const SUPP_JOB_INVOICES_URL = (jnid) => `https://app.jobnimbus.com/job/${jnid}/payments-and-invoices`;
+
+async function jnFetchAccountUsers() {
+  const users = new Map();
+  for (let from = 0; ; from += 500) {
+    const r = await fetch(`${JN_BASE}/account/users?size=500&from=${from}`, {
+      headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+    });
+    if (!r.ok) throw new Error(`JN /account/users ${r.status}`);
+    const page = (await r.json())?.users ?? [];
+    for (const u of page) users.set(u.id, { email: (u.email || '').trim(), name: `${u.first_name || ''} ${u.last_name || ''}`.trim() });
+    if (page.length < 500) break;
+  }
+  return users;
+}
+
+// Group created drafts by sales rep and send one review email per rep.
+// Returns a summary array that goes into the run report.
+async function suppNotifyReps(created, monthLabel) {
+  const results = [];
+  let users;
+  try { users = await jnFetchAccountUsers(); }
+  catch (err) { console.error('[supp-billing] user lookup for notifications failed:', err.message); return [{ ok: false, error: err.message }]; }
+  const byRep = new Map();
+  for (const c of created) {
+    const key = c.sales_rep || 'none';
+    if (!byRep.has(key)) byRep.set(key, []);
+    byRep.get(key).push(c);
+  }
+  for (const [repId, jobs] of byRep) {
+    const rep = repId !== 'none' ? users.get(repId) : null;
+    if (!rep || !rep.email) {
+      results.push({ rep: jobs[0].sales_rep_name || '(no sales rep)', email: null, jobs: jobs.length, ok: false, error: 'no email on file' });
+      console.warn(`[supp-billing] no rep email for ${jobs.length} job(s) — rep: ${jobs[0].sales_rep_name || '(none)'}`);
+      continue;
+    }
+    const rows = jobs.map(j => `<tr>
+      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0"><a href="${SUPP_JOB_INVOICES_URL(j.jnid)}" style="color:#12617D;font-weight:600">${escapeHtml(j.name)}</a> <span style="color:#64748b">#${escapeHtml(String(j.number || ''))}</span></td>
+      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap">${j.placeholder ? '<strong style="color:#9A6210">$0 — set price</strong>' : '$' + Number(j.total).toLocaleString('en-US')}</td>
+    </tr>`).join('');
+    const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="margin:0 0 8px">Supplemental storage drafts — ${escapeHtml(monthLabel)}</h2>
+  <p style="line-height:1.5">Draft supplemental storage invoices were created for ${jobs.length} of your job${jobs.length === 1 ? '' : 's'}. Review each draft and send it to insurance. If a job is no longer in storage, delete the draft and turn its In&nbsp;Storage? flag off.</p>
+  <table style="border-collapse:collapse;width:100%">${rows}</table>
+  <p style="line-height:1.5;color:#64748b;font-size:13px;margin-top:16px">Sent automatically by DryOps supplemental billing.</p>
+</div>`;
+    const sent = await sendEmail(rep.email, `Supplemental storage drafts to review — ${monthLabel} (${jobs.length} job${jobs.length === 1 ? '' : 's'})`, html);
+    results.push({ rep: rep.name, email: rep.email, jobs: jobs.length, ok: sent.ok, ...(sent.ok ? {} : { error: sent.error }) });
+    console.log(`[supp-billing] notify ${rep.name} <${rep.email}> — ${jobs.length} job(s): ${sent.ok ? 'sent' : sent.error}`);
+  }
+  return results;
+}
+
 let suppRunActive = false;
 let lastSuppRun = null;
 
@@ -3643,6 +3700,7 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
             jnid: job.jnid, name: job.name, number: job.number, status: job.status_name,
             total: Number(job.cf_double_1) || 0, vaults: Number(job.cf_long_1) || 0,
             last_storage_invoice: lastStorage ? new Date(lastStorage * 1000).toISOString().slice(0, 10) : null,
+            sales_rep: job.sales_rep || null, sales_rep_name: job.sales_rep_name || null,
             ...(job.placeholder ? { placeholder: true } : {}),
           };
           if (autoDup || manualDup || priorBilled.has(job.jnid)) {
@@ -3671,6 +3729,9 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
       }
     }));
     console.log(`[supp-billing] done — ${report.created.length} ${dryrun ? 'would be created' : 'created'}, ${report.skipped.length} skipped, ${report.errors.length} errors`);
+    if (!dryrun && report.created.length && SUPP_NOTIFY_REPS) {
+      report.notifications = await suppNotifyReps(report.created, monthLabel);
+    }
     lastSuppRun = { month: monthKey, mode: report.mode, trigger, at: startedAt,
       created: report.created.length, skipped: report.skipped.length, errors: report.errors.length };
     try {
@@ -3715,6 +3776,29 @@ app.post('/admin/supplemental-billing/run', requireAuth, requireAdmin, async (re
   } catch (err) {
     res.status(err.message.includes('in progress') ? 409 : 500).json({ error: err.message });
   }
+});
+
+// Send a sample rep-notification email to an arbitrary address, so the layout
+// and Resend config can be verified without a live billing run.
+app.post('/admin/supplemental-billing/test-notification', requireAuth, requireAdmin, async (req, res) => {
+  const email = String(req.body && req.body.email || '').trim();
+  if (!email) return res.status(400).json({ error: 'body.email required' });
+  const sample = [
+    { jnid: 'sample-jnid-1', name: 'Jane Sample (TST-CON)', number: '00001', total: 1280, sales_rep: 'x', sales_rep_name: 'Test Rep' },
+    { jnid: 'sample-jnid-2', name: 'John Sample (TST-CON)', number: '00002', total: 0, placeholder: true, sales_rep: 'x', sales_rep_name: 'Test Rep' },
+  ];
+  const rows = sample.map(j => `<tr>
+      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0"><a href="${SUPP_JOB_INVOICES_URL(j.jnid)}" style="color:#12617D;font-weight:600">${escapeHtml(j.name)}</a> <span style="color:#64748b">#${j.number}</span></td>
+      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap">${j.placeholder ? '<strong style="color:#9A6210">$0 — set price</strong>' : '$' + Number(j.total).toLocaleString('en-US')}</td>
+    </tr>`).join('');
+  const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="margin:0 0 8px">Supplemental storage drafts — TEST</h2>
+  <p style="line-height:1.5">This is a test of the DryOps supplemental billing notification. Draft supplemental storage invoices were created for 2 of your jobs. Review each draft and send it to insurance.</p>
+  <table style="border-collapse:collapse;width:100%">${rows}</table>
+  <p style="line-height:1.5;color:#64748b;font-size:13px;margin-top:16px">Sent automatically by DryOps supplemental billing.</p>
+</div>`;
+  const sent = await sendEmail(email, 'TEST — Supplemental storage drafts to review', html);
+  res.status(sent.ok ? 200 : 502).json(sent);
 });
 
 app.get('/admin/supplemental-billing/status', requireAuth, requireAdmin, async (req, res) => {

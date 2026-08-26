@@ -88,3 +88,8 @@ server.js for eligibility rules and dedupe logic.
 - CAUTION: ~1,185 jobs carried a stale In-Storage flag as of 2026-08 while only
   ~150/month were actually billed — clean flags via the dryrun report before
   arming live mode
+- After a live run, each job's sales rep gets one email (via `sendEmail` /
+  Resend, requires RESEND_API_KEY + EMAIL_FROM) listing their newly drafted
+  jobs with links to the JN payments-and-invoices screen; disable with
+  `SUPP_NOTIFY_REPS=false`. Test the layout with
+  `POST /admin/supplemental-billing/test-notification {email}`.
