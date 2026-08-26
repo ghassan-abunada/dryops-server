@@ -21,3 +21,10 @@ create index if not exists supplemental_billing_runs_month_mode_idx
   on public.supplemental_billing_runs (month, mode);
 
 alter table public.supplemental_billing_runs enable row level security;
+
+-- 2026-08-26: allow pre-billing reminder stages in the run log.
+alter table public.supplemental_billing_runs
+  drop constraint if exists supplemental_billing_runs_mode_check;
+alter table public.supplemental_billing_runs
+  add constraint supplemental_billing_runs_mode_check
+  check (mode in ('dryrun', 'live') or mode ~ '^reminder-[0-9]+d$');

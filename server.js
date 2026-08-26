@@ -3603,6 +3603,47 @@ const SUPP_NOTIFY_OVERRIDES = new Map(
     .filter(([k, v]) => k && v));
 const SUPP_JOB_INVOICES_URL = (jnid) => `https://app.jobnimbus.com/job/${jnid}/payments-and-invoices`;
 
+// Per-location rep tally over a pool of jobs (locId → Map(repId → count)).
+function suppRepTally(pool) {
+  const tally = new Map();
+  for (const j of pool || []) {
+    const locId = (j.location && j.location.id != null) ? j.location.id : null;
+    if (locId == null || !j.sales_rep) continue;
+    if (!tally.has(locId)) tally.set(locId, new Map());
+    const t = tally.get(locId);
+    t.set(j.sales_rep, (t.get(j.sales_rep) || 0) + 1);
+  }
+  return tally;
+}
+
+// Recipient for a location: explicit override → most common ACTIVE rep with an
+// email (from the tally) → any tallied rep → most common rep among `jobs`.
+function suppResolveRecipient(locId, jobs, repTally, users) {
+  const override = locId != null ? SUPP_NOTIFY_OVERRIDES.get(String(locId)) : null;
+  if (override) return { name: 'location override', email: override };
+  const t = locId != null ? repTally.get(locId) : null;
+  const ranked = t ? [...t.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id) : [];
+  const domId = ranked.find(id => { const u = users.get(id); return u && u.active && u.email; })
+    || ranked[0]
+    || (jobs.map(j => j.sales_rep).filter(Boolean).sort((a, b) =>
+         jobs.filter(x => x.sales_rep === b).length - jobs.filter(x => x.sales_rep === a).length)[0])
+    || null;
+  return domId ? (users.get(domId) || null) : null;
+}
+
+// jn_location_id → display name from the DryOps locations table (best-effort).
+async function suppLocationNames(locIds) {
+  const names = new Map();
+  try {
+    const ids = [...new Set((locIds || []).filter(id => id != null))];
+    if (ids.length) {
+      const rows = await sbGet(`locations?jn_location_id=in.(${ids.join(',')})&select=jn_location_id,name`) || [];
+      for (const r of rows) if (!names.has(r.jn_location_id)) names.set(r.jn_location_id, r.name);
+    }
+  } catch (err) { console.warn('[supp-billing] location name lookup failed:', err.message); }
+  return names;
+}
+
 async function jnFetchAccountUsers() {
   // /account/users ignores size/from and always returns the full user list
   // (verified 2026-08-26: every query shape returns all ~1,700 users) — one
@@ -3629,34 +3670,8 @@ async function suppNotifyReps(created, monthLabel, eligiblePool) {
   try { users = await jnFetchAccountUsers(); }
   catch (err) { console.error('[supp-billing] user lookup for notifications failed:', err.message); return [{ ok: false, error: err.message }]; }
 
-  // location id → dominant sales_rep id (mode over eligible in-storage jobs)
-  const repTally = new Map(); // locId → Map(repId → count)
-  for (const j of eligiblePool || []) {
-    const locId = (j.location && j.location.id != null) ? j.location.id : null;
-    if (locId == null || !j.sales_rep) continue;
-    if (!repTally.has(locId)) repTally.set(locId, new Map());
-    const t = repTally.get(locId);
-    t.set(j.sales_rep, (t.get(j.sales_rep) || 0) + 1);
-  }
-  // Most common rep for the location, preferring ACTIVE users with an email —
-  // 5 locations' overall-dominant rep was a deactivated JN user (2026-08-26),
-  // whose inbox nobody reads. Deactivated/email-less reps are a last resort.
-  const dominantRep = (locId) => {
-    const t = repTally.get(locId);
-    if (!t || !t.size) return null;
-    const ranked = [...t.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
-    return ranked.find(id => { const u = users.get(id); return u && u.active && u.email; }) || ranked[0];
-  };
-
-  // location names from the DryOps locations table (best-effort)
-  const locNames = new Map();
-  try {
-    const locIds = [...new Set(created.map(c => c.location_id).filter(id => id != null))];
-    if (locIds.length) {
-      const rows = await sbGet(`locations?jn_location_id=in.(${locIds.join(',')})&select=jn_location_id,name`) || [];
-      for (const r of rows) if (!locNames.has(r.jn_location_id)) locNames.set(r.jn_location_id, r.name);
-    }
-  } catch (err) { console.warn('[supp-billing] location name lookup failed:', err.message); }
+  const repTally = suppRepTally(eligiblePool);
+  const locNames = await suppLocationNames(created.map(c => c.location_id));
 
   const byLoc = new Map();
   for (const c of created) {
@@ -3666,19 +3681,7 @@ async function suppNotifyReps(created, monthLabel, eligiblePool) {
   }
   for (const [locId, jobs] of byLoc) {
     const locName = locId !== 'none' ? (locNames.get(locId) || `location ${locId}`) : 'unassigned location';
-    // explicit override first; else the location's dominant rep, falling back
-    // to the most common rep among this run's drafts, then any job's rep
-    let rep = null;
-    const override = locId !== 'none' ? SUPP_NOTIFY_OVERRIDES.get(String(locId)) : null;
-    if (override) {
-      rep = { name: 'location override', email: override };
-    } else {
-      const repId = (locId !== 'none' && dominantRep(locId))
-        || (jobs.map(j => j.sales_rep).filter(Boolean).sort((a, b) =>
-             jobs.filter(x => x.sales_rep === b).length - jobs.filter(x => x.sales_rep === a).length)[0])
-        || null;
-      rep = repId ? users.get(repId) : null;
-    }
+    const rep = suppResolveRecipient(locId === 'none' ? null : locId, jobs, repTally, users);
     if (!rep || !rep.email) {
       results.push({ location: locName, rep: rep ? rep.name : '(no sales rep)', email: null, jobs: jobs.length, ok: false, error: 'no email on file' });
       console.warn(`[supp-billing] no rep email for ${locName} — ${jobs.length} job(s) unnotified`);
@@ -3702,6 +3705,122 @@ async function suppNotifyReps(created, monthLabel, eligiblePool) {
   }
   return results;
 }
+
+// ── Pre-billing reminder emails ──────────────────────────────────────────────
+// Owner 2026-08-26: SUPP_REMINDER_DAYS days before each month's 1st (default 7
+// and 2), every location's rep gets a prep email — what makes a job bill, what
+// to fix, and the location's in-storage jobs with NO Supplemental Price. Only
+// sent while SUPP_BILLING_LIVE (no point prepping for a run that won't
+// happen). One send per (month, stage), tracked in supplemental_billing_runs
+// with mode 'reminder-7d' / 'reminder-2d' so restarts can't double-send.
+const SUPP_REMINDER_DAYS = (process.env.SUPP_REMINDER_DAYS || '7,2').split(',')
+  .map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n >= 1 && n <= 27);
+
+// Next month's key/label and how many days until its 1st (Denver).
+function denverNextFirst() {
+  const { y, m, d } = denverNow();
+  const nextY = m === 12 ? y + 1 : y, nextM = m === 12 ? 1 : m + 1;
+  const daysInCurrentMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return {
+    monthKey: `${nextY}-${String(nextM).padStart(2, '0')}`,
+    monthLabel: `${MONTH_NAMES[nextM - 1]} ${nextY}`,
+    daysUntil: daysInCurrentMonth - d + 1,
+  };
+}
+
+function suppPrepEmailHtml(locName, monthLabel, billableCount, billableTotal, npJobs) {
+  const totalStr = '$' + Math.round(billableTotal).toLocaleString('en-US');
+  const npRows = npJobs.map(j => `<tr>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0"><a href="${SUPP_JOB_INVOICES_URL(j.jnid)}" style="color:#12617D;font-weight:600">${escapeHtml(j.name)}</a> <span style="color:#64748b">#${escapeHtml(String(j.number || ''))}</span></td>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;color:#64748b;white-space:nowrap">${escapeHtml(j.status_name || '')}</td>
+  </tr>`).join('');
+  return `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="margin:0 0 8px">Supplemental storage bills automatically on ${escapeHtml(monthLabel)} 1</h2>
+  <p style="line-height:1.5;color:#64748b;margin:0 0 12px">${escapeHtml(locName)}</p>
+  <p style="line-height:1.5">On the 1st, DryOps creates a <strong>Draft</strong> supplemental storage invoice for every job in storage at your location, and emails you the list. A job bills when it's a Contents job with <strong>In&nbsp;Storage? = Yes</strong> (or in the In storage status) and a <strong>Supplemental Price</strong> set.</p>
+  <p style="line-height:1.5;margin-bottom:6px"><strong>Before the 1st:</strong></p>
+  <ol style="line-height:1.6;margin:0 0 14px;padding-left:22px">
+    <li>Make sure every job actually holding contents has <strong>In Storage? = Yes</strong> and a <strong>Supplemental Price</strong>.</li>
+    <li>Turn <strong>In Storage? off</strong> on any job that's been packed back or closed — otherwise it gets billed.</li>
+    <li>Set a price on the jobs below — they're in storage with <strong>no Supplemental Price</strong> and will get a <strong>$0 placeholder draft</strong> until priced.</li>
+  </ol>
+  <p style="line-height:1.5">Months already billed manually are skipped automatically. If a draft shouldn't be billed, turn the In&nbsp;Storage? flag off and tag <strong>@contentscollections</strong> in a note on the job to have it deleted — most users can't delete drafts themselves.</p>
+  <p style="line-height:1.5">Right now <strong>${billableCount} job${billableCount === 1 ? '' : 's'}</strong> here ${billableCount === 1 ? 'is' : 'are'} set to bill (~${totalStr}/month).${npJobs.length ? ` These <strong>${npJobs.length}</strong> need a price:` : ' No jobs are missing a price — nothing else to do.'}</p>
+  ${npJobs.length ? `<table style="border-collapse:collapse;width:100%">${npRows}</table>` : ''}
+  <p style="line-height:1.5;color:#64748b;font-size:13px;margin-top:16px">Sent automatically by DryOps supplemental billing.</p>
+</div>`;
+}
+
+// Send one prep reminder per location for the upcoming month. Returns the
+// per-location results array for the run log.
+async function suppSendPrepReminders(monthLabel) {
+  const users = await jnFetchAccountUsers();
+  const { eligible, noPrice } = await suppFetchEligible();
+  const pool = eligible.concat(noPrice);
+  const repTally = suppRepTally(pool);
+  const byLoc = new Map();
+  for (const j of pool) {
+    const id = (j.location && j.location.id != null) ? j.location.id : null;
+    if (id == null) continue;
+    if (!byLoc.has(id)) byLoc.set(id, []);
+    byLoc.get(id).push(j);
+  }
+  const locNames = await suppLocationNames([...byLoc.keys()]);
+  const results = [];
+  for (const [locId, jobs] of byLoc) {
+    const locName = locNames.get(locId) || `location ${locId}`;
+    const billable = jobs.filter(j => Number(j.cf_double_1) > 0);
+    const npJobs = jobs.filter(j => !(Number(j.cf_double_1) > 0))
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    const rep = suppResolveRecipient(locId, jobs, repTally, users);
+    if (!rep || !rep.email) {
+      results.push({ location: locName, rep: rep ? rep.name : '(no sales rep)', email: null, jobs: jobs.length, ok: false, error: 'no email on file' });
+      continue;
+    }
+    const html = suppPrepEmailHtml(locName, monthLabel, billable.length,
+      billable.reduce((s, j) => s + (Number(j.cf_double_1) || 0), 0), npJobs);
+    const sent = await sendEmail(rep.email,
+      `Reminder: supplemental storage bills on ${monthLabel} 1 — ${locName}${npJobs.length ? ` (${npJobs.length} job${npJobs.length === 1 ? '' : 's'} missing a price)` : ''}`, html);
+    results.push({ location: locName, rep: rep.name, email: rep.email, billable: billable.length, unpriced: npJobs.length, ok: sent.ok, ...(sent.ok ? {} : { error: sent.error }) });
+    console.log(`[supp-billing] reminder ${locName} → ${rep.name} <${rep.email}>: ${sent.ok ? 'sent' : sent.error}`);
+  }
+  return results;
+}
+
+async function suppRunReminderStage(daysUntil, monthKey, monthLabel, trigger) {
+  const mode = `reminder-${daysUntil}d`;
+  const results = await suppSendPrepReminders(monthLabel);
+  try {
+    await sbInsert('supplemental_billing_runs', {
+      month: monthKey, mode, trigger,
+      started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+      eligible_count: results.length,
+      created_count: results.filter(r => r.ok).length,
+      error_count: results.filter(r => !r.ok).length,
+      report: { notifications: results },
+    });
+  } catch (err) { console.error('[supp-billing] reminder log insert failed:', err.message); }
+  return results;
+}
+
+async function suppCheckReminderDue() {
+  try {
+    if (!SUPP_BILLING_LIVE || !SUPP_NOTIFY_REPS) return;
+    const { h } = denverNow();
+    if (h < 7) return;
+    const { monthKey, monthLabel, daysUntil } = denverNextFirst();
+    if (!SUPP_REMINDER_DAYS.includes(daysUntil)) return;
+    const mode = `reminder-${daysUntil}d`;
+    const prior = await sbGet(`supplemental_billing_runs?month=eq.${monthKey}&mode=eq.${mode}&select=id&limit=1`);
+    if (Array.isArray(prior) && prior.length) return;
+    console.log(`[supp-billing] ${mode} prep reminders for ${monthLabel}`);
+    await suppRunReminderStage(daysUntil, monthKey, monthLabel, 'schedule');
+  } catch (err) {
+    console.error('[supp-billing] reminder check failed:', err.message);
+  }
+}
+setTimeout(suppCheckReminderDue, 4 * 60 * 1000);
+setInterval(suppCheckReminderDue, SUPP_CHECK_INTERVAL_MS);
 
 let suppRunActive = false;
 let lastSuppRun = null;
@@ -3836,6 +3955,19 @@ app.post('/admin/supplemental-billing/run', requireAuth, requireAdmin, async (re
     res.json(report);
   } catch (err) {
     res.status(err.message.includes('in progress') ? 409 : 500).json({ error: err.message });
+  }
+});
+
+// Fire the prep reminders for the upcoming month right now (e.g. when a
+// scheduled stage was missed). Logged like a scheduled stage, so the
+// scheduler won't re-send the same (month, stage).
+app.post('/admin/supplemental-billing/send-reminders', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { monthKey, monthLabel, daysUntil } = denverNextFirst();
+    const results = await suppRunReminderStage(daysUntil, monthKey, monthLabel, 'manual');
+    res.json({ month: monthKey, stage: `reminder-${daysUntil}d`, sent: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length, results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

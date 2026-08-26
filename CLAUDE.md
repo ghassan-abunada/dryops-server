@@ -98,3 +98,9 @@ server.js for eligibility rules and dedupe logic.
   deactivated reps (Seattle APO → antonio@primepackouts.com, Portland AHWF /
   OKC 24HFP / TWF-RGV → ethan@americanpackout.com). Env value replaces the
   defaults.
+- Prep reminders: `SUPP_REMINDER_DAYS` (default `7,2`) days before each
+  month's 1st, every location's rep gets a prep email (what makes a job bill +
+  the location's unpriced in-storage jobs). Live mode only; one send per
+  (month, stage) tracked as mode `reminder-Nd` in supplemental_billing_runs.
+  `POST /admin/supplemental-billing/send-reminders` fires the upcoming month's
+  stage immediately.
