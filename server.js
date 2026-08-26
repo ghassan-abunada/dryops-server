@@ -3788,25 +3788,37 @@ function denverNextFirst() {
   };
 }
 
-function suppPrepEmailHtml(locName, monthLabel, billableCount, billableTotal, npJobs) {
+// Owner 2026-08-26: the prep email lists EVERY job that will bill (with its
+// amount), not just the ones needing review — priced jobs sorted largest
+// first, unpriced ones highlighted at the bottom of the same table.
+function suppPrepEmailHtml(locName, monthLabel, billableJobs, npJobs) {
+  const billableTotal = billableJobs.reduce((s, j) => s + (Number(j.cf_double_1) || 0), 0);
   const totalStr = '$' + Math.round(billableTotal).toLocaleString('en-US');
-  const npRows = npJobs.map(j => `<tr>
-    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0"><a href="${SUPP_JOB_INVOICES_URL(j.jnid)}" style="color:#12617D;font-weight:600">${escapeHtml(j.name)}</a> <span style="color:#64748b">#${escapeHtml(String(j.number || ''))}</span></td>
-    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;color:#64748b;white-space:nowrap">${escapeHtml(j.status_name || '')}</td>
-  </tr>`).join('');
+  // needs-review (unpriced) rows sit on TOP with an amber highlight, priced
+  // rows follow, largest first
+  const row = (j, amountCell, bg) => `<tr>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0${bg}"><a href="${SUPP_JOB_INVOICES_URL(j.jnid)}" style="color:#12617D;font-weight:600">${escapeHtml(j.name)}</a> <span style="color:#64748b">#${escapeHtml(String(j.number || ''))}</span></td>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;color:#64748b;white-space:nowrap${bg}">${escapeHtml(j.status_name || '')}</td>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap${bg}">${amountCell}</td>
+  </tr>`;
+  const AMBER = ';background:#FBF2DD';
+  const rows = npJobs.map(j => row(j, '<strong style="color:#9A6210">$0 — set price</strong>', AMBER))
+    .concat([...billableJobs].sort((a, b) => (Number(b.cf_double_1) || 0) - (Number(a.cf_double_1) || 0))
+      .map(j => row(j, '$' + Number(j.cf_double_1).toLocaleString('en-US'), '')))
+    .join('');
   return `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
   <h2 style="margin:0 0 8px">Supplemental storage bills automatically on ${escapeHtml(monthLabel)} 1</h2>
   <p style="line-height:1.5;color:#64748b;margin:0 0 12px">${escapeHtml(locName)}</p>
   <p style="line-height:1.5">On the 1st, DryOps creates a <strong>Draft</strong> supplemental storage invoice for every job in storage at your location, and emails you the list. A job bills when it's a Contents job with <strong>In&nbsp;Storage? = Yes</strong> (or in the In storage status) and a <strong>Supplemental Price</strong> set.</p>
   <p style="line-height:1.5;margin-bottom:6px"><strong>Before the 1st:</strong></p>
   <ol style="line-height:1.6;margin:0 0 14px;padding-left:22px">
-    <li>Make sure every job actually holding contents has <strong>In Storage? = Yes</strong> and a <strong>Supplemental Price</strong>.</li>
+    <li>Review the full list below — every job on it gets billed on the 1st.</li>
     <li>Turn <strong>In Storage? off</strong> on any job that's been packed back or closed — otherwise it gets billed.</li>
-    <li>Set a price on the jobs below — they're in storage with <strong>no Supplemental Price</strong> and will get a <strong>$0 placeholder draft</strong> until priced.</li>
+    <li>Set a price on the highlighted jobs at the top of the list — until priced they get a $0 placeholder draft each month.</li>
   </ol>
   <p style="line-height:1.5">Months already billed manually are skipped automatically. If a draft shouldn't be billed, turn the In&nbsp;Storage? flag off and tag <strong>@contentscollections</strong> in a note on the job to have it deleted — most users can't delete drafts themselves.</p>
-  <p style="line-height:1.5">Right now <strong>${billableCount} job${billableCount === 1 ? '' : 's'}</strong> here ${billableCount === 1 ? 'is' : 'are'} set to bill (~${totalStr}/month).${npJobs.length ? ` These <strong>${npJobs.length}</strong> need a price:` : ' No jobs are missing a price — nothing else to do.'}</p>
-  ${npJobs.length ? `<table style="border-collapse:collapse;width:100%">${npRows}</table>` : ''}
+  <p style="line-height:1.5"><strong>${billableJobs.length} job${billableJobs.length === 1 ? '' : 's'}</strong> set to bill (~${totalStr}/month)${npJobs.length ? `, plus <strong style="color:#9A6210">${npJobs.length} highlighted</strong> missing a price` : ''}:</p>
+  ${(billableJobs.length || npJobs.length) ? `<table style="border-collapse:collapse;width:100%">${rows}</table>` : ''}
   <p style="line-height:1.5;color:#64748b;font-size:13px;margin-top:16px">Sent automatically by DryOps supplemental billing.</p>
 </div>`;
 }
@@ -3837,8 +3849,7 @@ async function suppSendPrepReminders(monthLabel) {
       results.push({ location: locName, recipients: [], jobs: jobs.length, ok: false, error: 'no rep email on file' });
       continue;
     }
-    const html = suppPrepEmailHtml(locName, monthLabel, billable.length,
-      billable.reduce((s, j) => s + (Number(j.cf_double_1) || 0), 0), npJobs);
+    const html = suppPrepEmailHtml(locName, monthLabel, billable, npJobs);
     const sent = await sendEmail(recipients.map(r => r.email),
       `Reminder: supplemental storage bills on ${monthLabel} 1 — ${locName}${npJobs.length ? ` (${npJobs.length} job${npJobs.length === 1 ? '' : 's'} missing a price)` : ''}`, html);
     results.push({ location: locName, recipients: recipients.map(r => `${r.name} <${r.email}>`), billable: billable.length, unpriced: npJobs.length, ok: sent.ok, ...(sent.ok ? {} : { error: sent.error }) });
