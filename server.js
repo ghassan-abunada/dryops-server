@@ -3509,6 +3509,20 @@ function suppItemHasStorage(items) {
   return (items || []).some(it => it && (it.jnid === SUPP_STORAGE_ITEM_JNID || /offsite content storage/i.test(it.name || '')));
 }
 
+// Does this invoice look like a monthly supplemental? Offices now bill via
+// Xactimate (owner, 2026-08-26), so a manual supplemental is a ONE-LINE invoice
+// that either carries the storage catalog item or simply totals the job's
+// Supplemental Price. Matching only the storage item would miss Xactimate-style
+// one-liners and double-bill a month an office already invoiced by hand.
+// (A price change between months can still evade the total-match — the office
+// sees both drafts and deletes one; acceptable residual risk.)
+function suppLooksLikeSupplemental(inv, suppPrice) {
+  const items = inv.items || [];
+  if (items.length !== 1) return false;
+  if (suppItemHasStorage(items)) return true;
+  return suppPrice > 0 && Math.abs((Number(inv.total) || 0) - suppPrice) < 0.01;
+}
+
 // Build the draft-invoice payload, mirroring the shape of the invoices offices
 // create today. quantity×price shows per-vault pricing when it divides cleanly.
 function suppInvoicePayload(job, fullJob, monthKey, monthLabel, monthStartSecs) {
@@ -3600,11 +3614,15 @@ async function suppRunBilling({ dryrun = true, trigger = 'schedule' } = {}) {
           const invoices = ((await r.json())?.results ?? []).filter(i => i && i.is_active !== false);
           const extId = `supp-${job.jnid}-${monthKey}`;
           const autoDup = invoices.find(i => i.external_id === extId);
-          const manualDup = invoices.find(i => (i.items || []).length === 1 && suppItemHasStorage(i.items)
+          const suppPrice = Number(job.cf_double_1) || 0;
+          const manualDup = invoices.find(i => suppLooksLikeSupplemental(i, suppPrice)
             && i.date_invoice >= monthStartSecs - daySecs && i.date_invoice < monthEndSecs);
-          // staleness signal for the report: newest invoice touching storage
+          // staleness signal for the report: newest invoice that billed storage
+          // (storage line anywhere, or a supplemental-shaped one-liner)
           let lastStorage = 0;
-          for (const i of invoices) if (suppItemHasStorage(i.items) && (i.date_invoice || 0) > lastStorage) lastStorage = i.date_invoice;
+          for (const i of invoices) {
+            if ((suppItemHasStorage(i.items) || suppLooksLikeSupplemental(i, suppPrice)) && (i.date_invoice || 0) > lastStorage) lastStorage = i.date_invoice;
+          }
           const base = {
             jnid: job.jnid, name: job.name, number: job.number, status: job.status_name,
             total: Number(job.cf_double_1), vaults: Number(job.cf_long_1) || 0,
