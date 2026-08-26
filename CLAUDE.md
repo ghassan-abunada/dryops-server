@@ -93,3 +93,8 @@ server.js for eligibility rules and dedupe logic.
   jobs with links to the JN payments-and-invoices screen; disable with
   `SUPP_NOTIFY_REPS=false`. Test the layout with
   `POST /admin/supplemental-billing/test-notification {email}`.
+- `SUPP_NOTIFY_OVERRIDES` ("jnLocationId:email,…") routes specific locations to
+  a fixed recipient; defaults cover the 4 locations whose jobs only carry
+  deactivated reps (Seattle APO → antonio@primepackouts.com, Portland AHWF /
+  OKC 24HFP / TWF-RGV → ethan@americanpackout.com). Env value replaces the
+  defaults.

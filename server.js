@@ -3590,6 +3590,17 @@ async function sbInsert(table, row) {
 // supplemental drafts (via the existing DryOps outbound email — sendEmail /
 // EMAIL_FROM). Set SUPP_NOTIFY_REPS=false to disable.
 const SUPP_NOTIFY_REPS = process.env.SUPP_NOTIFY_REPS !== 'false';
+// Per-location recipient overrides — for locations whose jobs only carry
+// deactivated sales reps, so the tally can't route (owner 2026-08-26):
+// American Packout of Seattle → Antonio Salazar's new (Prime) account; the
+// other three orphaned locations → Ethan. Format "jnLocationId:email,…";
+// setting the env var REPLACES these defaults.
+const SUPP_NOTIFY_OVERRIDES = new Map(
+  (process.env.SUPP_NOTIFY_OVERRIDES ||
+    '33:antonio@primepackouts.com,273:ethan@americanpackout.com,114:ethan@americanpackout.com,233:ethan@americanpackout.com')
+    .split(',').map(s => s.trim()).filter(Boolean)
+    .map(pair => { const i = pair.indexOf(':'); return [pair.slice(0, i).trim(), pair.slice(i + 1).trim()]; })
+    .filter(([k, v]) => k && v));
 const SUPP_JOB_INVOICES_URL = (jnid) => `https://app.jobnimbus.com/job/${jnid}/payments-and-invoices`;
 
 async function jnFetchAccountUsers() {
@@ -3655,13 +3666,19 @@ async function suppNotifyReps(created, monthLabel, eligiblePool) {
   }
   for (const [locId, jobs] of byLoc) {
     const locName = locId !== 'none' ? (locNames.get(locId) || `location ${locId}`) : 'unassigned location';
-    // dominant rep for the location; fall back to the most common rep among
-    // this run's drafts, then to any job's rep
-    const repId = (locId !== 'none' && dominantRep(locId))
-      || (jobs.map(j => j.sales_rep).filter(Boolean).sort((a, b) =>
-           jobs.filter(x => x.sales_rep === b).length - jobs.filter(x => x.sales_rep === a).length)[0])
-      || null;
-    const rep = repId ? users.get(repId) : null;
+    // explicit override first; else the location's dominant rep, falling back
+    // to the most common rep among this run's drafts, then any job's rep
+    let rep = null;
+    const override = locId !== 'none' ? SUPP_NOTIFY_OVERRIDES.get(String(locId)) : null;
+    if (override) {
+      rep = { name: 'location override', email: override };
+    } else {
+      const repId = (locId !== 'none' && dominantRep(locId))
+        || (jobs.map(j => j.sales_rep).filter(Boolean).sort((a, b) =>
+             jobs.filter(x => x.sales_rep === b).length - jobs.filter(x => x.sales_rep === a).length)[0])
+        || null;
+      rep = repId ? users.get(repId) : null;
+    }
     if (!rep || !rep.email) {
       results.push({ location: locName, rep: rep ? rep.name : '(no sales rep)', email: null, jobs: jobs.length, ok: false, error: 'no email on file' });
       console.warn(`[supp-billing] no rep email for ${locName} — ${jobs.length} job(s) unnotified`);
