@@ -3444,7 +3444,9 @@ const SUPP_BILLING_LIVE = process.env.SUPP_BILLING_LIVE === 'true';
 const SUPP_BILLING_DAY = Math.max(1, Math.min(28, parseInt(process.env.SUPP_BILLING_DAY || '1', 10) || 1));
 const SUPP_RECORD_TYPES = (process.env.SUPP_RECORD_TYPES || 'Contents')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-const SUPP_EXCLUDED_STATUSES = (process.env.SUPP_EXCLUDED_STATUSES || 'Paid & Closed,PB complete,Lost,Non-Opportunity')
+// Attorney excluded per owner decision 2026-08-26: jobs in legal dispute keep
+// their In-Storage flag but must not receive automatic supplemental invoices.
+const SUPP_EXCLUDED_STATUSES = (process.env.SUPP_EXCLUDED_STATUSES || 'Paid & Closed,PB complete,Lost,Non-Opportunity,Attorney')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 // The JN catalog product used by every existing storage invoice (verified
 // 2026-08-25: all supplemental invoices since July use this item + template).

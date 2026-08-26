@@ -81,7 +81,7 @@ server.js for eligibility rules and dedupe logic.
 - Env: `SUPP_BILLING_LIVE=true` to arm live monthly runs (default: monthly
   dryrun only), `SUPP_BILLING_DAY` (default 1), `SUPP_RECORD_TYPES` (default
   `Contents`), `SUPP_EXCLUDED_STATUSES` (default
-  `Paid & Closed,PB complete,Lost,Non-Opportunity`)
+  `Paid & Closed,PB complete,Lost,Non-Opportunity,Attorney`)
 - CAUTION: ~1,185 jobs carried a stale In-Storage flag as of 2026-08 while only
   ~150/month were actually billed — clean flags via the dryrun report before
   arming live mode
