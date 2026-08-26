@@ -2446,7 +2446,7 @@ async function sendEmail(to, subject, html) {
     const r = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: EMAIL_FROM, to: [to], subject, html }),
+      body: JSON.stringify({ from: EMAIL_FROM, to: Array.isArray(to) ? to : [to], subject, html }),
     });
     const j = await r.json().catch(() => null);
     if (!r.ok) return { ok: false, error: (j && j.message) || `Resend error ${r.status}` };
@@ -3616,19 +3616,37 @@ function suppRepTally(pool) {
   return tally;
 }
 
-// Recipient for a location: explicit override → most common ACTIVE rep with an
-// email (from the tally) → any tallied rep → most common rep among `jobs`.
-function suppResolveRecipient(locId, jobs, repTally, users) {
-  const override = locId != null ? SUPP_NOTIFY_OVERRIDES.get(String(locId)) : null;
-  if (override) return { name: 'location override', email: override };
+// Recipients for a location (owner 2026-08-26: ALL assigned reps, not just the
+// dominant one): every ACTIVE rep with an email who appears as sales_rep on
+// the location's in-storage jobs, plus the override address if configured.
+// Fallback when that leaves nobody: the most common rep of any kind, so the
+// email at least goes to whatever address is on file.
+function suppResolveRecipients(locId, jobs, repTally, users) {
+  const ids = new Set();
   const t = locId != null ? repTally.get(locId) : null;
-  const ranked = t ? [...t.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id) : [];
-  const domId = ranked.find(id => { const u = users.get(id); return u && u.active && u.email; })
-    || ranked[0]
-    || (jobs.map(j => j.sales_rep).filter(Boolean).sort((a, b) =>
-         jobs.filter(x => x.sales_rep === b).length - jobs.filter(x => x.sales_rep === a).length)[0])
-    || null;
-  return domId ? (users.get(domId) || null) : null;
+  if (t) for (const id of t.keys()) ids.add(id);
+  for (const j of jobs) if (j.sales_rep) ids.add(j.sales_rep);
+  const seen = new Set();
+  const recipients = [];
+  for (const id of ids) {
+    const u = users.get(id);
+    if (u && u.active && u.email && !seen.has(u.email.toLowerCase())) {
+      seen.add(u.email.toLowerCase());
+      recipients.push({ name: u.name, email: u.email });
+    }
+  }
+  const override = locId != null ? SUPP_NOTIFY_OVERRIDES.get(String(locId)) : null;
+  if (override && !seen.has(override.toLowerCase())) {
+    seen.add(override.toLowerCase());
+    recipients.push({ name: 'location override', email: override });
+  }
+  if (!recipients.length) {
+    const ranked = t ? [...t.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id) : [];
+    const anyId = ranked[0] || jobs.map(j => j.sales_rep).filter(Boolean)[0] || null;
+    const u = anyId ? users.get(anyId) : null;
+    if (u && u.email) recipients.push({ name: u.name, email: u.email });
+  }
+  return recipients;
 }
 
 // jn_location_id → display name from the DryOps locations table (best-effort).
@@ -3681,9 +3699,9 @@ async function suppNotifyReps(created, monthLabel, eligiblePool) {
   }
   for (const [locId, jobs] of byLoc) {
     const locName = locId !== 'none' ? (locNames.get(locId) || `location ${locId}`) : 'unassigned location';
-    const rep = suppResolveRecipient(locId === 'none' ? null : locId, jobs, repTally, users);
-    if (!rep || !rep.email) {
-      results.push({ location: locName, rep: rep ? rep.name : '(no sales rep)', email: null, jobs: jobs.length, ok: false, error: 'no email on file' });
+    const recipients = suppResolveRecipients(locId === 'none' ? null : locId, jobs, repTally, users);
+    if (!recipients.length) {
+      results.push({ location: locName, recipients: [], jobs: jobs.length, ok: false, error: 'no rep email on file' });
       console.warn(`[supp-billing] no rep email for ${locName} — ${jobs.length} job(s) unnotified`);
       continue;
     }
@@ -3699,9 +3717,9 @@ async function suppNotifyReps(created, monthLabel, eligiblePool) {
   <p style="line-height:1.5;color:#64748b;font-size:13px;margin-top:16px">Sent automatically by DryOps supplemental billing.</p>
 </div>`;
     // subject is plain text — no HTML escaping
-    const sent = await sendEmail(rep.email, `Supplemental storage drafts to review — ${locName} — ${monthLabel} (${jobs.length} job${jobs.length === 1 ? '' : 's'})`, html);
-    results.push({ location: locName, rep: rep.name, email: rep.email, jobs: jobs.length, ok: sent.ok, ...(sent.ok ? {} : { error: sent.error }) });
-    console.log(`[supp-billing] notify ${locName} → ${rep.name} <${rep.email}> — ${jobs.length} job(s): ${sent.ok ? 'sent' : sent.error}`);
+    const sent = await sendEmail(recipients.map(r => r.email), `Supplemental storage drafts to review — ${locName} — ${monthLabel} (${jobs.length} job${jobs.length === 1 ? '' : 's'})`, html);
+    results.push({ location: locName, recipients: recipients.map(r => `${r.name} <${r.email}>`), jobs: jobs.length, ok: sent.ok, ...(sent.ok ? {} : { error: sent.error }) });
+    console.log(`[supp-billing] notify ${locName} → ${recipients.map(r => r.email).join(', ')} — ${jobs.length} job(s): ${sent.ok ? 'sent' : sent.error}`);
   }
   return results;
 }
@@ -3772,17 +3790,17 @@ async function suppSendPrepReminders(monthLabel) {
     const billable = jobs.filter(j => Number(j.cf_double_1) > 0);
     const npJobs = jobs.filter(j => !(Number(j.cf_double_1) > 0))
       .sort((a, b) => String(a.name).localeCompare(String(b.name)));
-    const rep = suppResolveRecipient(locId, jobs, repTally, users);
-    if (!rep || !rep.email) {
-      results.push({ location: locName, rep: rep ? rep.name : '(no sales rep)', email: null, jobs: jobs.length, ok: false, error: 'no email on file' });
+    const recipients = suppResolveRecipients(locId, jobs, repTally, users);
+    if (!recipients.length) {
+      results.push({ location: locName, recipients: [], jobs: jobs.length, ok: false, error: 'no rep email on file' });
       continue;
     }
     const html = suppPrepEmailHtml(locName, monthLabel, billable.length,
       billable.reduce((s, j) => s + (Number(j.cf_double_1) || 0), 0), npJobs);
-    const sent = await sendEmail(rep.email,
+    const sent = await sendEmail(recipients.map(r => r.email),
       `Reminder: supplemental storage bills on ${monthLabel} 1 — ${locName}${npJobs.length ? ` (${npJobs.length} job${npJobs.length === 1 ? '' : 's'} missing a price)` : ''}`, html);
-    results.push({ location: locName, rep: rep.name, email: rep.email, billable: billable.length, unpriced: npJobs.length, ok: sent.ok, ...(sent.ok ? {} : { error: sent.error }) });
-    console.log(`[supp-billing] reminder ${locName} → ${rep.name} <${rep.email}>: ${sent.ok ? 'sent' : sent.error}`);
+    results.push({ location: locName, recipients: recipients.map(r => `${r.name} <${r.email}>`), billable: billable.length, unpriced: npJobs.length, ok: sent.ok, ...(sent.ok ? {} : { error: sent.error }) });
+    console.log(`[supp-billing] reminder ${locName} → ${recipients.map(r => r.email).join(', ')}: ${sent.ok ? 'sent' : sent.error}`);
   }
   return results;
 }
