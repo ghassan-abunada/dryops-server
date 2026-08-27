@@ -3753,11 +3753,16 @@ async function suppNotifyReps(created, monthLabel, eligiblePool) {
       <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0"><a href="${SUPP_JOB_INVOICES_URL(j.jnid)}" style="color:#12617D;font-weight:600">${escapeHtml(j.name)}</a> <span style="color:#64748b">#${escapeHtml(String(j.number || ''))}</span></td>
       <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap">${j.placeholder ? '<strong style="color:#9A6210">$0 — set price</strong>' : '$' + Number(j.total).toLocaleString('en-US')}</td>
     </tr>`).join('');
+    const locTotal = jobs.reduce((s, j) => s + (Number(j.total) || 0), 0);
+    const totalRow = `<tr>
+      <td style="padding:8px 10px;border-top:2px solid #cbd5e1;font-weight:700">Total (${jobs.length} draft${jobs.length === 1 ? '' : 's'})</td>
+      <td style="padding:8px 10px;border-top:2px solid #cbd5e1;text-align:right;white-space:nowrap;font-weight:700">$${Math.round(locTotal).toLocaleString('en-US')}</td>
+    </tr>`;
     const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
   <h2 style="margin:0 0 8px">Supplemental storage drafts — ${escapeHtml(monthLabel)}</h2>
   <p style="line-height:1.5;color:#64748b;margin:0 0 12px">${escapeHtml(locName)}</p>
   <p style="line-height:1.5">Draft supplemental storage invoices were created for ${jobs.length} job${jobs.length === 1 ? '' : 's'} at this location. Review each draft and send it to insurance. If a job is no longer in storage, turn its In&nbsp;Storage? flag off and tag <strong>@contentscollections</strong> in a note on the job to have the draft deleted (most users can't delete drafts).</p>
-  <table style="border-collapse:collapse;width:100%">${rows}</table>
+  <table style="border-collapse:collapse;width:100%">${rows}${totalRow}</table>
   <p style="line-height:1.5;color:#64748b;font-size:13px;margin-top:16px">Sent automatically by DryOps supplemental billing.</p>
 </div>`;
     // subject is plain text — no HTML escaping
@@ -3820,7 +3825,10 @@ function suppPrepEmailHtml(locName, monthLabel, billableJobs, npJobs) {
   </ol>
   <p style="line-height:1.5">Months already billed manually are skipped automatically. If a draft shouldn't be billed, turn the In&nbsp;Storage? flag off and tag <strong>@contentscollections</strong> in a note on the job to have it deleted — most users can't delete drafts themselves.</p>
   <p style="line-height:1.5"><strong>${billableJobs.length} job${billableJobs.length === 1 ? '' : 's'}</strong> set to bill (~${totalStr}/month)${npJobs.length ? `, plus <strong style="color:#9A6210">${npJobs.length} highlighted</strong> missing a price` : ''}:</p>
-  ${(billableJobs.length || npJobs.length) ? `<table style="border-collapse:collapse;width:100%">${rows}</table>` : ''}
+  ${(billableJobs.length || npJobs.length) ? `<table style="border-collapse:collapse;width:100%">${rows}<tr>
+    <td colspan="2" style="padding:8px 10px;border-top:2px solid #cbd5e1;font-weight:700">Total (${billableJobs.length} priced job${billableJobs.length === 1 ? '' : 's'}${npJobs.length ? ` + ${npJobs.length} unpriced` : ''})</td>
+    <td style="padding:8px 10px;border-top:2px solid #cbd5e1;text-align:right;white-space:nowrap;font-weight:700">${totalStr}/mo</td>
+  </tr></table>` : ''}
   <p style="line-height:1.5;color:#64748b;font-size:13px;margin-top:16px">Sent automatically by DryOps supplemental billing.</p>
 </div>`;
 }
