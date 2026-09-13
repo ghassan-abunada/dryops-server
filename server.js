@@ -3088,7 +3088,7 @@ app.post('/admin/lead-sources/bank-reveal', requireAuth, requireAdmin, async (re
 // Used by the app's address fields (e.g. new lead-source company). Same
 // admin/owner gating as the rest of /admin. Requires the "Places API" to be
 // enabled on the GOOGLE_MAPS_KEY project (Geocoding alone is not enough).
-app.get('/admin/places/autocomplete', requireAuth, requireAdmin, async (req, res) => {
+async function placesAutocomplete(req, res) {
   const q = String(req.query.q || '').trim();
   if (q.length < 3) return res.json({ predictions: [] });
   if (!GOOGLE_MAPS_KEY) return res.json({ predictions: [], error: 'Maps key not configured' });
@@ -3096,7 +3096,7 @@ app.get('/admin/places/autocomplete', requireAuth, requireAdmin, async (req, res
     const params = new URLSearchParams({
       input: q.slice(0, 200),
       key: GOOGLE_MAPS_KEY,
-      types: 'address',
+      types: String(req.query.types || '') === 'geocode' ? 'geocode' : 'address',
       components: 'country:us',
     });
     // Session token groups the keystrokes of one lookup for Google's billing.
@@ -3118,20 +3118,20 @@ app.get('/admin/places/autocomplete', requireAuth, requireAdmin, async (req, res
     console.error('[places autocomplete error]', err.message);
     return res.json({ predictions: [] });
   }
-});
+}
 
 // Place Details for a picked autocomplete suggestion — returns the address
 // broken into components so the app can fill street/city/state/zip fields.
 // Passing the same session token as the autocomplete calls closes the billing
 // session (Google charges per session, not per keystroke, when tokens match).
-app.get('/admin/places/details', requireAuth, requireAdmin, async (req, res) => {
+async function placesDetails(req, res) {
   const placeId = String(req.query.place_id || '').trim();
   if (!placeId || !GOOGLE_MAPS_KEY) return res.json({});
   try {
     const params = new URLSearchParams({
       place_id: placeId,
       key: GOOGLE_MAPS_KEY,
-      fields: 'address_component,formatted_address',
+      fields: 'address_component,formatted_address,geometry',
     });
     const session = String(req.query.session || '').slice(0, 64);
     if (session) params.set('sessiontoken', session);
@@ -3152,12 +3152,34 @@ app.get('/admin/places/details', requireAuth, requireAdmin, async (req, res) => 
       state: comp('administrative_area_level_1', true),
       zip: comp('postal_code'),
       formatted: d.result.formatted_address || '',
+      lat: d.result.geometry && d.result.geometry.location ? d.result.geometry.location.lat : null,
+      lng: d.result.geometry && d.result.geometry.location ? d.result.geometry.location.lng : null,
     });
   } catch (err) {
     console.error('[places details error]', err.message);
     return res.json({});
   }
-});
+}
+
+// Forward geocode for any signed-in user — the Route Planner needs coordinates
+// for technician start addresses and for jobs that were never geocoded.
+async function geocodeRoute(req, res) {
+  const address = String(req.query.address || '').trim();
+  if (address.length < 3) return res.json({});
+  if (!GOOGLE_MAPS_KEY) return res.json({ error: 'Maps key not configured' });
+  const coords = await geocode(address.slice(0, 300));
+  return res.json(coords || {});
+}
+
+// Admin/owner routes (kept for the existing lead-source address fields).
+app.get('/admin/places/autocomplete', requireAuth, requireAdmin, placesAutocomplete);
+app.get('/admin/places/details', requireAuth, requireAdmin, placesDetails);
+
+// Any signed-in user: technicians and dispatchers plan routes too. Same
+// handlers, same server-side key — only the role gate differs.
+app.get('/places/autocomplete', requireAuth, placesAutocomplete);
+app.get('/places/details', requireAuth, placesDetails);
+app.get('/geocode', requireAuth, geocodeRoute);
 
 // ── JobNimbus photo report (Work Complete → PDF → job Files) ─────────────────
 // A JobNimbus automation fires POST /webhooks/jobnimbus/photo-report?token=…
