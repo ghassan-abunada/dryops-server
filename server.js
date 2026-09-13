@@ -3163,12 +3163,33 @@ async function placesDetails(req, res) {
 
 // Forward geocode for any signed-in user — the Route Planner needs coordinates
 // for technician start addresses and for jobs that were never geocoded.
+//
+// Returns the best match as top-level lat/lng/formatted plus up to five
+// candidate `results`, so the app can offer them as suggestions when the
+// Places API is unavailable on this key.
 async function geocodeRoute(req, res) {
   const address = String(req.query.address || '').trim();
-  if (address.length < 3) return res.json({});
-  if (!GOOGLE_MAPS_KEY) return res.json({ error: 'Maps key not configured' });
-  const coords = await geocode(address.slice(0, 300));
-  return res.json(coords || {});
+  if (address.length < 3) return res.json({ results: [] });
+  if (!GOOGLE_MAPS_KEY) return res.json({ results: [], error: 'Maps key not configured' });
+  try {
+    const params = new URLSearchParams({ address: address.slice(0, 300), key: GOOGLE_MAPS_KEY, components: 'country:US' });
+    const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${params}`);
+    const d = await r.json().catch(() => null);
+    if (!d || (d.status !== 'OK' && d.status !== 'ZERO_RESULTS')) {
+      console.warn('[geocode] status', d && d.status, (d && d.error_message) || '');
+      return res.json({ results: [] });
+    }
+    const results = (d.results || []).slice(0, 5).map(x => ({
+      formatted: x.formatted_address || '',
+      lat: x.geometry && x.geometry.location ? x.geometry.location.lat : null,
+      lng: x.geometry && x.geometry.location ? x.geometry.location.lng : null,
+    })).filter(x => typeof x.lat === 'number' && typeof x.lng === 'number');
+    const best = results[0];
+    return res.json(best ? { lat: best.lat, lng: best.lng, formatted: best.formatted, results } : { results });
+  } catch (err) {
+    console.error('[geocode error]', err.message);
+    return res.json({ results: [] });
+  }
 }
 
 // Admin/owner routes (kept for the existing lead-source address fields).
