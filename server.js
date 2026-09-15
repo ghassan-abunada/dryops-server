@@ -403,19 +403,162 @@ async function jnGetContact(contactId) {
   } catch (err) { console.error('[jn-webhook] contact fetch error', err.message); return null; }
 }
 
-// Server-side geocode via Google Maps (mirrors the app's geocodeAddress).
+// ── Free geocoding fallbacks (no key, no billing) ────────────────────────────
+// Google returns REQUEST_DENIED while the Cloud project that owns
+// GOOGLE_MAPS_KEY has no billing. Three keyless services back it up:
+//   • US Census geocoder — exact US street addresses, no rate limit to speak of.
+//   • Nominatim (OpenStreetMap) — exact addresses; policy is 1 req/s + UA, so
+//     calls are throttled and cached.
+//   • Photon (komoot / OSM) — partial input (streets, cities, POIs) for
+//     type-ahead; weak on house numbers, which is why Census runs alongside.
+// All return [{ formatted, lat, lng }], US-only.
+const GEO_UA = 'DryOps/1.0 (https://dryops.app)';
+const geoCache = new Map(); // key → { t, v }
+function geoCacheGet(key) {
+  const hit = geoCache.get(key);
+  if (hit && Date.now() - hit.t < 10 * 60 * 1000) return hit.v;
+  geoCache.delete(key);
+  return null;
+}
+function geoCacheSet(key, v) {
+  if (geoCache.size > 2000) geoCache.clear();
+  geoCache.set(key, { t: Date.now(), v });
+  return v;
+}
+function titleCase(str) {
+  return String(str || '').toLowerCase().replace(/\b([a-z])/g, m => m.toUpperCase())
+    .replace(/\b(Tx|Ok|Nm|La|Ar|Co|Ca|Az|Ny|Nj|Nc|Sc|Ga|Fl|Il|Oh|Mi|Wi|Mn|Mo|Ks|Ne|Nd|Sd|Wy|Mt|Id|Ut|Nv|Or|Wa|Ak|Hi|Va|Wv|Md|De|Pa|Ct|Ri|Ma|Vt|Nh|Me|Ky|Tn|Al|Ms|Ia|In|Dc)\b/g, m => m.toUpperCase());
+}
+
+async function censusGeocode(address) {
+  const key = `census:${address.toLowerCase()}`;
+  const cached = geoCacheGet(key);
+  if (cached) return cached;
+  try {
+    const params = new URLSearchParams({ address: address.slice(0, 200), benchmark: 'Public_AR_Current', format: 'json' });
+    const r = await fetch(`https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?${params}`, { headers: { 'User-Agent': GEO_UA } });
+    if (!r.ok) return [];
+    const d = await r.json().catch(() => null);
+    const out = (((d || {}).result || {}).addressMatches || []).slice(0, 3).map(m => ({
+      formatted: titleCase(m.matchedAddress).replace(/, (\d{5})$/, ' $1'),
+      lat: Number(m.coordinates && m.coordinates.y),
+      lng: Number(m.coordinates && m.coordinates.x),
+    })).filter(x => Number.isFinite(x.lat) && Number.isFinite(x.lng) && x.formatted);
+    return geoCacheSet(key, out);
+  } catch (err) { console.error('[census] error', err.message); return []; }
+}
+
+let nominatimLast = 0;
+async function nominatimSearch(q, limit = 5) {
+  const key = `nominatim:${q.toLowerCase()}:${limit}`;
+  const cached = geoCacheGet(key);
+  if (cached) return cached;
+  // Usage policy: max 1 request/second. Skip rather than queue when busy.
+  const now = Date.now();
+  if (now - nominatimLast < 1100) return [];
+  nominatimLast = now;
+  try {
+    const params = new URLSearchParams({ q: q.slice(0, 200), format: 'jsonv2', countrycodes: 'us', limit: String(limit), addressdetails: '1' });
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, { headers: { 'User-Agent': GEO_UA } });
+    if (!r.ok) return [];
+    const rows = await r.json().catch(() => []);
+    const out = (Array.isArray(rows) ? rows : []).map(x => {
+      const a = x.address || {};
+      const line1 = [a.house_number, a.road].filter(Boolean).join(' ') || (x.name || '');
+      const city = a.city || a.town || a.village || a.hamlet || a.municipality || a.county || '';
+      const formatted = [line1, city, [a.state, a.postcode].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+      return { formatted, lat: Number(x.lat), lng: Number(x.lon) };
+    }).filter(x => x.formatted && Number.isFinite(x.lat) && Number.isFinite(x.lng));
+    return geoCacheSet(key, out);
+  } catch (err) { console.error('[nominatim] error', err.message); return []; }
+}
+
+// Photon ranks by proximity to lat/lon when given — default to the DFW metro
+// (where the jobs are) so partial text doesn't wander to other states. The
+// app can pass its own ?lat=&lng= to bias toward the device instead.
+const GEO_BIAS_DEFAULT = { lat: 32.8, lon: -96.8 };
+async function photonSearch(q, limit = 5, bias = GEO_BIAS_DEFAULT) {
+  const query = String(q || '').trim();
+  if (query.length < 3) return [];
+  const key = `photon:${query.toLowerCase()}:${limit}:${bias.lat.toFixed(1)},${bias.lon.toFixed(1)}`;
+  const cached = geoCacheGet(key);
+  if (cached) return cached;
+  try {
+    const params = new URLSearchParams({
+      q: query.slice(0, 200), limit: String(Math.min(limit * 2, 10)), lang: 'en',
+      lat: String(bias.lat), lon: String(bias.lon),
+    });
+    const r = await fetch(`https://photon.komoot.io/api/?${params}`, { headers: { 'User-Agent': GEO_UA } });
+    if (!r.ok) return [];
+    const d = await r.json().catch(() => null);
+    const seen = new Set();
+    const out = [];
+    for (const f of (d && d.features) || []) {
+      const p = f.properties || {};
+      const c = f.geometry && f.geometry.coordinates;
+      if (p.countrycode !== 'US' || !Array.isArray(c) || c.length < 2) continue;
+      const line1 = [p.housenumber, p.street].filter(Boolean).join(' ') || p.name || '';
+      const cityLine = p.city || p.town || p.village || p.district || p.county || '';
+      const stateLine = [p.state, p.postcode].filter(Boolean).join(' ');
+      const formatted = [line1, cityLine, stateLine].filter(Boolean).join(', ');
+      if (!formatted || seen.has(formatted)) continue;
+      seen.add(formatted);
+      out.push({ formatted, lat: Number(c[1]), lng: Number(c[0]) });
+      if (out.length >= limit) break;
+    }
+    return geoCacheSet(key, out);
+  } catch (err) { console.error('[photon] error', err.message); return []; }
+}
+
+function dedupeGeo(lists, limit = 5) {
+  const seen = new Set();
+  const out = [];
+  for (const list of lists) for (const x of list || []) {
+    const k = x.formatted.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(x);
+    if (out.length >= limit) return out;
+  }
+  return out;
+}
+
+/** Exact-address fallback chain (JN sync, /geocode best match). */
+async function freeGeocode(address) {
+  const census = await censusGeocode(address);
+  if (census[0]) return census[0];
+  const nom = await nominatimSearch(address, 1);
+  if (nom[0]) return nom[0];
+  const ph = await photonSearch(address, 1);
+  return ph[0] || null;
+}
+
+/** Type-ahead fallback: Photon for partials, Census alongside when the text starts with a house number. */
+async function freeSuggest(q, limit = 5, bias = GEO_BIAS_DEFAULT) {
+  const startsWithNumber = /^\s*\d/.test(q);
+  const [ph, census] = await Promise.all([photonSearch(q, limit, bias), startsWithNumber ? censusGeocode(q) : Promise.resolve([])]);
+  return dedupeGeo([census, ph], limit);
+}
+
+function biasFromQuery(query) {
+  const lat = Number(query.lat); const lon = Number(query.lng);
+  return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? { lat, lon } : GEO_BIAS_DEFAULT;
+}
+
+// Server-side geocode via Google Maps (mirrors the app's geocodeAddress),
+// falling back to Photon whenever Google can't answer.
 async function geocode(address) {
   try {
     const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_KEY}`);
-    if (!r.ok) return null;
-    const d = await r.json();
-    if (d.status !== 'OK' || !d.results || !d.results.length) {
-      console.warn('[jn-webhook] geocode status', d.status, d.error_message || '');
-      return null;
+    const d = r.ok ? await r.json().catch(() => null) : null;
+    if (d && d.status === 'OK' && d.results && d.results.length) {
+      const loc = d.results[0].geometry.location;
+      return { lat: loc.lat, lng: loc.lng };
     }
-    const loc = d.results[0].geometry.location;
-    return { lat: loc.lat, lng: loc.lng };
-  } catch (err) { console.error('[jn-webhook] geocode error', err.message); return null; }
+    if (d && d.status !== 'ZERO_RESULTS') console.warn('[jn-webhook] geocode status', d.status, d.error_message || '');
+  } catch (err) { console.error('[jn-webhook] geocode error', err.message); }
+  const alt = await freeGeocode(address);
+  return alt ? { lat: alt.lat, lng: alt.lng } : null;
 }
 
 // Unwrap a webhook record that JobNimbus may send directly, as {data:...}, or
@@ -3104,15 +3247,20 @@ async function placesAutocomplete(req, res) {
     if (session) params.set('sessiontoken', session);
     const r = await fetch(`https://maps.googleapis.com/maps/api/place/autocomplete/json?${params}`);
     const d = await r.json().catch(() => null);
-    if (!d || (d.status !== 'OK' && d.status !== 'ZERO_RESULTS')) {
-      console.warn('[places autocomplete] status', d && d.status, (d && d.error_message) || '');
-      return res.json({ predictions: [] }); // degrade to manual typing
+    if (d && d.status === 'OK' && d.predictions && d.predictions.length) {
+      return res.json({
+        predictions: d.predictions.slice(0, 5).map(p => ({
+          description: p.description,
+          place_id: p.place_id,
+        })),
+      });
     }
+    if (d && d.status !== 'ZERO_RESULTS') console.warn('[places autocomplete] status', d && d.status, (d && d.error_message) || '');
+    // Photon fallback. The synthetic "geo:<lat>,<lng>" place_id carries the
+    // coordinates so the app needs no details round-trip.
+    const alt = await freeSuggest(q, 5, biasFromQuery(req.query));
     return res.json({
-      predictions: (d.predictions || []).slice(0, 5).map(p => ({
-        description: p.description,
-        place_id: p.place_id,
-      })),
+      predictions: alt.map(a => ({ description: a.formatted, place_id: `geo:${a.lat},${a.lng}` })),
     });
   } catch (err) {
     console.error('[places autocomplete error]', err.message);
@@ -3126,6 +3274,8 @@ async function placesAutocomplete(req, res) {
 // session (Google charges per session, not per keystroke, when tokens match).
 async function placesDetails(req, res) {
   const placeId = String(req.query.place_id || '').trim();
+  const geo = /^geo:(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/.exec(placeId);
+  if (geo) return res.json({ street: '', city: '', state: '', zip: '', formatted: '', lat: Number(geo[1]), lng: Number(geo[2]) });
   if (!placeId || !GOOGLE_MAPS_KEY) return res.json({});
   try {
     const params = new URLSearchParams({
@@ -3175,15 +3325,20 @@ async function geocodeRoute(req, res) {
     const params = new URLSearchParams({ address: address.slice(0, 300), key: GOOGLE_MAPS_KEY, components: 'country:US' });
     const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${params}`);
     const d = await r.json().catch(() => null);
-    if (!d || (d.status !== 'OK' && d.status !== 'ZERO_RESULTS')) {
+    let results = [];
+    if (d && d.status === 'OK') {
+      results = (d.results || []).slice(0, 5).map(x => ({
+        formatted: x.formatted_address || '',
+        lat: x.geometry && x.geometry.location ? x.geometry.location.lat : null,
+        lng: x.geometry && x.geometry.location ? x.geometry.location.lng : null,
+      })).filter(x => typeof x.lat === 'number' && typeof x.lng === 'number');
+    } else if (d && d.status !== 'ZERO_RESULTS') {
       console.warn('[geocode] status', d && d.status, (d && d.error_message) || '');
-      return res.json({ results: [] });
     }
-    const results = (d.results || []).slice(0, 5).map(x => ({
-      formatted: x.formatted_address || '',
-      lat: x.geometry && x.geometry.location ? x.geometry.location.lat : null,
-      lng: x.geometry && x.geometry.location ? x.geometry.location.lng : null,
-    })).filter(x => typeof x.lat === 'number' && typeof x.lng === 'number');
+    if (!results.length) {
+      const best = await freeGeocode(address);
+      results = dedupeGeo([best ? [best] : [], await photonSearch(address, 5)], 5);
+    }
     const best = results[0];
     return res.json(best ? { lat: best.lat, lng: best.lng, formatted: best.formatted, results } : { results });
   } catch (err) {
