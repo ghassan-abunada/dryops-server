@@ -2804,6 +2804,269 @@ async function leadSourceByToken(token) {
   return (rows && rows[0]) || null;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Scheduling: visit completion → JobNimbus note, technician day links
+// (see dryops repo supabase/add_visit_scheduling.sql).
+//
+// Completion is saved to Supabase FIRST, then the JN note is posted; a JN
+// failure is recorded on the row (jn_note_error) and can be retried, so a
+// technician's report is never lost. Tokens are 32-hex and only ever travel in
+// request bodies / URL paths of the public page — never logged here.
+// ═══════════════════════════════════════════════════════════════════════════
+const SB_JSON_HEADERS = {
+  apikey: SUPABASE_SERVICE_KEY,
+  Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+  'Content-Type': 'application/json',
+};
+async function sbPatch(table, filterQuery, patch) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filterQuery}`, {
+    method: 'PATCH', headers: { ...SB_JSON_HEADERS, Prefer: 'return=representation' }, body: JSON.stringify(patch),
+  });
+  if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 300)}`);
+  return r.json();
+}
+async function sbInsert(table, row) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: 'POST', headers: { ...SB_JSON_HEADERS, Prefer: 'return=representation' }, body: JSON.stringify(row),
+  });
+  if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 300)}`);
+  const rows = await r.json();
+  return Array.isArray(rows) ? rows[0] : rows;
+}
+
+// Testing knobs: JN_NOTES_DRYRUN=1 logs instead of posting; JN_NOTES_REDIRECT_JOB
+// posts every note onto one test job instead of the real one.
+const JN_NOTES_DRYRUN = process.env.JN_NOTES_DRYRUN === '1';
+const JN_NOTES_REDIRECT_JOB = (process.env.JN_NOTES_REDIRECT_JOB || '').trim();
+
+// First server-side JN note creator. Same payload the app sends via /jnapi.
+async function jnAddNote(jnJobId, text) {
+  const target = JN_NOTES_REDIRECT_JOB || jnJobId;
+  if (!target) return { ok: false, error: 'Visit has no JobNimbus job id' };
+  if (JN_NOTES_DRYRUN) {
+    console.log('[jn note dryrun]', target, JSON.stringify(text.slice(0, 160)));
+    return { ok: true, id: 'dryrun', dryrun: true };
+  }
+  try {
+    const r = await fetch(`${JN_BASE}/activities`, {
+      method: 'POST',
+      headers: { Authorization: `bearer ${JN_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ record_type_name: 'Note', note: text, related: [{ id: target, type: 'job' }] }),
+    });
+    const body = await r.json().catch(() => null);
+    if (!r.ok) {
+      console.warn('[jn note] failed', r.status, body && (body.message || body.error) || '');
+      return { ok: false, error: `JobNimbus responded ${r.status}` };
+    }
+    return { ok: true, id: (body && (body.jnid || body.id)) || 'ok' };
+  } catch (err) {
+    console.error('[jn note] error', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+const TECH_TOKEN_RE = /^[a-f0-9]{32}$/;
+async function techLinkByToken(token) {
+  if (!TECH_TOKEN_RE.test(token)) return null;
+  const rows = await sbGet(`tech_links?token=eq.${token}&disabled=eq.false&select=profile_id,profiles(full_name)`);
+  const row = rows && rows[0];
+  if (!row) return null;
+  return { profileId: String(row.profile_id), name: (row.profiles && row.profiles.full_name) || 'Technician' };
+}
+
+// Unauthenticated routes get a small per-token budget.
+const techRate = new Map();
+function techRateOk(token) {
+  const now = Date.now();
+  const e = techRate.get(token);
+  if (!e || now - e.t > 60000) { techRate.set(token, { t: now, n: 1 }); return true; }
+  e.n += 1;
+  return e.n <= 60;
+}
+
+const VISIT_TYPE_LABEL = { inspection: 'Inspection', monitor: 'Monitor', demo: 'Demo', closeout: 'Closeout' };
+function visitNoteText(visit, pct, actorName, note) {
+  const label = VISIT_TYPE_LABEL[visit.task_type] || 'Visit';
+  const head = visit.task_type === 'demo' && pct < 100 ? `${label} ${pct}% complete` : `${label} complete`;
+  const n = String(note || '').trim();
+  return n ? `${head} — ${actorName}: ${n}` : `${head} — ${actorName}`;
+}
+
+async function loadVisit(visitId, select) {
+  const rows = await sbGet(`inspections?id=eq.${encodeURIComponent(visitId)}&select=${select}`);
+  return (rows && rows[0]) || null;
+}
+function isAssigned(visit, profileId) {
+  return (visit.assigned_to_ids || []).map(String).includes(String(profileId));
+}
+
+// Shared by the token route and the signed-in route.
+async function completeVisit({ visitId, pct, note, actor, source }) {
+  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,assigned_to_ids,completion_pct');
+  if (!visit) return { status: 404, body: { error: 'Visit not found' } };
+  if (visit.status === 'cancelled') return { status: 409, body: { error: 'This visit was cancelled' } };
+  let p = Number(pct);
+  if (visit.task_type !== 'demo') p = 100;
+  if (![25, 50, 75, 100].includes(p)) return { status: 400, body: { error: 'pct must be 25, 50, 75 or 100' } };
+  const cleanNote = String(note || '').trim().slice(0, 2000) || null;
+
+  // Idempotent within 60 s (double taps, retried requests) — no second JN note.
+  const last = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
+  const prev = last && last[0];
+  if (prev && prev.pct === p && (prev.note || null) === cleanNote
+      && String(prev.actor_id || '') === String(actor.id || '')
+      && Date.now() - new Date(prev.created_at).getTime() < 60000) {
+    return { status: 200, body: { ok: true, idempotent: true, update: prev, jn: { ok: !prev.jn_note_error, id: prev.jn_note_id, error: prev.jn_note_error } } };
+  }
+
+  const now = new Date().toISOString();
+  const patched = await sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, {
+    completion_pct: p, completion_note: cleanNote, completed_by: actor.id || null, completed_by_name: actor.name,
+    completed_at: now, status: p === 100 ? 'completed' : 'in_progress', jn_note_error: null,
+  });
+  const update = await sbInsert('visit_updates', {
+    visit_id: visitId, actor_id: actor.id || null, actor_name: actor.name, source, pct: p, note: cleanNote,
+  });
+  const jn = await jnAddNote(visit.jn_id, visitNoteText(visit, p, actor.name, cleanNote));
+  const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
+  await Promise.all([
+    sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, jnPatch).catch(() => {}),
+    sbPatch('visit_updates', `id=eq.${encodeURIComponent(update.id)}`, jnPatch).catch(() => {}),
+  ]);
+  return { status: 200, body: { ok: true, visit: { ...(patched && patched[0]), ...jnPatch }, update: { ...update, ...jnPatch }, jn } };
+}
+
+// Re-post the JN note for the latest failed update.
+async function retryVisitJn(visitId) {
+  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status');
+  if (!visit) return { status: 404, body: { error: 'Visit not found' } };
+  const rows = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
+  const upd = rows && rows[0];
+  if (!upd) return { status: 404, body: { error: 'Nothing to retry' } };
+  if (!upd.jn_note_error) return { status: 200, body: { ok: true, jn: { ok: true, id: upd.jn_note_id } } };
+  const jn = await jnAddNote(visit.jn_id, visitNoteText(visit, upd.pct, upd.actor_name, upd.note));
+  const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
+  await Promise.all([
+    sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, jnPatch).catch(() => {}),
+    sbPatch('visit_updates', `id=eq.${encodeURIComponent(upd.id)}`, jnPatch).catch(() => {}),
+  ]);
+  return { status: 200, body: { ok: true, jn } };
+}
+
+async function techGuard(req, res) {
+  const token = String((req.body && req.body.token) || '').trim();
+  const tech = await techLinkByToken(token);
+  if (!tech) { res.status(401).json({ error: 'This link is no longer active. Ask dispatch for a new one.' }); return null; }
+  if (!techRateOk(token)) { res.status(429).json({ error: 'Too many requests — try again in a minute.' }); return null; }
+  const visit = await loadVisit(String(req.params.id), 'id,assigned_to_ids');
+  if (!visit) { res.status(404).json({ error: 'Visit not found' }); return null; }
+  if (!isAssigned(visit, tech.profileId)) { res.status(403).json({ error: 'You are not assigned to this visit.' }); return null; }
+  sbPatch('tech_links', `profile_id=eq.${tech.profileId}`, { last_seen_at: new Date().toISOString() }).catch(() => {});
+  return tech;
+}
+
+// Technician (public link) records progress on a visit.
+app.post('/tech/visits/:id/complete', async (req, res) => {
+  try {
+    const tech = await techGuard(req, res);
+    if (!tech) return;
+    const out = await completeVisit({
+      visitId: String(req.params.id), pct: req.body.pct, note: req.body.note,
+      actor: { id: tech.profileId, name: tech.name }, source: 'tech_link',
+    });
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    console.error('[tech complete error]', err.message);
+    res.status(502).json({ error: 'Could not save right now. Please try again.' });
+  }
+});
+
+app.post('/tech/visits/:id/retry-jn', async (req, res) => {
+  try {
+    const tech = await techGuard(req, res);
+    if (!tech) return;
+    const out = await retryVisitJn(String(req.params.id));
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    console.error('[tech retry error]', err.message);
+    res.status(502).json({ error: 'Could not retry right now.' });
+  }
+});
+
+// Signed-in app user (dispatcher, or an assigned tech with an account).
+async function appActor(req) {
+  const rows = await sbGet(`profiles?id=eq.${req.userId}&select=id,role,full_name`);
+  const p = rows && rows[0];
+  return p ? { id: String(p.id), role: p.role, name: p.full_name || 'Dispatcher' } : null;
+}
+app.post('/visits/:id/complete', requireAuth, async (req, res) => {
+  try {
+    const actor = await appActor(req);
+    if (!actor) return res.status(403).json({ error: 'Profile not found' });
+    const visit = await loadVisit(String(req.params.id), 'id,assigned_to_ids');
+    if (!visit) return res.status(404).json({ error: 'Visit not found' });
+    if (!['admin', 'owner'].includes(actor.role) && !isAssigned(visit, actor.id)) {
+      return res.status(403).json({ error: 'Not allowed to complete this visit' });
+    }
+    const out = await completeVisit({
+      visitId: String(req.params.id), pct: req.body.pct, note: req.body.note,
+      actor: { id: actor.id, name: actor.name }, source: 'app',
+    });
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    console.error('[visit complete error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+app.post('/visits/:id/retry-jn', requireAuth, async (req, res) => {
+  try {
+    const actor = await appActor(req);
+    if (!actor) return res.status(403).json({ error: 'Profile not found' });
+    const visit = await loadVisit(String(req.params.id), 'id,assigned_to_ids');
+    if (!visit) return res.status(404).json({ error: 'Visit not found' });
+    if (!['admin', 'owner'].includes(actor.role) && !isAssigned(visit, actor.id)) return res.status(403).json({ error: 'Not allowed' });
+    const out = await retryVisitJn(String(req.params.id));
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Admin: create / rotate / disable a technician's permanent link.
+app.post('/admin/tech-links/:profileId', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const profileId = String(req.params.profileId);
+    const prof = await sbGet(`profiles?id=eq.${encodeURIComponent(profileId)}&select=id`);
+    if (!prof || !prof[0]) return res.status(404).json({ error: 'Profile not found' });
+    const rotate = !!(req.body && req.body.rotate);
+    const existing = await sbGet(`tech_links?profile_id=eq.${encodeURIComponent(profileId)}&select=token,disabled`);
+    let token;
+    if (!existing || !existing[0]) {
+      const row = await sbInsert('tech_links', { profile_id: profileId });
+      token = row.token;
+    } else if (rotate || existing[0].disabled) {
+      token = crypto.randomBytes(16).toString('hex');
+      await sbPatch('tech_links', `profile_id=eq.${encodeURIComponent(profileId)}`, {
+        token, disabled: false, rotated_at: new Date().toISOString(),
+      });
+    } else {
+      token = existing[0].token;
+    }
+    res.json({ ok: true, token, url: `${WEB_APP_URL}/tech/${token}` });
+  } catch (err) {
+    console.error('[tech link error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+app.post('/admin/tech-links/:profileId/disable', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    await sbPatch('tech_links', `profile_id=eq.${encodeURIComponent(String(req.params.profileId))}`, { disabled: true });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
 app.get('/referral/info', async (req, res) => {
   try {
     const ls = await leadSourceByToken(String(req.query.token || '').trim());
