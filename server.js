@@ -2829,9 +2829,17 @@ async function sbInsert(table, row) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
     method: 'POST', headers: { ...SB_JSON_HEADERS, Prefer: 'return=representation' }, body: JSON.stringify(row),
   });
-  if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 300)}`);
-  const rows = await r.json();
-  return Array.isArray(rows) ? rows[0] : rows;
+  const text = await r.text();
+  if (!r.ok) throw new Error(`${r.status} ${text.slice(0, 300)}`);
+  let rows = null;
+  try { rows = text ? JSON.parse(text) : null; } catch { rows = null; }
+  const first = Array.isArray(rows) ? rows[0] : rows;
+  if (!first || typeof first !== 'object') {
+    // Seen in prod: insert succeeds but the representation comes back empty.
+    console.warn('[sbInsert] no row in response', table, r.status, JSON.stringify(text.slice(0, 200)));
+    return null;
+  }
+  return first;
 }
 
 // Testing knobs: JN_NOTES_DRYRUN=1 logs instead of posting; JN_NOTES_REDIRECT_JOB
@@ -2924,14 +2932,18 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
     completion_pct: p, completion_note: cleanNote, completed_by: actor.id || null, completed_by_name: actor.name,
     completed_at: now, status: p === 100 ? 'completed' : 'in_progress', jn_note_error: null,
   });
-  const update = await sbInsert('visit_updates', {
+  let update = await sbInsert('visit_updates', {
     visit_id: visitId, actor_id: actor.id || null, actor_name: actor.name, source, pct: p, note: cleanNote,
   });
+  if (!update) {
+    const latest = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
+    update = (latest && latest[0]) || { id: null };
+  }
   const jn = await jnAddNote(visit.jn_id, visitNoteText(visit, p, actor.name, cleanNote));
   const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
   await Promise.all([
     sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, jnPatch).catch(() => {}),
-    sbPatch('visit_updates', `id=eq.${encodeURIComponent(update.id)}`, jnPatch).catch(() => {}),
+    update.id ? sbPatch('visit_updates', `id=eq.${encodeURIComponent(update.id)}`, jnPatch).catch(() => {}) : Promise.resolve(),
   ]);
   return { status: 200, body: { ok: true, visit: { ...(patched && patched[0]), ...jnPatch }, update: { ...update, ...jnPatch }, jn } };
 }
@@ -3042,8 +3054,12 @@ app.post('/admin/tech-links/:profileId', requireAuth, requireAdmin, async (req, 
     const existing = await sbGet(`tech_links?profile_id=eq.${encodeURIComponent(profileId)}&select=token,disabled`);
     let token;
     if (!existing || !existing[0]) {
-      const row = await sbInsert('tech_links', { profile_id: profileId });
-      token = row.token;
+      await sbInsert('tech_links', { profile_id: profileId });
+      // Token is minted by the column default — read it back rather than
+      // trusting the insert representation.
+      const made = await sbGet(`tech_links?profile_id=eq.${encodeURIComponent(profileId)}&select=token`);
+      token = made && made[0] && made[0].token;
+      if (!token) throw new Error('Link row was not created');
     } else if (rotate || existing[0].disabled) {
       token = crypto.randomBytes(16).toString('hex');
       await sbPatch('tech_links', `profile_id=eq.${encodeURIComponent(profileId)}`, {
