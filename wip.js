@@ -65,7 +65,7 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
   }
   async function poolByToken(token) {
     if (!token || token.length < 16) return null;
-    const rows = await sbGet(`wip_pool?token=eq.${encodeURIComponent(token)}&select=id,location_id,token,label,sort_order,locations(name)&limit=1`);
+    const rows = await sbGet(`wip_pool?token=eq.${encodeURIComponent(token)}&select=id,location_id,token,label,sort_order,bank_balance,bank_balance_at,bank_balance_by,locations(name)&limit=1`);
     return rows[0] || null;
   }
 
@@ -118,7 +118,15 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
     }
     const lastUpdate = entries.reduce((m, e) => (e.updated_at > m ? e.updated_at : m), '');
     const lastBy = entries.filter(e => e.updated_at === lastUpdate).map(e => e.updated_by).find(Boolean) || '';
-    return { pool, label: pool.label || (pool.locations && pool.locations.name) || 'Location', rows, lastUpdate, lastBy };
+    // Total AR = every open job's outstanding invoice balance, whatever its status.
+    const arTotal = Math.round(rows.reduce((s, r) => s + (!r.custom && r.due > 0 ? r.due : 0), 0) * 100) / 100;
+    const bank = pool.bank_balance != null ? { balance: Number(pool.bank_balance), at: pool.bank_balance_at, by: pool.bank_balance_by } : null;
+    return { pool, label: pool.label || (pool.locations && pool.locations.name) || 'Location', rows, lastUpdate, lastBy, arTotal, bank };
+  }
+  function bankLine(bank) {
+    if (!bank) return 'Bank balance — not entered';
+    const when = bank.at ? new Date(bank.at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' }) : '';
+    return `Bank balance — ${whole(bank.balance)}${when ? ` (as of ${when}${bank.by ? ', ' + bank.by : ''})` : ''}`;
   }
 
   // ── Report text ─────────────────────────────────────────────────────────────
@@ -146,7 +154,8 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
     lines.push('', `Collecting — ${whole(cTotal)}`);
     coll.forEach((r, i) => lines.push(`${i + 1}. ${r.name} — ${money(r.amount)}${r.note ? ' (' + r.note + ')' : ''}`));
     if (!coll.length) lines.push('(none)');
-    return { text: lines.join('\n'), ipTotal, cTotal };
+    lines.push('', `Total AR — ${whole(data.arTotal)}`, bankLine(data.bank));
+    return { text: lines.join('\n'), ipTotal, cTotal, arTotal: data.arTotal, bank: data.bank };
   }
   function today() { return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' }); }
   function reportHeader(title) { return [`WIP REPORT — ${title} — ${today()}`, '='.repeat(40), ''].join('\n'); }
@@ -233,8 +242,11 @@ document.addEventListener('click',e=>{const b=e.target.closest('[data-share]');i
       const topbar = `<div class="top"><h1>${esc(data.label)} · WIP</h1><button class="btn small" data-share="${textUrl}" data-share-title="${esc(data.label)} WIP">Share</button></div>`;
       const body = `
 <div class="tot"><div class="card"><span>In Progress</span><b id="t-ip">$0</b><div class="meta" id="n-ip"></div></div>
-<div class="card"><span>Collecting</span><b id="t-col">$0</b><div class="meta" id="n-col"></div></div></div>
-<div class="sub" style="margin-bottom:10px">Put a value on each job in progress and tap <b>Collecting</b> on the invoices you expect paid this week. Everything saves as you go.</div>
+<div class="card"><span>Collecting</span><b id="t-col">$0</b><div class="meta" id="n-col"></div></div>
+<div class="card"><span>Total AR</span><b>${whole(data.arTotal)}</b><div class="meta">all open invoices</div></div>
+<div class="card"><span>Bank balance</span><div class="amt-row" style="margin-top:4px"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" id="bank" value="${data.bank ? esc(data.bank.balance) : ''}" placeholder="enter"></div>
+<div class="meta" id="bank-meta">${data.bank && data.bank.at ? `as of ${esc(new Date(data.bank.at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' }))}${data.bank.by ? ' · ' + esc(data.bank.by) : ''}` : 'not entered yet'}</div></div></div>
+<div class="sub" style="margin-bottom:10px">Put a value on each job in progress, tap <b>Collecting</b> on the invoices you expect paid this week, and enter today's bank balance. Everything saves as you go.</div>
 <input type="text" id="who" placeholder="Your name (so we know who updated)" autocomplete="name">
 <div id="sections"></div>
 <div class="bar"><div class="status" id="status">Loaded</div><button class="btn ghost small" id="add-btn">+ Add</button><a class="btn ghost small" href="${textUrl}" target="_blank">Text</a></div>
@@ -263,6 +275,9 @@ const sec=document.createElement('details');sec.className='sec';sec.open=open;se
 sec.innerHTML='<summary><h2>'+esc(title)+'</h2><span class="count">'+rows.length+'</span></summary>'+rows.map(jobCard).join('');
 sec.addEventListener('toggle',()=>{OPEN[g]=sec.open;try{localStorage.setItem('wip_open',JSON.stringify(OPEN))}catch(e){}});
 host.appendChild(sec)}totals()}
+const bankEl=document.getElementById('bank');let bankTimer=null;
+bankEl.addEventListener('input',()=>{clearTimeout(bankTimer);st.textContent='Saving…';st.className='status';bankTimer=setTimeout(async()=>{try{const r=await fetch('/wip/'+TOKEN+'/bank',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({balance:bankEl.value===''?null:Number(bankEl.value),updated_by:who.value||null})});if(!r.ok)throw new Error(await r.text());
+document.getElementById('bank-meta').textContent=bankEl.value===''?'not entered yet':'as of today'+(who.value?' · '+who.value:'');st.textContent='Saved ✓ '+new Date().toLocaleTimeString();st.className='status ok'}catch(e){st.textContent='Save failed — '+e.message;st.className='status err'}},700)});
 document.getElementById('add-btn').onclick=()=>document.getElementById('add-sheet').classList.add('open');
 document.getElementById('add-sheet').addEventListener('click',e=>{if(e.target.id==='add-sheet')e.target.classList.remove('open')});
 const dirty=new Map();let timer=null;const st=document.getElementById('status');
@@ -302,6 +317,20 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
     } catch (err) { console.error('[wip save]', err.message); res.status(502).json({ error: err.message }); }
   });
 
+  app.post('/wip/:token/bank', async (req, res) => {
+    try {
+      const pool = await poolByToken(req.params.token);
+      if (!pool) return res.status(404).json({ error: 'invalid link' });
+      const b = req.body || {};
+      const bal = b.balance === null || b.balance === undefined || b.balance === '' || isNaN(Number(b.balance)) ? null : Math.round(Number(b.balance) * 100) / 100;
+      await sbWrite('PATCH', `wip_pool?id=eq.${pool.id}`, {
+        bank_balance: bal, bank_balance_at: bal == null ? null : new Date().toISOString(),
+        bank_balance_by: bal == null ? null : (b.updated_by ? String(b.updated_by).slice(0, 80) : null),
+      }, 'return=minimal');
+      res.json({ ok: true });
+    } catch (err) { console.error('[wip bank]', err.message); res.status(502).json({ error: err.message }); }
+  });
+
   app.post('/wip/:token/entries/delete', async (req, res) => {
     try {
       const pool = await poolByToken(req.params.token);
@@ -328,7 +357,7 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
 
   // ── Master page ─────────────────────────────────────────────────────────────
   async function loadPool() {
-    return sbGet('wip_pool?select=id,location_id,token,label,sort_order,added_at,locations(name)&order=sort_order.asc,added_at.asc');
+    return sbGet('wip_pool?select=id,location_id,token,label,sort_order,added_at,bank_balance,bank_balance_at,bank_balance_by,locations(name)&order=sort_order.asc,added_at.asc');
   }
 
   app.get('/wip/master/:master', requireMaster, async (req, res) => {
@@ -337,17 +366,18 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
       const locs = await sbGet('locations?status=eq.active&select=id,name&order=name.asc');
       const inPool = new Set(pool.map(p => p.location_id));
       const cards = [];
-      let ipAll = 0, cAll = 0;
+      let ipAll = 0, cAll = 0, arAll = 0, bankAll = 0, bankMissing = 0;
       for (const p of pool) {
         const data = await loadLocation(p);
         const s = sectionText(data);
-        ipAll += s.ipTotal; cAll += s.cTotal;
+        ipAll += s.ipTotal; cAll += s.cTotal; arAll += data.arTotal;
+        if (data.bank) bankAll += data.bank.balance; else bankMissing++;
         const ownerUrl = `${req.protocol}://${req.get('host')}/wip/${p.token}`;
         const lastReview = (await sbGet(`wip_reviews?location_id=eq.${p.location_id}&select=reviewed_at,jobs_reviewed,applied&order=reviewed_at.desc&limit=1`))[0];
         cards.push(`<div class="card" data-pool="${esc(p.id)}">
 <input type="text" value="${esc(data.label)}" data-label="${esc(p.id)}" class="nm" title="Report heading" aria-label="Report heading">
 <div class="meta" style="margin-top:6px">${esc(p.locations ? p.locations.name : '')}</div>
-<div class="row" style="margin-top:10px;gap:16px"><span>In Progress <b>${whole(s.ipTotal)}</b></span><span>Collecting <b>${whole(s.cTotal)}</b></span></div>
+<div class="row" style="margin-top:10px;gap:14px"><span>In Progress <b>${whole(s.ipTotal)}</b></span><span>Collecting <b>${whole(s.cTotal)}</b></span><span>AR <b>${whole(data.arTotal)}</b></span><span>Bank <b>${data.bank ? whole(data.bank.balance) : '—'}</b></span></div>
 <div class="meta" style="margin-top:8px">${data.lastUpdate ? `Owner updated ${esc(data.lastUpdate.slice(0, 16).replace('T', ' '))}${data.lastBy ? ' by ' + esc(data.lastBy) : ''}` : 'No owner input yet'}
  · ${lastReview ? `AI review ${esc(lastReview.reviewed_at.slice(0, 16).replace('T', ' '))} (${lastReview.jobs_reviewed} jobs, ${lastReview.applied} updated)` : 'no AI review yet'}</div>
 <div class="actions">
@@ -363,7 +393,8 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
       const topbar = `<div class="top"><h1>WIP · all locations</h1><button class="btn small" data-share="/wip/master/${esc(req.params.master)}/text" data-share-title="WIP — all locations">Share all</button></div>`;
       const body = `
 <div class="sub" style="margin-bottom:10px">${pool.length} location${pool.length === 1 ? '' : 's'} · ${today()}</div>
-<div class="tot"><div class="card"><span>In Progress</span><b>${whole(ipAll)}</b></div><div class="card"><span>Collecting</span><b>${whole(cAll)}</b></div></div>
+<div class="tot"><div class="card"><span>In Progress</span><b>${whole(ipAll)}</b></div><div class="card"><span>Collecting</span><b>${whole(cAll)}</b></div>
+<div class="card"><span>Total AR</span><b>${whole(arAll)}</b></div><div class="card"><span>Bank balances</span><b>${whole(bankAll)}</b>${bankMissing ? `<div class="meta">${bankMissing} location${bankMissing === 1 ? '' : 's'} not entered</div>` : ''}</div></div>
 <div class="actions" style="margin:0 0 14px"><button class="btn ghost" id="review-all">Review all AR notes</button><a class="btn ghost" href="/wip/master/${esc(req.params.master)}/text" target="_blank">Combined text</a></div>
 <div class="sub" style="margin-bottom:14px">“Review notes” reads each invoiced job's JobNimbus notes from the last 3 weeks and marks what is agreed or issued as Collecting${anthropic ? '' : ' — <b>ANTHROPIC_API_KEY is not set on the server, so this will fail until it is</b>'}.</div>
 <div id="review-out"></div>
@@ -391,14 +422,15 @@ document.addEventListener('change',async e=>{const i=e.target.closest('input[dat
   app.get('/wip/master/:master/text', requireMaster, async (req, res) => {
     try {
       const pool = await loadPool();
-      const parts = []; let ip = 0, c = 0;
+      const parts = []; let ip = 0, c = 0, ar = 0, bank = 0, bankMissing = 0;
       for (const p of pool) {
         const data = await loadLocation(p);
         const s = sectionText(data);
-        ip += s.ipTotal; c += s.cTotal; parts.push(s.text);
+        ip += s.ipTotal; c += s.cTotal; ar += data.arTotal; parts.push(s.text);
+        if (data.bank) bank += data.bank.balance; else bankMissing++;
       }
       const text = reportHeader('ALL LOCATIONS') + parts.join('\n\n\n') + '\n\n\n' + '='.repeat(40)
-        + `\nIN PROGRESS — TOTAL: ${whole(ip)}\nCOLLECTING — TOTAL: ${whole(c)}\n`;
+        + `\nIN PROGRESS — TOTAL: ${whole(ip)}\nCOLLECTING — TOTAL: ${whole(c)}\nTOTAL AR: ${whole(ar)}\nBANK BALANCES: ${whole(bank)}${bankMissing ? ` (${bankMissing} not entered)` : ''}\n`;
       await saveSnapshot(null, text, ip, c);
       res.type('text/plain; charset=utf-8').send(text);
     } catch (err) { res.status(502).type('text/plain').send(err.message); }

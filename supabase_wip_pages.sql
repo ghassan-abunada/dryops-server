@@ -32,6 +32,12 @@ create table if not exists public.wip_pool (
   added_at timestamptz not null default now()
 );
 
+-- 2026-09-21: owners enter their bank balance on the form; it prints on the WIP.
+alter table public.wip_pool
+  add column if not exists bank_balance numeric(12,2),
+  add column if not exists bank_balance_at timestamptz,
+  add column if not exists bank_balance_by text;
+
 -- One row per (location, job-or-custom entry). `key` is the jobs.id for synced
 -- jobs or 'custom:<uuid>' for owner-added lines. `category` null = excluded.
 create table if not exists public.wip_entries (
