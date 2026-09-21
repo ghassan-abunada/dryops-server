@@ -4565,6 +4565,9 @@ app.get('/admin/supplemental-billing/status', requireAuth, requireAdmin, async (
   });
 });
 
+// ── WIP report pages (owner forms + master link; see wip.js) ─────────────────
+require('./wip')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY });
+
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
 });
