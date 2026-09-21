@@ -4566,7 +4566,15 @@ app.get('/admin/supplemental-billing/status', requireAuth, requireAdmin, async (
 });
 
 // ── WIP report pages (owner forms + master link; see wip.js) ─────────────────
-require('./wip')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY });
+// The AR-notes review calls Claude; the SDK reads ANTHROPIC_API_KEY itself.
+// Left null when unset so the pages still work and the button explains why.
+const wipAnthropic = process.env.ANTHROPIC_API_KEY ? new (require('@anthropic-ai/sdk'))() : null;
+async function jnGetJson(pathAndQuery) {
+  const r = await fetch(`${JN_BASE}/${pathAndQuery}`, { headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' } });
+  if (!r.ok) throw new Error(`JobNimbus ${r.status} on ${pathAndQuery.split('?')[0]}`);
+  return r.json();
+}
+require('./wip')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet: jnGetJson, anthropic: wipAnthropic });
 
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
