@@ -6,6 +6,9 @@
 // to Supabase with the service key; the tables have RLS with no policies.
 
 const crypto = require('crypto');
+const Anthropic = require('@anthropic-ai/sdk');
+const { zodOutputFormat } = require('@anthropic-ai/sdk/helpers/zod');
+const { z } = require('zod');
 
 // Locations carry every record type they run (mitigation, contents, abatement,
 // rebuild, testing) — nothing is filtered by record type. Grouping is by status:
@@ -19,7 +22,9 @@ function typeTag(recordType) {
   return ' (' + (TYPE_TAG[recordType] || recordType) + ')';
 }
 
-module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY }) {
+// deps: jnGet(pathAndQuery) → parsed JobNimbus JSON; anthropic → an SDK client
+// (or null when the review feature is unconfigured). Credentials stay in server.js.
+module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet, anthropic }) {
   const sbHeaders = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
 
   async function sbGet(pathAndQuery) {
@@ -72,7 +77,7 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY }) 
   async function loadLocation(pool) {
     const locId = pool.location_id;
     const jobs = await sbGet(`jobs?location_id=eq.${locId}&or=(stage.is.null,stage.not.in.(Completed,Lost))&name=not.ilike.*test%20dummy*`
-      + `&select=id,number,name,status,stage,record_type,jn_created&order=jn_created.asc`);
+      + `&select=id,jn_id,number,name,status,stage,record_type,jn_created&order=jn_created.asc`);
     const due = {}; const invTotal = {};
     for (let i = 0; i < jobs.length; i += 80) {
       const ids = jobs.slice(i, i + 80).map(j => j.id).join(',');
@@ -99,7 +104,8 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY }) 
         due: due[j.id] != null ? Math.round(due[j.id] * 100) / 100 : null,
         inv_total: invTotal[j.id] != null ? Math.round(invTotal[j.id] * 100) / 100 : null,
         group, category, amount: e && e.amount != null ? Number(e.amount) : null,
-        note: (e && e.note) || '', custom: false,
+        note: (e && e.note) || '', custom: false, jn_id: j.jn_id,
+        updated_by: (e && e.updated_by) || null,
       };
     });
     for (const e of entries) {
@@ -297,6 +303,7 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
         const s = sectionText(data);
         ipAll += s.ipTotal; cAll += s.cTotal;
         const ownerUrl = `${req.protocol}://${req.get('host')}/wip/${p.token}`;
+        const lastReview = (await sbGet(`wip_reviews?location_id=eq.${p.location_id}&select=reviewed_at,jobs_reviewed,applied&order=reviewed_at.desc&limit=1`))[0];
         cards.push(`<div class="card" data-pool="${esc(p.id)}">
 <div class="row" style="justify-content:space-between">
   <div><input type="text" value="${esc(data.label)}" data-label="${esc(p.id)}" style="font-weight:700;font-size:16px;width:260px" title="Report heading"> <span class="meta">${esc(p.locations ? p.locations.name : '')}</span></div>
@@ -304,6 +311,8 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
   <a class="btn ghost small" href="${esc(ownerUrl)}" target="_blank">Open form</a><button class="btn ghost small" data-copy="${esc(ownerUrl)}">Copy owner link</button>
   <a class="btn ghost small" href="/wip/${esc(p.token)}/text" target="_blank">Text</a><button class="btn danger small" data-remove="${esc(p.id)}">Remove</button></div></div>
 <div class="meta" style="margin-top:6px">${data.lastUpdate ? `Owner last updated ${esc(data.lastUpdate.slice(0, 16).replace('T', ' '))}${data.lastBy ? ' by ' + esc(data.lastBy) : ''}` : 'No owner input yet — In Progress jobs are counted by default without values'}</div>
+<div class="meta">${lastReview ? `AI reviewed AR notes ${esc(lastReview.reviewed_at.slice(0, 16).replace('T', ' '))} — ${lastReview.jobs_reviewed} jobs, ${lastReview.applied} updated` : 'AR notes not yet reviewed by AI'}
+  · <button class="btn ghost small" data-review="${esc(p.id)}">Review AR notes</button></div>
 <details><summary>Show report</summary><pre>${esc(s.text)}</pre></details></div>`);
       }
       const options = locs.filter(l => !inPool.has(l.id)).map(l => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('');
@@ -311,13 +320,24 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
 <h1>WIP — all locations</h1><div class="sub">${pool.length} location${pool.length === 1 ? '' : 's'} in the pool · ${today()}</div>
 <div class="tot"><div class="card"><span>In Progress</span><b>${whole(ipAll)}</b></div><div class="card"><span>Collecting this week</span><b>${whole(cAll)}</b></div></div>
 <div class="row" style="margin-bottom:18px"><a class="btn" href="/wip/master/${esc(req.params.master)}/text" target="_blank">Generate combined WIP</a>
-<select id="add-loc" style="min-width:260px"><option value="">Add a location to the pool…</option>${options}</select><button class="btn ghost" id="add-btn">Add</button></div>
+<select id="add-loc" style="min-width:260px"><option value="">Add a location to the pool…</option>${options}</select><button class="btn ghost" id="add-btn">Add</button>
+<button class="btn ghost" id="review-all">Review all AR notes</button></div>
+<div class="sub" style="margin:-10px 0 16px">“Review AR notes” reads each invoiced job's JobNimbus notes from the last 3 weeks and marks what is agreed or issued as Collecting${anthropic ? '' : ' — <b>ANTHROPIC_API_KEY is not set on the server, so this will fail until it is</b>'}.</div>
+<div id="review-out"></div>
 ${cards.join('') || '<div class="card">No locations yet — add one above, then send the owner link.</div>'}`;
       const script = `
 const M=${json(req.params.master)};
 document.getElementById('add-btn').onclick=async()=>{const id=document.getElementById('add-loc').value;if(!id)return;const r=await fetch('/wip/master/'+M+'/locations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location_id:id})});if(r.ok)location.reload();else alert(await r.text())};
 document.addEventListener('click',async e=>{const c=e.target.closest('[data-copy]');if(c){try{await navigator.clipboard.writeText(c.dataset.copy);c.textContent='Copied ✓';setTimeout(()=>c.textContent='Copy owner link',1500)}catch(x){prompt('Copy this link',c.dataset.copy)}return}
 const r=e.target.closest('[data-remove]');if(r){if(!confirm('Remove this location from the pool? Owner values are kept.'))return;const x=await fetch('/wip/master/'+M+'/locations/'+r.dataset.remove,{method:'DELETE'});if(x.ok)location.reload();else alert(await x.text())}});
+async function runReview(body,btn){const out=document.getElementById('review-out');const label=btn.textContent;btn.disabled=true;btn.textContent='Reviewing… (30–90s per location)';
+try{const r=await fetch('/wip/master/'+M+'/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok)throw new Error(j.error||r.statusText);
+out.innerHTML=j.results.map(x=>'<div class="card"><b>'+esc(x.label)+'</b> — '+x.jobs_reviewed+' AR jobs reviewed, '+x.applied+' updated'+(x.skipped_owner.length?', '+x.skipped_owner.length+' left as the owner set them':'')+'<table><thead><tr><th>Job</th><th>Decision</th><th style="text-align:right">Amount</th><th>Why</th></tr></thead><tbody>'
++x.jobs.map(d=>'<tr><td>'+esc(d.name)+(d.owner_set?' <span class="meta">(owner-set, not changed)</span>':'')+'</td><td>'+esc(d.decision)+'</td><td style="text-align:right">'+(d.amount!=null?'$'+Number(d.amount).toLocaleString('en-US',{minimumFractionDigits:2}):'')+'</td><td class="meta">'+esc(d.reason)+'</td></tr>').join('')+'</tbody></table></div>').join('')+'<div class="sub">Totals above are stale until you reload. <a href="#" onclick="location.reload();return false">Reload</a></div>';
+out.scrollIntoView({behavior:'smooth'})}catch(e){alert('Review failed: '+e.message)}finally{btn.disabled=false;btn.textContent=label}}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+document.getElementById('review-all').onclick=e=>runReview({all:true},e.target);
+document.addEventListener('click',e=>{const b=e.target.closest('button[data-review]');if(b)runReview({pool_id:b.dataset.review},b)});
 document.addEventListener('change',async e=>{const i=e.target.closest('input[data-label]');if(!i)return;await fetch('/wip/master/'+M+'/locations/'+i.dataset.label,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:i.value})})});`;
       res.send(page('WIP — all locations', body, script));
     } catch (err) { console.error('[wip master]', err.message); res.status(502).send(page('Error', `<p>${esc(err.message)}</p>`)); }
@@ -363,5 +383,131 @@ document.addEventListener('change',async e=>{const i=e.target.closest('input[dat
       await sbWrite('DELETE', `wip_pool?id=eq.${encodeURIComponent(req.params.id)}`, undefined, 'return=minimal');
       res.json({ ok: true });
     } catch (err) { res.status(502).send(err.message); }
+  });
+
+  // ── AI review of AR notes ───────────────────────────────────────────────────
+  // Pulls each invoiced job's recent JobNimbus activity and asks Claude which
+  // ones are actually collectible this week; writes the answer into wip_entries
+  // as 'ai-review' rows. Owner-edited rows are never overwritten.
+  const REVIEW_MODEL = 'claude-opus-5';
+  const REVIEW_LOOKBACK_DAYS = 21;
+  const NOISE_TYPES = new Set(['Assigned Job', 'Unassigned Job', 'Assigned Contact', 'Text Message', 'Attachment deleted', 'Related to task', 'Task Completed', 'Automation']);
+
+  const ReviewSchema = z.object({
+    jobs: z.array(z.object({
+      job_number: z.string(),
+      decision: z.enum(['collecting', 'not_yet', 'received']),
+      amount: z.number().nullable(),
+      reason: z.string(),
+    })),
+  });
+
+  const REVIEW_SYSTEM = `You review collections notes for a water-damage restoration company and decide, per invoiced job, whether payment can realistically be collected in the coming week.
+
+Decisions:
+- "collecting": within the last ~3 weeks the notes show payment is agreed or issued — a carrier confirmed it issued/mailed a check or agreed to a specific amount, the customer confirmed they have the check or will pay this week, or a check is on its way to the office. amount = the agreed/issued amount if one is stated (minus anything already paid), otherwise the balance due.
+- "received": the notes say the check was received, deposited, or payment posted, but the job still shows a balance. amount = what was received. (Nobody has logged the payment yet.)
+- "not_yet": anything else — invoice under review, comparative or line items disputed, claim denied, waiting on adjuster/reviewer with no answer, attorney, public adjuster or appraisal, monthly payment plan, bank investigation, customer unresponsive, or a promised check that is now more than 3 weeks old with no follow-up confirming it.
+
+Be conservative: silence is "not_yet". Never invent amounts. reason: one short sentence (max 120 characters) naming the payer and the date of the key note. Return one entry for every job you were given.`;
+
+  async function jnActivities(jnIds, sinceMs) {
+    const out = [];
+    for (let i = 0; i < jnIds.length; i += 15) {
+      const filter = JSON.stringify({ must: [{ terms: { 'related.id': jnIds.slice(i, i + 15) } }] });
+      let from = 0;
+      for (;;) {
+        const q = new URLSearchParams({ filter, size: '500', from: String(from) });
+        const d = await jnGet(`activities?${q}`);
+        const rows = d.activity || d.results || [];
+        for (const a of rows) if ((a.date_created || 0) * 1000 >= sinceMs) out.push(a);
+        if (rows.length < 500) break;
+        from += 500;
+      }
+    }
+    return out;
+  }
+  function plainNote(s) {
+    return String(s || '').replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#x2F;/g, '/')
+      .replace(/\s+/g, ' ').trim();
+  }
+
+  async function reviewLocation(pool, opts = {}) {
+    const data = await loadLocation(pool);
+    const ar = data.rows.filter(r => r.group === 'ar' && !r.custom && r.jn_id);
+    const since = Date.now() - REVIEW_LOOKBACK_DAYS * 86400000;
+    const acts = ar.length ? await jnActivities(ar.map(r => r.jn_id), since) : [];
+    const byJn = {};
+    for (const a of acts) {
+      if (NOISE_TYPES.has(a.record_type_name)) continue;
+      const note = plainNote(a.note);
+      if (!note) continue;
+      const when = new Date((a.date_created || 0) * 1000).toISOString().slice(0, 10);
+      for (const rel of a.related || []) {
+        if (!byJn[rel.id]) byJn[rel.id] = [];
+        byJn[rel.id].push({ when, type: a.record_type_name, note: note.slice(0, 320) });
+      }
+    }
+    const jobs = ar.map(r => ({
+      job_number: r.number, name: r.name, status: r.status, created: r.created,
+      invoice_total: r.inv_total, balance_due: r.due,
+      paid_so_far: r.inv_total != null && r.due != null ? Math.round((r.inv_total - r.due) * 100) / 100 : null,
+      notes: (byJn[r.jn_id] || []).sort((a, b) => b.when.localeCompare(a.when)).slice(0, 12),
+    }));
+    if (opts.dry) return { label: data.label, jobs_reviewed: jobs.length, jobs };
+    if (!anthropic) throw new Error('ANTHROPIC_API_KEY is not set on the server');
+    if (!jobs.length) return { label: data.label, jobs_reviewed: 0, applied: 0, skipped_owner: [], jobs: [] };
+
+    const today = new Date().toISOString().slice(0, 10);
+    const response = await anthropic.messages.parse({
+      model: REVIEW_MODEL,
+      max_tokens: 16000,
+      system: REVIEW_SYSTEM,
+      output_config: { format: zodOutputFormat(ReviewSchema), effort: 'medium' },
+      messages: [{ role: 'user', content: `Today is ${today}. Location: ${data.label}.\n\nJobs (with recent JobNimbus notes, newest first):\n${JSON.stringify(jobs, null, 1)}` }],
+    });
+    if (response.stop_reason === 'refusal' || !response.parsed_output) {
+      throw new Error(`model returned no decision (${response.stop_reason})`);
+    }
+    const decided = Object.fromEntries(response.parsed_output.jobs.map(d => [d.job_number, d]));
+
+    const writes = []; const results = []; const skippedOwner = [];
+    for (const r of ar) {
+      const d = decided[r.number] || { decision: 'not_yet', amount: null, reason: 'no decision returned' };
+      const ownerSet = !!(r.updated_by && !/^(ai-review|seed)/.test(r.updated_by));
+      let amount = d.decision === 'collecting' ? (d.amount != null ? Math.round(d.amount * 100) / 100 : r.due) : null;
+      if (amount != null && r.due != null && amount > r.due) amount = r.due;
+      results.push({ job_number: r.number, name: r.name, decision: d.decision, amount: d.decision === 'collecting' ? amount : d.amount, reason: d.reason.slice(0, 160), owner_set: ownerSet });
+      if (ownerSet) { skippedOwner.push(r.number); continue; }
+      writes.push({
+        location_id: pool.location_id, key: r.key,
+        category: d.decision === 'collecting' ? 'collecting' : null,
+        amount,
+        note: d.decision === 'received' ? `received per notes — post the payment in JobNimbus (${d.reason.slice(0, 90)})` : d.reason.slice(0, 140),
+        updated_by: 'ai-review', updated_at: new Date().toISOString(),
+      });
+    }
+    if (writes.length) await sbWrite('POST', 'wip_entries?on_conflict=location_id,key', writes, 'resolution=merge-duplicates,return=minimal');
+    await sbWrite('POST', 'wip_reviews', {
+      location_id: pool.location_id, model: REVIEW_MODEL, jobs_reviewed: jobs.length, applied: writes.length,
+      result: { results, usage: response.usage },
+    }, 'return=minimal');
+    return { label: data.label, jobs_reviewed: jobs.length, applied: writes.length, skipped_owner: skippedOwner, jobs: results };
+  }
+
+  app.post('/wip/master/:master/review', requireMaster, async (req, res) => {
+    try {
+      const b = req.body || {};
+      const pool = await loadPool();
+      const targets = b.all ? pool : pool.filter(p => p.id === String(b.pool_id || ''));
+      if (!targets.length) return res.status(400).json({ error: 'pool_id required' });
+      const results = [];
+      for (const p of targets) results.push(await reviewLocation(p, { dry: !!b.dry }));
+      res.json({ results });
+    } catch (err) {
+      console.error('[wip review]', err.message);
+      res.status(err instanceof Anthropic.APIError ? 502 : 500).json({ error: err.message });
+    }
   });
 };

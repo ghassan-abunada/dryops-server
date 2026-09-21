@@ -59,6 +59,20 @@ create table if not exists public.wip_snapshots (
 );
 create index if not exists wip_snapshots_location_idx on public.wip_snapshots (location_id, generated_at desc);
 
+-- One row per "Review AR notes" run (per location): what Claude decided, so the
+-- master page can show when a location was last reviewed and audit changes.
+create table if not exists public.wip_reviews (
+  id uuid primary key default gen_random_uuid(),
+  location_id uuid not null references public.locations(id) on delete cascade,
+  reviewed_at timestamptz not null default now(),
+  model text,
+  jobs_reviewed integer,
+  applied integer,
+  result jsonb not null
+);
+create index if not exists wip_reviews_location_idx on public.wip_reviews (location_id, reviewed_at desc);
+alter table public.wip_reviews   enable row level security;
+
 alter table public.wip_config    enable row level security;
 alter table public.wip_pool      enable row level security;
 alter table public.wip_entries   enable row level security;
