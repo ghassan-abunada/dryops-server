@@ -107,3 +107,8 @@ server.js for eligibility rules and dedupe logic.
 - In-Storage flag webhook: `POST /webhooks/jobnimbus/storage-flag?token=<JN_WEBHOOK_TOKEN>&set=on|off`
   — the JN On/Off automations point here (instead of Zapier) and the server
   flips cf_boolean_1; idempotent, skips already-in-state jobs.
+- One-click catch-up links: `GET /supp/catchup?job=&months=&sig=` renders a
+  confirm page; its button POSTs the same signed params and creates one Draft
+  with a line per month at the job's Supplemental Price. sig =
+  HMAC-SHA256(JN_WEBHOOK_TOKEN, "jnid|months") hex[0..32); idempotent via the
+  catch-up external_id. Used by owner verify-and-catch-up emails.
