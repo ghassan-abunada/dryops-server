@@ -206,6 +206,10 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
   .sheet>div{background:#fff;border-radius:18px 18px 0 0;padding:16px 16px calc(16px + env(safe-area-inset-bottom));width:100%;max-width:720px;max-height:85vh;overflow:auto}
   .sheet textarea{height:180px;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;margin:10px 0}
   .list{border-top:1px solid var(--line)}.list>div{padding:10px 0;border-bottom:1px solid var(--line)}
+  .steps ol{margin:8px 0 10px;padding-left:22px}.steps li{margin:6px 0;line-height:1.4}
+  .lbl{display:block;font-size:13px;font-weight:600;color:var(--mut);margin:14px 0 6px;text-transform:uppercase;letter-spacing:.05em}
+  .sec-hint{color:var(--mut);font-size:13.5px;margin:-2px 2px 10px;line-height:1.4}
+  .job.need{border-color:#e0b04a;background:#fffbf0}.need-txt{color:#9a6210;font-weight:600}
   @media(min-width:600px){.actions{grid-template-columns:repeat(4,1fr)}}
   `;
   const ICON = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#1b6e5a"/><text x="32" y="41" font-family="-apple-system,Helvetica,Arial" font-weight="700" font-size="22" text-anchor="middle" fill="#fff">WIP</text></svg>');
@@ -241,19 +245,33 @@ document.addEventListener('click',e=>{const b=e.target.closest('[data-share]');i
       const textUrl = `/wip/${esc(pool.token)}/text`;
       const topbar = `<div class="top"><h1>${esc(data.label)} · WIP</h1><button class="btn small" data-share="${textUrl}" data-share-title="${esc(data.label)} WIP">Share</button></div>`;
       const body = `
-<div class="tot"><div class="card"><span>In Progress</span><b id="t-ip">$0</b><div class="meta" id="n-ip"></div></div>
-<div class="card"><span>Collecting</span><b id="t-col">$0</b><div class="meta" id="n-col"></div></div>
-<div class="card"><span>Total AR</span><b>${whole(data.arTotal)}</b><div class="meta">all open invoices</div></div>
-<div class="card"><span>Bank balance</span><div class="amt-row" style="margin-top:4px"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" id="bank" value="${data.bank ? esc(data.bank.balance) : ''}" placeholder="enter"></div>
-<div class="meta" id="bank-meta">${data.bank && data.bank.at ? `as of ${esc(new Date(data.bank.at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' }))}${data.bank.by ? ' · ' + esc(data.bank.by) : ''}` : 'not entered yet'}</div></div></div>
-<div class="sub" style="margin-bottom:10px">Put a value on each job in progress, enter the amount you expect to collect on each invoice this week (leave blank if nothing yet), and enter today's bank balance. Everything saves as you go.</div>
-<input type="text" id="who" placeholder="Your name (so we know who updated)" autocomplete="name">
+<div class="card steps"><b>What to do — about 5 minutes</b>
+<ol>
+<li>Type your <b>name</b> below.</li>
+<li><b>Jobs we're working on:</b> type what each job is worth. A rough guess is fine.</li>
+<li><b>Money coming in this week:</b> for each invoice, type how much you expect to actually get paid <b>this week</b>. Leave it blank if nothing.</li>
+<li>Type <b>today's bank balance</b>.</li>
+</ol>
+<div class="sub">Everything saves by itself as you type. When you're finished, tap <b>Done — send it</b> at the bottom.</div></div>
+<label class="lbl" for="who">1. Your name</label>
+<input type="text" id="who" placeholder="Type your name" autocomplete="name">
+<div class="tot" style="margin-top:14px"><div class="card"><span>Jobs we're working on</span><b id="t-ip">$0</b><div class="meta" id="n-ip"></div></div>
+<div class="card"><span>Money coming in this week</span><b id="t-col">$0</b><div class="meta" id="n-col"></div></div>
+<div class="card"><span>Total owed to us</span><b>${whole(data.arTotal)}</b><div class="meta">all unpaid invoices</div></div>
+<div class="card"><span>4. Money in the bank today</span><div class="amt-row" style="margin-top:4px"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" id="bank" value="${data.bank ? esc(data.bank.balance) : ''}" placeholder="type it here"></div>
+<div class="meta" id="bank-meta">${data.bank && data.bank.at ? `entered ${esc(new Date(data.bank.at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' }))}${data.bank.by ? ' by ' + esc(data.bank.by) : ''}` : '<span class="need-txt">please type today\'s balance</span>'}</div></div></div>
 <div id="sections"></div>
-<div class="bar"><div class="status" id="status">Loaded</div><button class="btn ghost small" id="add-btn">+ Add</button><a class="btn ghost small" href="${textUrl}" target="_blank">Text</a></div>
-<div class="sheet" id="add-sheet"><div><b>Add a line that isn't in JobNimbus</b><div class="actions" style="margin-top:12px"><button class="btn" onclick="addCustom('in_progress')">In-progress job</button><button class="btn ghost" onclick="addCustom('collecting')">Collecting item</button></div></div></div>`;
+<div class="bar"><div class="status" id="status">Loaded</div><button class="btn ghost small" id="add-btn">+ Add a job</button><button class="btn" data-share="${textUrl}" data-share-title="${esc(data.label)} WIP">Done — send it</button></div>
+<div class="sheet" id="add-sheet"><div><b>Add a job that isn't on the list</b><div class="sub" style="margin-top:6px">Only for jobs that aren't in JobNimbus yet.</div><div class="actions" style="margin-top:12px"><button class="btn" onclick="addCustom('in_progress')">A job we're working on</button><button class="btn ghost" onclick="addCustom('collecting')">Money coming in this week</button></div></div></div>`;
       const script = `
 const TOKEN=${json(pool.token)};let ROWS=${json(data.rows)};
-const GROUPS=[['in_progress','In progress',true],['ar','Invoiced — enter what you expect to collect this week',true],['billing','Invoice created / in storage — enter a value to count as in progress',false],['other','Leads, estimating, holds',false],['custom','Added by you',true],['hidden','Hidden — not counted',false]];
+const GROUPS=[
+['in_progress','2. Jobs we\\'re working on',true,'Type what each job is worth. A rough guess is fine. If we are NOT working on a job, tap "hide it".'],
+['ar','3. Money coming in this week',true,'These invoices are sent and unpaid. Type how much you expect to actually get paid THIS WEEK. Leave blank if nothing yet.'],
+['billing','Finished, not sent to insurance yet',false,'You can usually skip these. Type a value only if you want it counted as a job we\\'re working on.'],
+['other','Leads and jobs on hold',false,'You can usually skip these.'],
+['custom','Jobs you added',true,'Type the name and what it\\'s worth.'],
+['hidden','Hidden — not counted',false,'Tap "count it" to put a job back.']];
 // Where a card is shown: in-progress jobs the owner hid go to "Hidden".
 function viewGroup(r){return r.group==='in_progress'&&!r.category?'hidden':r.group}
 // Bucket follows the section: invoiced jobs count as Collecting only when an
@@ -265,21 +283,24 @@ who.addEventListener('change',()=>{try{localStorage.setItem('wip_who',who.value)
 const OPEN={};try{Object.assign(OPEN,JSON.parse(localStorage.getItem('wip_open')||'{}'))}catch(e){}
 function fmt(n){return '$'+Math.round(n||0).toLocaleString('en-US')}
 function amtOf(r){if(r.category==='collecting')return r.amount!=null?r.amount:(r.due||0);return r.amount||0}
-function totals(){let ip=0,c=0,ni=0,nc=0;for(const r of ROWS){if(r.category==='in_progress'){ip+=Number(r.amount||0);ni++}if(r.category==='collecting'){c+=Number(amtOf(r));nc++}}
-document.getElementById('t-ip').textContent=fmt(ip);document.getElementById('t-col').textContent=fmt(c);document.getElementById('n-ip').textContent=ni+' job'+(ni===1?'':'s');document.getElementById('n-col').textContent=nc+' item'+(nc===1?'':'s')}
+function totals(){let ip=0,c=0,ni=0,nc=0,need=0;for(const r of ROWS){if(r.category==='in_progress'){ip+=Number(r.amount||0);ni++;if(r.amount==null)need++}if(r.category==='collecting'){c+=Number(amtOf(r));nc++}}
+document.getElementById('t-ip').textContent=fmt(ip);document.getElementById('t-col').textContent=fmt(c);
+document.getElementById('n-ip').innerHTML=ni+' job'+(ni===1?'':'s')+(need?' · <span class="need-txt">'+need+' still need a number</span>':ni?' · all have numbers ✓':'');
+document.getElementById('n-col').textContent=nc?nc+' invoice'+(nc===1?'':'s'):'nothing entered yet'}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function cardClass(r){return 'job '+(r.category==='in_progress'?'is-ip':r.category==='collecting'?'is-col':'')}
-function jobCard(r){const vg=viewGroup(r);const ph=vg==='ar'?(r.due!=null?'expected this week (due '+r.due.toFixed(2)+')':'expected this week'):vg==='billing'||vg==='other'?'value, if in progress':'estimated value';
-const link=vg==='in_progress'&&!r.custom?' · <a href="#" data-hide="'+esc(r.key)+'">hide</a>':vg==='hidden'?' · <a href="#" data-restore="'+esc(r.key)+'">count as in progress</a>':r.custom?' · <a href="#" data-del="'+esc(r.key)+'">remove</a>':'';
-return '<div class="'+cardClass(r)+'" data-card="'+esc(r.key)+'"><div class="job-head">'+(r.custom?'<input type="text" class="nm" value="'+esc(r.name)+'" data-k="'+esc(r.key)+'" data-f="custom_name" placeholder="Job or customer name">':'<div class="nm">'+esc(r.name)+'</div>')
-+'<div class="meta">'+(r.number?'#'+esc(r.number)+' · ':'')+esc(r.status)+(r.record_type&&r.record_type!=='Mitigation'?' · '+esc(r.record_type):'')+(r.created?' · '+esc(r.created):'')+(r.due!=null?' · <b>due '+fmt(r.due)+'</b>':'')+link+'</div></div>'
+function cardNeeds(r){return viewGroup(r)==='in_progress'&&r.category==='in_progress'&&r.amount==null}
+function jobCard(r){const vg=viewGroup(r);const ph=vg==='ar'?'How much this week?':vg==='billing'||vg==='other'?'Leave blank, or type a value':vg==='custom'&&r.category==='collecting'?'How much this week?':'What is this job worth?';
+const link=vg==='in_progress'&&!r.custom?' · <a href="#" data-hide="'+esc(r.key)+'">not working on this? hide it</a>':vg==='hidden'?' · <a href="#" data-restore="'+esc(r.key)+'">count it</a>':r.custom?' · <a href="#" data-del="'+esc(r.key)+'">remove</a>':'';
+return '<div class="'+cardClass(r)+(cardNeeds(r)?' need':'')+'" data-card="'+esc(r.key)+'"><div class="job-head">'+(r.custom?'<input type="text" class="nm" value="'+esc(r.name)+'" data-k="'+esc(r.key)+'" data-f="custom_name" placeholder="Customer name">':'<div class="nm">'+esc(r.name)+'</div>')
++'<div class="meta">'+(r.number?'#'+esc(r.number)+' · ':'')+esc(r.status)+(r.record_type&&r.record_type!=='Mitigation'?' · '+esc(r.record_type):'')+(r.created?' · started '+esc(r.created):'')+(r.due!=null?' · <b>they owe '+fmt(r.due)+'</b>':'')+link+'</div></div>'
 +(vg==='hidden'?'':'<div class="amt-row"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" data-k="'+esc(r.key)+'" data-f="amount" value="'+(r.amount!=null?r.amount:'')+'" placeholder="'+esc(ph)+'"></div>'
-+'<input type="text" class="nt" data-k="'+esc(r.key)+'" data-f="note" value="'+esc(r.note)+'" placeholder="Note (optional)">')+'</div>'}
++(r.note?'<input type="text" class="nt" data-k="'+esc(r.key)+'" data-f="note" value="'+esc(r.note)+'" placeholder="Note">':'<a href="#" class="meta" data-note="'+esc(r.key)+'" style="display:inline-block;margin-top:8px">+ add a note</a>'))+'</div>'}
 function render(){const host=document.getElementById('sections');host.innerHTML='';
-for(const [g,title,dflt] of GROUPS){const rows=ROWS.filter(r=>viewGroup(r)===g);if(!rows.length)continue;
+for(const [g,title,dflt,hint] of GROUPS){const rows=ROWS.filter(r=>viewGroup(r)===g);if(!rows.length)continue;
 const open=OPEN[g]!==undefined?OPEN[g]:dflt;
 const sec=document.createElement('details');sec.className='sec';sec.open=open;sec.dataset.g=g;
-sec.innerHTML='<summary><h2>'+esc(title)+'</h2><span class="count">'+rows.length+'</span></summary>'+rows.map(jobCard).join('');
+sec.innerHTML='<summary><h2>'+esc(title)+'</h2><span class="count">'+rows.length+'</span></summary><div class="sec-hint">'+esc(hint)+'</div>'+rows.map(jobCard).join('');
 sec.addEventListener('toggle',()=>{OPEN[g]=sec.open;try{localStorage.setItem('wip_open',JSON.stringify(OPEN))}catch(e){}});
 host.appendChild(sec)}totals()}
 const bankEl=document.getElementById('bank');let bankTimer=null;
@@ -291,10 +312,11 @@ const dirty=new Map();let timer=null;const st=document.getElementById('status');
 function queue(key){const r=ROWS.find(x=>x.key===key);dirty.set(key,{key,category:r.category,amount:r.amount,note:r.note,custom_name:r.custom?r.name:undefined});st.textContent='Saving…';st.className='status';clearTimeout(timer);timer=setTimeout(flush,700)}
 async function flush(){const entries=[...dirty.values()];dirty.clear();if(!entries.length)return;
 try{const r=await fetch('/wip/'+TOKEN+'/entries',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entries,updated_by:who.value||null})});if(!r.ok)throw new Error(await r.text());st.textContent='Saved ✓ '+new Date().toLocaleTimeString();st.className='status ok'}catch(e){st.textContent='Save failed — '+e.message;st.className='status err';entries.forEach(x=>dirty.set(x.key,x))}}
-document.addEventListener('click',e=>{const h=e.target.closest('a[data-hide],a[data-restore]');if(h){e.preventDefault();const key=h.dataset.hide||h.dataset.restore;const r=ROWS.find(x=>x.key===key);r.category=h.dataset.hide?null:'in_progress';if(h.dataset.hide)OPEN.hidden=true;render();queue(r.key);return}
+document.addEventListener('click',e=>{const n=e.target.closest('a[data-note]');if(n){e.preventDefault();const inp=document.createElement('input');inp.type='text';inp.className='nt';inp.dataset.k=n.dataset.note;inp.dataset.f='note';inp.placeholder='Note';n.replaceWith(inp);inp.focus();return}
+const h=e.target.closest('a[data-hide],a[data-restore]');if(h){e.preventDefault();const key=h.dataset.hide||h.dataset.restore;const r=ROWS.find(x=>x.key===key);r.category=h.dataset.hide?null:'in_progress';if(h.dataset.hide)OPEN.hidden=true;render();queue(r.key);return}
 const d=e.target.closest('a[data-del]');if(d){e.preventDefault();if(!confirm('Remove this line?'))return;fetch('/wip/'+TOKEN+'/entries/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:d.dataset.del})}).then(()=>{ROWS=ROWS.filter(x=>x.key!==d.dataset.del);render()})}});
 document.addEventListener('input',e=>{const i=e.target;if(!i.dataset||!i.dataset.f)return;const r=ROWS.find(x=>x.key===i.dataset.k);if(!r)return;
-if(i.dataset.f==='amount'){r.amount=i.value===''?null:Number(i.value);r.category=deriveCategory(r);const card=i.closest('[data-card]');if(card)card.className=cardClass(r);totals()}else if(i.dataset.f==='note'){r.note=i.value}else if(i.dataset.f==='custom_name'){r.name=i.value}queue(r.key)});
+if(i.dataset.f==='amount'){r.amount=i.value===''?null:Number(i.value);r.category=deriveCategory(r);const card=i.closest('[data-card]');if(card)card.className=cardClass(r)+(cardNeeds(r)?' need':'');totals()}else if(i.dataset.f==='note'){r.note=i.value}else if(i.dataset.f==='custom_name'){r.name=i.value}queue(r.key)});
 function addCustom(cat){document.getElementById('add-sheet').classList.remove('open');const key='custom:'+crypto.randomUUID();ROWS.push({key,name:'',number:null,status:'Added by you',created:null,due:null,group:'custom',category:cat,amount:null,note:'',custom:true});OPEN.custom=true;render();queue(key);
 const el=document.querySelector('input[data-k="'+key+'"][data-f="custom_name"]');if(el){el.scrollIntoView({block:'center'});el.focus()}}
 window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
