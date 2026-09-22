@@ -4245,6 +4245,20 @@ const SUPP_NOTIFY_OVERRIDES = new Map(
     .filter(([k, v]) => k && v));
 const SUPP_JOB_INVOICES_URL = (jnid) => `https://app.jobnimbus.com/job/${jnid}/payments-and-invoices`;
 
+// Per-location recipient overrides from Supabase (edited on the admin
+// dashboard). A DB row REPLACES the auto-resolved reps for that location and
+// takes precedence over the SUPP_NOTIFY_OVERRIDES env fallback. On a Supabase
+// failure a notify run degrades to env-only instead of dying.
+async function loadSuppEmailOverrides() {
+  try {
+    const rows = await sbGet('supp_email_overrides?select=jn_location_id,email') || [];
+    return new Map(rows.map(r => [String(r.jn_location_id), String(r.email || '').trim()]).filter(([, e]) => e));
+  } catch (err) {
+    console.error('[supp-billing] override load failed, using env map:', err.message);
+    return new Map();
+  }
+}
+
 // Per-location rep tally over a pool of jobs (locId → Map(repId → count)).
 function suppRepTally(pool) {
   const tally = new Map();
@@ -4260,10 +4274,14 @@ function suppRepTally(pool) {
 
 // Recipients for a location (owner 2026-08-26: ALL assigned reps, not just the
 // dominant one): every ACTIVE rep with an email who appears as sales_rep on
-// the location's in-storage jobs, plus the override address if configured.
-// Fallback when that leaves nobody: the most common rep of any kind, so the
-// email at least goes to whatever address is on file.
-function suppResolveRecipients(locId, jobs, repTally, users) {
+// the location's in-storage jobs, plus the env override address if configured.
+// A DB override (dashboard-edited, passed as `dbOverrides`) REPLACES all of
+// that — owner decision 2026-09-22: what you set on the dashboard is exactly
+// who gets the email. Fallback when nothing matches: the most common rep of
+// any kind, so the email at least goes to whatever address is on file.
+function suppResolveRecipients(locId, jobs, repTally, users, dbOverrides) {
+  const dbEmail = dbOverrides && locId != null ? dbOverrides.get(String(locId)) : null;
+  if (dbEmail) return [{ name: 'location override', email: dbEmail }];
   const ids = new Set();
   const t = locId != null ? repTally.get(locId) : null;
   if (t) for (const id of t.keys()) ids.add(id);
@@ -4329,6 +4347,8 @@ async function suppNotifyReps(created, monthLabel, eligiblePool) {
   let users;
   try { users = await jnFetchAccountUsers(); }
   catch (err) { console.error('[supp-billing] user lookup for notifications failed:', err.message); return [{ ok: false, error: err.message }]; }
+  // dashboard-edited per-location recipients — replace semantics
+  const dbOverrides = await loadSuppEmailOverrides();
 
   const repTally = suppRepTally(eligiblePool);
   const locNames = await suppLocationNames(created.map(c => c.location_id));
@@ -4341,7 +4361,7 @@ async function suppNotifyReps(created, monthLabel, eligiblePool) {
   }
   for (const [locId, jobs] of byLoc) {
     const locName = locId !== 'none' ? (locNames.get(locId) || `location ${locId}`) : 'unassigned location';
-    const recipients = suppResolveRecipients(locId === 'none' ? null : locId, jobs, repTally, users);
+    const recipients = suppResolveRecipients(locId === 'none' ? null : locId, jobs, repTally, users, dbOverrides);
     if (!recipients.length) {
       results.push({ location: locName, recipients: [], jobs: jobs.length, ok: false, error: 'no rep email on file' });
       console.warn(`[supp-billing] no rep email for ${locName} — ${jobs.length} job(s) unnotified`);
@@ -4435,6 +4455,8 @@ function suppPrepEmailHtml(locName, monthLabel, billableJobs, npJobs) {
 // per-location results array for the run log.
 async function suppSendPrepReminders(monthLabel) {
   const users = await jnFetchAccountUsers();
+  // dashboard-edited per-location recipients — replace semantics
+  const dbOverrides = await loadSuppEmailOverrides();
   const { eligible, noPrice } = await suppFetchEligible();
   const pool = eligible.concat(noPrice);
   const repTally = suppRepTally(pool);
@@ -4452,7 +4474,7 @@ async function suppSendPrepReminders(monthLabel) {
     const billable = jobs.filter(j => Number(j.cf_double_1) > 0);
     const npJobs = jobs.filter(j => !(Number(j.cf_double_1) > 0))
       .sort((a, b) => String(a.name).localeCompare(String(b.name)));
-    const recipients = suppResolveRecipients(locId, jobs, repTally, users);
+    const recipients = suppResolveRecipients(locId, jobs, repTally, users, dbOverrides);
     if (!recipients.length) {
       results.push({ location: locName, recipients: [], jobs: jobs.length, ok: false, error: 'no rep email on file' });
       continue;
@@ -4696,6 +4718,21 @@ async function jnGetJson(pathAndQuery) {
   return r.json();
 }
 require('./wip')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet: jnGetJson, anthropic: wipAnthropic });
+
+// Supplemental-billing admin dashboard (master-link gated, see supp-admin.js).
+// lastSuppRun/suppRunActive are mutating lets — passed as getters.
+require('./supp-admin')(app, {
+  SUPABASE_URL, SUPABASE_SERVICE_KEY,
+  suppFetchEligible, jnFetchAccountUsers, suppRepTally,
+  suppResolveRecipients, suppLocationNames, loadSuppEmailOverrides,
+  denverNextFirst,
+  config: {
+    SUPP_BILLING_LIVE, SUPP_BILLING_DAY, SUPP_REMINDER_DAYS,
+    SUPP_EXCLUDED_STATUSES, envOverrides: SUPP_NOTIFY_OVERRIDES,
+  },
+  getLastSuppRun: () => lastSuppRun,
+  getSuppRunActive: () => suppRunActive,
+});
 
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);

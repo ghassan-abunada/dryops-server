@@ -112,3 +112,10 @@ server.js for eligibility rules and dedupe logic.
   with a line per month at the job's Supplemental Price. sig =
   HMAC-SHA256(JN_WEBHOOK_TOKEN, "jnid|months") hex[0..32); idempotent via the
   catch-up external_id. Used by owner verify-and-catch-up emails.
+- Admin dashboard: `GET /supp/admin/<master_token>` (supp-admin.js, wip.js
+  pattern; token in supp_config). Insights tab (drafts by month/location, $,
+  upcoming run, placeholders, skipped/errors, email delivery, run history) +
+  Location emails tab editing supp_email_overrides — a DB row REPLACES the
+  auto-detected reps for that location (loadSuppEmailOverrides, threaded into
+  suppResolveRecipients as 5th arg; env SUPP_NOTIFY_OVERRIDES is fallback only).
+  Live JN pool cached 5 min (?refresh=1). Schema: supabase_supp_admin.sql.
