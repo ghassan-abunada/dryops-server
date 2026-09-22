@@ -975,6 +975,127 @@ if (SUPABASE_SERVICE_KEY) {
   setInterval(reconcileCalls, CALLS_RECONCILE_INTERVAL_MS);
 }
 
+// ── One-click catch-up links ─────────────────────────────────────────────────
+// Emails to owners carry a "Catch up billing" button per job. The link is
+// GET /supp/catchup?job=<jnid>&months=2026-08,2026-09&sig=<hmac> — the GET only
+// RENDERS a confirmation page (so email-scanner prefetch can't create
+// invoices); the page's button POSTs the same params, and the POST creates ONE
+// Draft invoice with one line per month at the job's Supplemental Price.
+// sig = HMAC-SHA256(JN_WEBHOOK_TOKEN, "<jnid>|<months>") hex — links can only
+// be minted by us, and each link is pinned to one job + month set. Idempotent:
+// a job already carrying a catch-up invoice shows "already done" instead.
+const CATCHUP_MONTH_RE = /^\d{4}-\d{2}(,\d{4}-\d{2}){0,11}$/;
+function catchupSig(job, months) {
+  return crypto.createHmac('sha256', JN_WEBHOOK_TOKEN).update(`${job}|${months}`).digest('hex').slice(0, 32);
+}
+function catchupOk(req) {
+  const { job, months, sig } = { ...req.query, ...req.body };
+  if (!JN_WEBHOOK_TOKEN || !job || !months || !sig) return null;
+  if (!CATCHUP_MONTH_RE.test(String(months))) return null;
+  const expect = catchupSig(String(job), String(months));
+  const a = Buffer.from(String(sig)), b = Buffer.from(expect);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  return { job: String(job), months: String(months).split(',') };
+}
+function catchupPage(title, body, tone) {
+  const color = tone === 'ok' ? '#1A7A44' : tone === 'err' ? '#A83232' : '#12617D';
+  return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head>
+<body style="margin:0;background:#F5F6F5;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2427">
+<div style="max-width:520px;margin:48px auto;padding:28px;background:#fff;border:1px solid #D8DEDD;border-radius:10px">
+<h2 style="margin:0 0 12px;color:${color}">${title}</h2>${body}
+<p style="color:#5C6B70;font-size:13px;margin-top:20px">DryOps supplemental billing</p></div></body></html>`;
+}
+// MONTH_NAMES is declared in the supplemental-billing section below; handlers
+// only run after module load, so the call-time reference is safe.
+const CATCHUP_MONTH_LABEL = (ym) => `${MONTH_NAMES[Number(ym.slice(5)) - 1]} ${ym.slice(0, 4)}`;
+
+app.get('/supp/catchup', async (req, res) => {
+  const ok = catchupOk(req);
+  if (!ok) return res.status(401).send(catchupPage('Link not valid', '<p>This catch-up link is invalid or expired. Ask for a fresh one.</p>', 'err'));
+  try {
+    const r = await fetch(`${JN_BASE}/jobs/${ok.job}`, { headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' } });
+    if (!r.ok) throw new Error(`job fetch ${r.status}`);
+    const job = await r.json();
+    const price = Number(job.cf_double_1) || 0;
+    const invR = await fetch(`${JN_BASE}/v2/invoices?size=100&related=${ok.job}`, { headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' } });
+    const invs = ((await invR.json())?.results ?? []).filter(i => i && i.is_active !== false);
+    const existing = invs.find(i => (i.external_id || '').startsWith(`supp-${ok.job}-catchup`));
+    if (existing) {
+      return res.send(catchupPage('Already caught up', `<p><strong>${escapeHtml(job.name || '')}</strong> already has catch-up invoice <strong>#${existing.number}</strong> ($${Number(existing.total).toLocaleString('en-US')}). Nothing more to do.</p>`, 'ok'));
+    }
+    if (!(price > 0)) {
+      return res.send(catchupPage('No price set', `<p><strong>${escapeHtml(job.name || '')}</strong> has no Supplemental Price on the job. Set it in JobNimbus first, then use this link again.</p>`, 'err'));
+    }
+    const total = Math.round(price * ok.months.length * 100) / 100;
+    const monthsLabel = ok.months.map(CATCHUP_MONTH_LABEL).join(', ');
+    res.send(catchupPage('Confirm catch-up billing', `
+<p><strong>${escapeHtml(job.name || '')}</strong> <span style="color:#5C6B70">#${escapeHtml(String(job.number || ''))}</span></p>
+<p>This creates <strong>one Draft invoice</strong> with a line for each missed month:</p>
+<p style="font-size:15px"><strong>${monthsLabel}</strong> — ${ok.months.length} × $${price.toLocaleString('en-US')} = <strong>$${total.toLocaleString('en-US')}</strong></p>
+<p>It stays a Draft for your office to review and send to insurance.</p>
+<form method="POST" action="/supp/catchup">
+<input type="hidden" name="job" value="${escapeHtml(ok.job)}"><input type="hidden" name="months" value="${escapeHtml(ok.months.join(','))}"><input type="hidden" name="sig" value="${escapeHtml(String(req.query.sig))}">
+<button type="submit" style="background:#12617D;color:#fff;border:none;border-radius:8px;padding:12px 22px;font-size:15px;font-weight:600;cursor:pointer">Create the catch-up invoice</button>
+</form>`, 'info'));
+  } catch (err) {
+    console.error('[catchup-link]', ok.job, err.message);
+    res.status(502).send(catchupPage('Something went wrong', `<p>${escapeHtml(err.message)}</p><p>Try again, or contact billing.</p>`, 'err'));
+  }
+});
+
+app.post('/supp/catchup', express.urlencoded({ extended: false }), async (req, res) => {
+  const ok = catchupOk(req);
+  if (!ok) return res.status(401).send(catchupPage('Link not valid', '<p>This catch-up link is invalid or expired. Ask for a fresh one.</p>', 'err'));
+  try {
+    const r = await fetch(`${JN_BASE}/jobs/${ok.job}`, { headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' } });
+    if (!r.ok) throw new Error(`job fetch ${r.status}`);
+    const job = await r.json();
+    const price = Number(job.cf_double_1) || 0;
+    if (!(price > 0)) return res.send(catchupPage('No price set', `<p>Set the Supplemental Price on <strong>${escapeHtml(job.name || '')}</strong> first.</p>`, 'err'));
+    const invR = await fetch(`${JN_BASE}/v2/invoices?size=100&related=${ok.job}`, { headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' } });
+    const invs = ((await invR.json())?.results ?? []).filter(i => i && i.is_active !== false);
+    const existing = invs.find(i => (i.external_id || '').startsWith(`supp-${ok.job}-catchup`));
+    if (existing) {
+      return res.send(catchupPage('Already caught up', `<p><strong>${escapeHtml(job.name || '')}</strong> already has catch-up invoice <strong>#${existing.number}</strong>. Nothing was created.</p>`, 'ok'));
+    }
+    const related = [];
+    const contact = (Array.isArray(job.related) ? job.related : []).find(x => x && x.type === 'contact' && x.id);
+    if (contact) related.push({ id: contact.id });
+    related.push({ id: ok.job });
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const payload = {
+      related, status: 1, date_invoice: nowSecs, date_due: nowSecs,
+      external_id: `supp-${ok.job}-catchup-${ok.months[0]}-${ok.months[ok.months.length - 1]}`,
+      internal_note: `Catch-up: missed storage months ${CATCHUP_MONTH_LABEL(ok.months[0])} – ${CATCHUP_MONTH_LABEL(ok.months[ok.months.length - 1])} (created from owner catch-up link)`,
+      sections: [{ index: 0, name: 'CONTENTS', description: '', showGroupTotal: true, group: 0 }],
+      items: ok.months.map(m => ({
+        jnid: SUPP_STORAGE_ITEM_JNID, name: SUPP_STORAGE_ITEM_NAME, uom: 'Items', item_type: 'material',
+        description: `Storage of Insured Contents:\n\nRelocate and store contents in climate-controlled, secure facility.\n\nMonth of: ${CATCHUP_MONTH_LABEL(m)}`,
+        quantity: 1, price, cost: 0, amount: price,
+      })),
+    };
+    if (job.location && job.location.id !== undefined) payload.location = { id: job.location.id };
+    const create = await fetch(`${JN_BASE}/v2/invoices`, {
+      method: 'POST',
+      headers: { Authorization: `bearer ${JN_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await create.text();
+    if (!create.ok) throw new Error(`invoice create ${create.status} ${body.slice(0, 150)}`);
+    let inv; try { inv = JSON.parse(body); } catch { inv = {}; }
+    const total = Math.round(price * ok.months.length * 100) / 100;
+    console.log(`[catchup-link] created #${inv.number} $${total} (${ok.months.length} mo) for ${job.name}`);
+    res.send(catchupPage('Catch-up invoice created', `
+<p><strong>Draft #${inv.number || '?'}</strong> for <strong>$${total.toLocaleString('en-US')}</strong> (${ok.months.map(CATCHUP_MONTH_LABEL).join(', ')}) is now on <strong>${escapeHtml(job.name || '')}</strong>.</p>
+<p>Have your office review it and send it to insurance.</p>
+<p><a href="${SUPP_JOB_INVOICES_URL(ok.job)}" style="color:#12617D;font-weight:600">Open the job's Payments &amp; Invoices →</a></p>
+<p>Also make sure the job's <strong>In Storage?</strong> flag is on and its status reflects storage, so future months bill automatically.</p>`, 'ok'));
+  } catch (err) {
+    console.error('[catchup-link]', ok.job, err.message);
+    res.status(502).send(catchupPage('Something went wrong', `<p>${escapeHtml(err.message)}</p><p>Nothing was created. Try again, or contact billing.</p>`, 'err'));
+  }
+});
+
 // ── In-Storage flag webhook ──────────────────────────────────────────────────
 // POST /webhooks/jobnimbus/storage-flag?token=...&set=on|off — replaces the
 // Zapier zaps that flipped "In Storage?" (cf_boolean_1). The JobNimbus
