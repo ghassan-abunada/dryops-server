@@ -246,14 +246,20 @@ document.addEventListener('click',e=>{const b=e.target.closest('[data-share]');i
 <div class="card"><span>Total AR</span><b>${whole(data.arTotal)}</b><div class="meta">all open invoices</div></div>
 <div class="card"><span>Bank balance</span><div class="amt-row" style="margin-top:4px"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" id="bank" value="${data.bank ? esc(data.bank.balance) : ''}" placeholder="enter"></div>
 <div class="meta" id="bank-meta">${data.bank && data.bank.at ? `as of ${esc(new Date(data.bank.at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' }))}${data.bank.by ? ' · ' + esc(data.bank.by) : ''}` : 'not entered yet'}</div></div></div>
-<div class="sub" style="margin-bottom:10px">Put a value on each job in progress, tap <b>Collecting</b> on the invoices you expect paid this week, and enter today's bank balance. Everything saves as you go.</div>
+<div class="sub" style="margin-bottom:10px">Put a value on each job in progress, enter the amount you expect to collect on each invoice this week (leave blank if nothing yet), and enter today's bank balance. Everything saves as you go.</div>
 <input type="text" id="who" placeholder="Your name (so we know who updated)" autocomplete="name">
 <div id="sections"></div>
 <div class="bar"><div class="status" id="status">Loaded</div><button class="btn ghost small" id="add-btn">+ Add</button><a class="btn ghost small" href="${textUrl}" target="_blank">Text</a></div>
 <div class="sheet" id="add-sheet"><div><b>Add a line that isn't in JobNimbus</b><div class="actions" style="margin-top:12px"><button class="btn" onclick="addCustom('in_progress')">In-progress job</button><button class="btn ghost" onclick="addCustom('collecting')">Collecting item</button></div></div></div>`;
       const script = `
 const TOKEN=${json(pool.token)};let ROWS=${json(data.rows)};
-const GROUPS=[['in_progress','In progress',true],['ar','Invoiced — collecting this week?',true],['billing','Invoice created / in storage',false],['other','Leads, estimating, holds',false],['custom','Added by you',true]];
+const GROUPS=[['in_progress','In progress',true],['ar','Invoiced — enter what you expect to collect this week',true],['billing','Invoice created / in storage — enter a value to count as in progress',false],['other','Leads, estimating, holds',false],['custom','Added by you',true],['hidden','Hidden — not counted',false]];
+// Where a card is shown: in-progress jobs the owner hid go to "Hidden".
+function viewGroup(r){return r.group==='in_progress'&&!r.category?'hidden':r.group}
+// Bucket follows the section: invoiced jobs count as Collecting only when an
+// amount is entered; other non-production jobs count as In Progress when valued.
+function deriveCategory(r){if(r.group==='ar')return r.amount!=null?'collecting':null;if(r.group==='billing'||r.group==='other')return r.amount!=null?'in_progress':null;return r.category}
+for(const r of ROWS){if(r.group==='ar'&&r.category==='collecting'&&r.amount==null&&r.due!=null)r.amount=r.due}
 const who=document.getElementById('who');try{who.value=localStorage.getItem('wip_who')||''}catch(e){}
 who.addEventListener('change',()=>{try{localStorage.setItem('wip_who',who.value)}catch(e){}});
 const OPEN={};try{Object.assign(OPEN,JSON.parse(localStorage.getItem('wip_open')||'{}'))}catch(e){}
@@ -262,14 +268,15 @@ function amtOf(r){if(r.category==='collecting')return r.amount!=null?r.amount:(r
 function totals(){let ip=0,c=0,ni=0,nc=0;for(const r of ROWS){if(r.category==='in_progress'){ip+=Number(r.amount||0);ni++}if(r.category==='collecting'){c+=Number(amtOf(r));nc++}}
 document.getElementById('t-ip').textContent=fmt(ip);document.getElementById('t-col').textContent=fmt(c);document.getElementById('n-ip').textContent=ni+' job'+(ni===1?'':'s');document.getElementById('n-col').textContent=nc+' item'+(nc===1?'':'s')}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function jobCard(r){const ph=r.category==='collecting'&&r.due!=null?r.due.toFixed(2):'0';const on=r.category==='in_progress'?'is-ip':r.category==='collecting'?'is-col':'';
-return '<div class="job '+on+'"><div class="job-head">'+(r.custom?'<input type="text" class="nm" value="'+esc(r.name)+'" data-k="'+esc(r.key)+'" data-f="custom_name" placeholder="Job or customer name">':'<div class="nm">'+esc(r.name)+'</div>')
-+'<div class="meta">'+(r.number?'#'+esc(r.number)+' · ':'')+esc(r.status)+(r.record_type&&r.record_type!=='Mitigation'?' · '+esc(r.record_type):'')+(r.created?' · '+esc(r.created):'')+(r.due!=null?' · <b>due '+fmt(r.due)+'</b>':'')+(r.custom?' · <a href="#" data-del="'+esc(r.key)+'">remove</a>':'')+'</div></div>'
-+'<div class="seg"><button data-k="'+esc(r.key)+'" data-c="in_progress" class="'+(r.category==='in_progress'?'on-ip':'')+'">In Progress</button><button data-k="'+esc(r.key)+'" data-c="collecting" class="'+(r.category==='collecting'?'on-col':'')+'">Collecting</button><button data-k="'+esc(r.key)+'" data-c="" class="'+(!r.category?'on-off':'')+'">Off</button></div>'
-+(r.category?'<div class="amt-row"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" data-k="'+esc(r.key)+'" data-f="amount" value="'+(r.amount!=null?r.amount:'')+'" placeholder="'+ph+'"></div>'
-+'<input type="text" class="nt" data-k="'+esc(r.key)+'" data-f="note" value="'+esc(r.note)+'" placeholder="Note (optional)">':'')+'</div>'}
+function cardClass(r){return 'job '+(r.category==='in_progress'?'is-ip':r.category==='collecting'?'is-col':'')}
+function jobCard(r){const vg=viewGroup(r);const ph=vg==='ar'?(r.due!=null?'expected this week (due '+r.due.toFixed(2)+')':'expected this week'):vg==='billing'||vg==='other'?'value, if in progress':'estimated value';
+const link=vg==='in_progress'&&!r.custom?' · <a href="#" data-hide="'+esc(r.key)+'">hide</a>':vg==='hidden'?' · <a href="#" data-restore="'+esc(r.key)+'">count as in progress</a>':r.custom?' · <a href="#" data-del="'+esc(r.key)+'">remove</a>':'';
+return '<div class="'+cardClass(r)+'" data-card="'+esc(r.key)+'"><div class="job-head">'+(r.custom?'<input type="text" class="nm" value="'+esc(r.name)+'" data-k="'+esc(r.key)+'" data-f="custom_name" placeholder="Job or customer name">':'<div class="nm">'+esc(r.name)+'</div>')
++'<div class="meta">'+(r.number?'#'+esc(r.number)+' · ':'')+esc(r.status)+(r.record_type&&r.record_type!=='Mitigation'?' · '+esc(r.record_type):'')+(r.created?' · '+esc(r.created):'')+(r.due!=null?' · <b>due '+fmt(r.due)+'</b>':'')+link+'</div></div>'
++(vg==='hidden'?'':'<div class="amt-row"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" data-k="'+esc(r.key)+'" data-f="amount" value="'+(r.amount!=null?r.amount:'')+'" placeholder="'+esc(ph)+'"></div>'
++'<input type="text" class="nt" data-k="'+esc(r.key)+'" data-f="note" value="'+esc(r.note)+'" placeholder="Note (optional)">')+'</div>'}
 function render(){const host=document.getElementById('sections');host.innerHTML='';
-for(const [g,title,dflt] of GROUPS){const rows=ROWS.filter(r=>r.group===g);if(!rows.length)continue;
+for(const [g,title,dflt] of GROUPS){const rows=ROWS.filter(r=>viewGroup(r)===g);if(!rows.length)continue;
 const open=OPEN[g]!==undefined?OPEN[g]:dflt;
 const sec=document.createElement('details');sec.className='sec';sec.open=open;sec.dataset.g=g;
 sec.innerHTML='<summary><h2>'+esc(title)+'</h2><span class="count">'+rows.length+'</span></summary>'+rows.map(jobCard).join('');
@@ -284,11 +291,10 @@ const dirty=new Map();let timer=null;const st=document.getElementById('status');
 function queue(key){const r=ROWS.find(x=>x.key===key);dirty.set(key,{key,category:r.category,amount:r.amount,note:r.note,custom_name:r.custom?r.name:undefined});st.textContent='Saving…';st.className='status';clearTimeout(timer);timer=setTimeout(flush,700)}
 async function flush(){const entries=[...dirty.values()];dirty.clear();if(!entries.length)return;
 try{const r=await fetch('/wip/'+TOKEN+'/entries',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entries,updated_by:who.value||null})});if(!r.ok)throw new Error(await r.text());st.textContent='Saved ✓ '+new Date().toLocaleTimeString();st.className='status ok'}catch(e){st.textContent='Save failed — '+e.message;st.className='status err';entries.forEach(x=>dirty.set(x.key,x))}}
-document.addEventListener('click',e=>{const b=e.target.closest('button[data-c]');if(b){const r=ROWS.find(x=>x.key===b.dataset.k);r.category=b.dataset.c||null;const card=b.closest('.job');const fresh=document.createElement('div');fresh.innerHTML=jobCard(r);card.replaceWith(fresh.firstChild);totals();queue(r.key);
-if(r.category){const a=document.querySelector('input.amt[data-k="'+r.key+'"]');if(a&&!a.value)a.focus()}return}
+document.addEventListener('click',e=>{const h=e.target.closest('a[data-hide],a[data-restore]');if(h){e.preventDefault();const key=h.dataset.hide||h.dataset.restore;const r=ROWS.find(x=>x.key===key);r.category=h.dataset.hide?null:'in_progress';if(h.dataset.hide)OPEN.hidden=true;render();queue(r.key);return}
 const d=e.target.closest('a[data-del]');if(d){e.preventDefault();if(!confirm('Remove this line?'))return;fetch('/wip/'+TOKEN+'/entries/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:d.dataset.del})}).then(()=>{ROWS=ROWS.filter(x=>x.key!==d.dataset.del);render()})}});
 document.addEventListener('input',e=>{const i=e.target;if(!i.dataset||!i.dataset.f)return;const r=ROWS.find(x=>x.key===i.dataset.k);if(!r)return;
-if(i.dataset.f==='amount'){r.amount=i.value===''?null:Number(i.value);totals()}else if(i.dataset.f==='note'){r.note=i.value}else if(i.dataset.f==='custom_name'){r.name=i.value}queue(r.key)});
+if(i.dataset.f==='amount'){r.amount=i.value===''?null:Number(i.value);r.category=deriveCategory(r);const card=i.closest('[data-card]');if(card)card.className=cardClass(r);totals()}else if(i.dataset.f==='note'){r.note=i.value}else if(i.dataset.f==='custom_name'){r.name=i.value}queue(r.key)});
 function addCustom(cat){document.getElementById('add-sheet').classList.remove('open');const key='custom:'+crypto.randomUUID();ROWS.push({key,name:'',number:null,status:'Added by you',created:null,due:null,group:'custom',category:cat,amount:null,note:'',custom:true});OPEN.custom=true;render();queue(key);
 const el=document.querySelector('input[data-k="'+key+'"][data-f="custom_name"]');if(el){el.scrollIntoView({block:'center'});el.focus()}}
 window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
