@@ -372,7 +372,10 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
         const s = sectionText(data);
         ipAll += s.ipTotal; cAll += s.cTotal; arAll += data.arTotal;
         if (data.bank) bankAll += data.bank.balance; else bankMissing++;
-        const ownerUrl = `${req.protocol}://${req.get('host')}/wip/${p.token}`;
+        // Behind the dryops.app proxy the public base arrives in a header;
+        // direct hits on the Railway hostname fall back to the request host.
+        const publicBase = (req.get('x-dryops-public-base') || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+        const ownerUrl = `${publicBase}/wip/${p.token}`;
         const lastReview = (await sbGet(`wip_reviews?location_id=eq.${p.location_id}&select=reviewed_at,jobs_reviewed,applied&order=reviewed_at.desc&limit=1`))[0];
         cards.push(`<div class="card" data-pool="${esc(p.id)}">
 <input type="text" value="${esc(data.label)}" data-label="${esc(p.id)}" class="nm" title="Report heading" aria-label="Report heading">
