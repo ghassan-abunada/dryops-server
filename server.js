@@ -1294,6 +1294,44 @@ function jobRefFor(rec, jobMap) {
   return (ref && jobMap.get(String(ref.id))) || { job_id: null, location_id: null };
 }
 
+// One JN invoice record → one public.invoices row. Shared by the periodic
+// reconcile and the daily invoice sweep so both write identical shapes.
+function invoiceRowFromJN(inv, jobMap, nowISO) {
+  const ref = jobRefFor(inv, jobMap);
+  return {
+    jn_id: String(inv.jnid ?? inv.id),
+    job_id: ref.job_id,
+    location_id: ref.location_id,
+    number: inv.number ?? null,
+    status_name: inv.status_name ?? null,
+    total: inv.total ?? null,
+    total_paid: inv.total_paid ?? null,
+    due: inv.due ?? null,
+    date_invoice: jnToDate(inv.date_invoice) ?? null,
+    date_due: jnToDate(inv.date_due) ?? null,
+    date_paid_in_full: jnToDate(inv.date_paid_in_full) ?? null,
+    jn_created: jnToISO(inv.date_created) ?? null,
+    jn_updated: jnToISO(inv.date_updated ?? inv.date_modified) ?? null,
+    last_synced: nowISO,
+  };
+}
+
+// One JN payment record → one public.payments row. Same sharing as above.
+function paymentRowFromJN(pay, jobMap, nowISO) {
+  const ref = jobRefFor(pay, jobMap);
+  return {
+    jn_id: String(pay.jnid ?? pay.id),
+    job_id: ref.job_id,
+    location_id: ref.location_id,
+    amount: pay.total ?? pay.amount ?? null,
+    method_id: pay.method_id ?? null,
+    note: pay.note ?? pay.description ?? null,
+    jn_created: jnToISO(pay.date_payment ?? pay.date_created) ?? null,
+    jn_updated: jnToISO(pay.date_updated ?? pay.date_modified) ?? null,
+    last_synced: nowISO,
+  };
+}
+
 // Since-cursor per table: catch up from the newest last_synced (minus overlap).
 // Gotcha: webhooks also bump last_synced, so that cursor alone can leave older
 // webhook-created rows amount-less forever (slim payloads). Guard: also look
@@ -1337,42 +1375,11 @@ async function reconcileFinancials() {
 
     const invoiceRows = invoices
       .filter(inv => inv.jnid || inv.id)
-      .map(inv => {
-        const ref = jobRefFor(inv, jobMap);
-        return {
-          jn_id: String(inv.jnid ?? inv.id),
-          job_id: ref.job_id,
-          location_id: ref.location_id,
-          number: inv.number ?? null,
-          status_name: inv.status_name ?? null,
-          total: inv.total ?? null,
-          total_paid: inv.total_paid ?? null,
-          due: inv.due ?? null,
-          date_invoice: jnToDate(inv.date_invoice) ?? null,
-          date_due: jnToDate(inv.date_due) ?? null,
-          date_paid_in_full: jnToDate(inv.date_paid_in_full) ?? null,
-          jn_created: jnToISO(inv.date_created) ?? null,
-          jn_updated: jnToISO(inv.date_updated ?? inv.date_modified) ?? null,
-          last_synced: nowISO,
-        };
-      });
+      .map(inv => invoiceRowFromJN(inv, jobMap, nowISO));
 
     const paymentRows = payments
       .filter(pay => pay.jnid || pay.id)
-      .map(pay => {
-        const ref = jobRefFor(pay, jobMap);
-        return {
-          jn_id: String(pay.jnid ?? pay.id),
-          job_id: ref.job_id,
-          location_id: ref.location_id,
-          amount: pay.total ?? pay.amount ?? null,
-          method_id: pay.method_id ?? null,
-          note: pay.note ?? pay.description ?? null,
-          jn_created: jnToISO(pay.date_payment ?? pay.date_created) ?? null,
-          jn_updated: jnToISO(pay.date_updated ?? pay.date_modified) ?? null,
-          last_synced: nowISO,
-        };
-      });
+      .map(pay => paymentRowFromJN(pay, jobMap, nowISO));
 
     await sbBulkUpsert('invoices', invoiceRows);
     await sbBulkUpsert('payments', paymentRows);
@@ -1653,6 +1660,195 @@ app.post('/admin/jobs/deletion-sweep', requireAuth, requireAdmin, (req, res) => 
 });
 app.get('/admin/jobs/deletion-sweep', requireAuth, requireAdmin, (req, res) => {
   res.json({ running: deletionSweepRunning, last: lastDeletionSweep });
+});
+
+// ── JobNimbus financial sweeps (invoices + payments) ─────────────────────────
+// The financials reconcile is incremental (date_updated ≥ cursor), so it can
+// never see two things: records DELETED in JN (they 404 and vanish from every
+// list, exactly like jobs) and updates missed during an outage longer than the
+// reconcile lookback. Both leave phantom numbers in Supabase — on 2026-09-27
+// A1 Dallas carried ~$70k of invoices deleted in JN in May plus ~$13k of
+// invoices paid in JN but still Sent/Draft locally, and 3 JN invoices were
+// missing entirely. A deleted or reversed payment would likewise keep counting
+// as collected. One daily sweep per table, modelled on sweepDeletedJobs:
+//   1. Pulls every JN record (fixed month windows over date_created; a window
+//      that comes back incomplete aborts the whole sweep).
+//   2. Heals drift: any JN record that is missing locally, or whose compared
+//      columns differ, is re-upserted from the JN record (same row shape as
+//      the reconcile — invoiceRowFromJN / paymentRowFromJN).
+//   3. candidates = local − JN. Each is confirmed with a direct GET and ONLY a
+//      404 counts as deleted; confirmed rows are deleted. No archive — these
+//      rows hold no app-authored data and are fully reconstructible from JN.
+// Caps are last-resort brakes, like the jobs sweep.
+const FIN_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+// Cents (or null) — so 1234.5 vs "1234.50" vs 1234.499999 compare equal.
+const cents = v => (v == null || v === '' ? null : Math.round(Number(v) * 100));
+
+const FIN_SWEEPS = {
+  invoices: {
+    tag: 'invoice-sweep',
+    listPath: '/v2/invoices',
+    getPath: id => `/v2/invoices/${encodeURIComponent(id)}`,
+    fields: 'jnid,number,status_name,total,total_paid,due,date_invoice,date_due,date_paid_in_full,date_created,date_updated,related',
+    localSelect: 'jn_id,job_id,status_name,total,total_paid,due,date_paid_in_full,jn_created',
+    rowFromJN: invoiceRowFromJN,
+    drifted: (local, row) =>
+      local.status_name !== row.status_name
+      || cents(local.total) !== cents(row.total)
+      || cents(local.total_paid) !== cents(row.total_paid)
+      || cents(local.due) !== cents(row.due)
+      || (local.date_paid_in_full || null) !== (row.date_paid_in_full || null)
+      || (!local.job_id && !!row.job_id),
+    maxDelete: 500,
+    verifyCap: 800,
+    firstRunMs: 5 * 60 * 1000,   // after the jobs sweep has had its turn
+  },
+  payments: {
+    tag: 'payment-sweep',
+    listPath: '/payments',
+    getPath: id => `/payments/${encodeURIComponent(id)}`,
+    fields: 'jnid,total,amount,method_id,note,description,date_payment,date_created,date_updated,related',
+    localSelect: 'jn_id,job_id,amount,method_id,jn_created',
+    rowFromJN: paymentRowFromJN,
+    drifted: (local, row) =>
+      cents(local.amount) !== cents(row.amount)
+      || (local.method_id ?? null) !== (row.method_id ?? null)
+      || (!local.job_id && !!row.job_id),
+    maxDelete: 500,
+    verifyCap: 800,
+    firstRunMs: 20 * 60 * 1000,  // staggered behind the invoice sweep
+  },
+};
+for (const cfg of Object.values(FIN_SWEEPS)) { cfg.running = false; cfg.last = null; }
+
+// Every JN record of one endpoint, via fixed month windows over date_created
+// (no ordering assumption; each window stays far under the ES 10k from+size
+// cap). Throws if any window returns fewer records than its reported count.
+// Returns a Map jnid → record (dedupes cursor re-fetches).
+async function jnFetchAllByMonth(listPath, fields, startMs) {
+  const out = new Map();
+  const cur = new Date(startMs);
+  cur.setUTCDate(1); cur.setUTCHours(0, 0, 0, 0);
+  while (cur < new Date()) {
+    const gte = Math.floor(cur.getTime() / 1000);
+    cur.setUTCMonth(cur.getUTCMonth() + 1);
+    const lt = Math.floor(cur.getTime() / 1000);
+    const filter = encodeURIComponent(JSON.stringify({ must: [{ range: { date_created: { gte, lt } } }] }));
+    let count = Infinity, fetched = 0;
+    for (let from = 0; from + 500 <= 10000 && fetched < count; from += 500) {
+      const r = await fetch(`${JN_BASE}${listPath}?size=500&from=${from}&filter=${filter}&fields=${fields}`, {
+        headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+      });
+      if (!r.ok) throw new Error(`JN ${listPath} ${r.status}`);
+      const data = await r.json();
+      const page = data?.results ?? data?.data ?? [];
+      count = data?.count ?? data?.total ?? page.length;
+      for (const rec of page) { const id = rec.jnid ?? rec.id; if (id) out.set(String(id), rec); }
+      fetched += page.length;
+      if (page.length < 500) break;
+    }
+    if (fetched < count) throw new Error(`${listPath} window ${new Date(gte * 1000).toISOString().slice(0, 7)} incomplete: ${fetched}/${count}`);
+  }
+  return out;
+}
+
+async function sweepFinancialTable(table) {
+  const cfg = FIN_SWEEPS[table];
+  if (cfg.running) return;
+  cfg.running = true;
+  cfg.last = { phase: 'started', at: new Date().toISOString() };
+  const nowISO = new Date().toISOString();
+  try {
+    // All local rows (paged: PostgREST caps a response at max-rows).
+    const local = [];
+    for (let offset = 0; ; offset += 1000) {
+      const page = await sbSelect(table, `select=${cfg.localSelect}&order=jn_id&limit=1000&offset=${offset}`);
+      local.push(...page);
+      if (page.length < 1000) break;
+    }
+    let startMs = Date.UTC(2015, 0, 1);
+    for (const r of local) {
+      const t = r.jn_created ? new Date(r.jn_created).getTime() : NaN;
+      if (!isNaN(t) && t < startMs) startMs = t;
+    }
+    startMs -= 45 * 24 * 60 * 60 * 1000; // pad: JN date_created can predate ours
+
+    const jn = await jnFetchAllByMonth(cfg.listPath, cfg.fields, startMs);
+    if (jn.size === 0) throw new Error(`JN returned zero ${table} — refusing to diff`);
+
+    // 2. Heal drift + insert JN records we never ingested.
+    const localById = new Map(local.map(r => [r.jn_id, r]));
+    const jobMap = await resolveJobRefs([...jn.values()]);
+    const healRows = [];
+    let inserted = 0;
+    for (const [id, rec] of jn) {
+      const row = cfg.rowFromJN(rec, jobMap, nowISO);
+      const cur = localById.get(id);
+      if (!cur) { healRows.push(row); inserted++; }
+      else if (cfg.drifted(cur, row)) healRows.push(row);
+    }
+    for (let i = 0; i < healRows.length; i += 500) await sbBulkUpsert(table, healRows.slice(i, i + 500));
+
+    // 3. Deletions: local − JN, each confirmed by a direct GET (404 only).
+    const candidates = local.map(r => r.jn_id).filter(id => id && !jn.has(id));
+    console.log(`[${cfg.tag}] ${local.length} local, ${jn.size} in JN, healed ${healRows.length} (${inserted} new), ${candidates.length} delete candidates`);
+    const confirmed = [];
+    let skipped = 0;
+    for (const id of candidates.slice(0, cfg.verifyCap)) {
+      const r = await fetch(`${JN_BASE}${cfg.getPath(id)}`, {
+        headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+      });
+      if (r.status === 404) confirmed.push(id);
+      else { skipped++; if (!r.ok) console.warn(`[${cfg.tag}] ${id} verify got ${r.status} — skipped`); }
+      await new Promise(t => setTimeout(t, 100)); // gentle on the JN API
+    }
+    if (confirmed.length > cfg.maxDelete) {
+      throw new Error(`${confirmed.length} confirmed deletions exceeds cap ${cfg.maxDelete} — aborting, investigate before raising the cap`);
+    }
+    let deleted = 0;
+    for (let i = 0; i < confirmed.length; i += 50) {
+      const chunk = confirmed.slice(i, i + 50);
+      const inList = encodeURIComponent(chunk.map(id => `"${id}"`).join(','));
+      const dr = await fetch(`${SUPABASE_URL}/rest/v1/${table}?jn_id=in.(${inList})`, {
+        method: 'DELETE', headers: { ...sbHeaders, Prefer: 'return=minimal' },
+      });
+      if (!dr.ok) throw new Error(`${table} delete ${dr.status} ${(await dr.text()).slice(0, 200)}`);
+      deleted += chunk.length;
+    }
+    if (deleted) console.log(`[${cfg.tag}] deleted ${deleted}: ${confirmed.join(',')}`);
+
+    console.log(`[${cfg.tag}] done — healed ${healRows.length}, deleted ${deleted}, skipped ${skipped} unconfirmed`);
+    cfg.last = {
+      phase: 'done', local: local.length, jn: jn.size, healed: healRows.length, inserted,
+      candidates: candidates.length, deleted, skipped, at: new Date().toISOString(),
+    };
+  } catch (err) {
+    console.error(`[${cfg.tag}] failed:`, err.message);
+    cfg.last = { phase: 'error', error: err.message, at: new Date().toISOString() };
+  } finally {
+    cfg.running = false;
+  }
+}
+
+if (SUPABASE_SERVICE_KEY) {
+  for (const table of Object.keys(FIN_SWEEPS)) {
+    setTimeout(() => sweepFinancialTable(table), FIN_SWEEPS[table].firstRunMs);
+    setInterval(() => sweepFinancialTable(table), FIN_SWEEP_INTERVAL_MS);
+  }
+}
+
+// POST /admin/invoices/sweep · POST /admin/payments/sweep — run now (background).
+// GET  same paths — status of the last run.
+app.post('/admin/:table(invoices|payments)/sweep', requireAuth, requireAdmin, (req, res) => {
+  const cfg = FIN_SWEEPS[req.params.table];
+  if (cfg.running) return res.status(409).json({ error: 'Sweep already running', last: cfg.last });
+  sweepFinancialTable(req.params.table); // runs in background
+  res.status(202).json({ ok: true, started: true });
+});
+app.get('/admin/:table(invoices|payments)/sweep', requireAuth, requireAdmin, (req, res) => {
+  const cfg = FIN_SWEEPS[req.params.table];
+  res.json({ running: cfg.running, last: cfg.last });
 });
 
 // ── Location self-heal ────────────────────────────────────────────────────────
