@@ -1294,6 +1294,28 @@ function jobRefFor(rec, jobMap) {
   return (ref && jobMap.get(String(ref.id))) || { job_id: null, location_id: null };
 }
 
+// One JN invoice record → one public.invoices row. Shared by the periodic
+// reconcile and the daily invoice sweep so both write identical shapes.
+function invoiceRowFromJN(inv, jobMap, nowISO) {
+  const ref = jobRefFor(inv, jobMap);
+  return {
+    jn_id: String(inv.jnid ?? inv.id),
+    job_id: ref.job_id,
+    location_id: ref.location_id,
+    number: inv.number ?? null,
+    status_name: inv.status_name ?? null,
+    total: inv.total ?? null,
+    total_paid: inv.total_paid ?? null,
+    due: inv.due ?? null,
+    date_invoice: jnToDate(inv.date_invoice) ?? null,
+    date_due: jnToDate(inv.date_due) ?? null,
+    date_paid_in_full: jnToDate(inv.date_paid_in_full) ?? null,
+    jn_created: jnToISO(inv.date_created) ?? null,
+    jn_updated: jnToISO(inv.date_updated ?? inv.date_modified) ?? null,
+    last_synced: nowISO,
+  };
+}
+
 // Since-cursor per table: catch up from the newest last_synced (minus overlap).
 // Gotcha: webhooks also bump last_synced, so that cursor alone can leave older
 // webhook-created rows amount-less forever (slim payloads). Guard: also look
@@ -1337,25 +1359,7 @@ async function reconcileFinancials() {
 
     const invoiceRows = invoices
       .filter(inv => inv.jnid || inv.id)
-      .map(inv => {
-        const ref = jobRefFor(inv, jobMap);
-        return {
-          jn_id: String(inv.jnid ?? inv.id),
-          job_id: ref.job_id,
-          location_id: ref.location_id,
-          number: inv.number ?? null,
-          status_name: inv.status_name ?? null,
-          total: inv.total ?? null,
-          total_paid: inv.total_paid ?? null,
-          due: inv.due ?? null,
-          date_invoice: jnToDate(inv.date_invoice) ?? null,
-          date_due: jnToDate(inv.date_due) ?? null,
-          date_paid_in_full: jnToDate(inv.date_paid_in_full) ?? null,
-          jn_created: jnToISO(inv.date_created) ?? null,
-          jn_updated: jnToISO(inv.date_updated ?? inv.date_modified) ?? null,
-          last_synced: nowISO,
-        };
-      });
+      .map(inv => invoiceRowFromJN(inv, jobMap, nowISO));
 
     const paymentRows = payments
       .filter(pay => pay.jnid || pay.id)
@@ -1653,6 +1657,165 @@ app.post('/admin/jobs/deletion-sweep', requireAuth, requireAdmin, (req, res) => 
 });
 app.get('/admin/jobs/deletion-sweep', requireAuth, requireAdmin, (req, res) => {
   res.json({ running: deletionSweepRunning, last: lastDeletionSweep });
+});
+
+// ── JobNimbus invoice sweep ───────────────────────────────────────────────────
+// The financials reconcile is incremental (date_updated ≥ cursor), so it can
+// never see two things: invoices DELETED in JN (they 404 and vanish from every
+// list, exactly like jobs) and updates missed during an outage longer than the
+// reconcile lookback. Both leave phantom AR in Supabase — on 2026-09-27
+// A1 Dallas carried ~$70k of invoices deleted in JN in May plus ~$13k of
+// invoices paid in JN but still Sent/Draft locally, and 3 JN invoices were
+// missing entirely. This daily sweep, modelled on sweepDeletedJobs:
+//   1. Pulls every JN invoice (fixed month windows over date_created; a window
+//      that comes back incomplete aborts the whole sweep).
+//   2. Heals drift: any JN invoice that is missing locally, or whose
+//      status/total/total_paid/due/paid-date/job link differs, is re-upserted
+//      from the JN record (same row shape as the reconcile).
+//   3. candidates = local − JN. Each is confirmed with GET /v2/invoices/:id and
+//      ONLY a 404 counts as deleted; confirmed rows are deleted. No archive —
+//      an invoice row holds no app-authored data and is fully reconstructible.
+// Caps are last-resort brakes, like the jobs sweep.
+const INVOICE_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const INVOICE_SWEEP_MAX_DELETE = 500;    // confirmed deletions per run
+const INVOICE_SWEEP_VERIFY_CAP = 800;    // candidate GETs per run
+const INVOICE_SWEEP_FIELDS = 'jnid,number,status_name,total,total_paid,due,date_invoice,date_due,date_paid_in_full,date_created,date_updated,related';
+
+let invoiceSweepRunning = false;
+let lastInvoiceSweep = null;
+
+// Every JN invoice, via fixed month windows over date_created (no ordering
+// assumption; each window stays far under the ES 10k from+size cap). Throws
+// if any window returns fewer records than its reported count.
+async function jnFetchAllInvoices(startMs) {
+  const out = new Map(); // jnid → record (dedupes cursor re-fetches)
+  const cur = new Date(startMs);
+  cur.setUTCDate(1); cur.setUTCHours(0, 0, 0, 0);
+  while (cur < new Date()) {
+    const gte = Math.floor(cur.getTime() / 1000);
+    cur.setUTCMonth(cur.getUTCMonth() + 1);
+    const lt = Math.floor(cur.getTime() / 1000);
+    const filter = encodeURIComponent(JSON.stringify({ must: [{ range: { date_created: { gte, lt } } }] }));
+    let count = Infinity, fetched = 0;
+    for (let from = 0; from + 500 <= 10000 && fetched < count; from += 500) {
+      const r = await fetch(`${JN_BASE}/v2/invoices?size=500&from=${from}&filter=${filter}&fields=${INVOICE_SWEEP_FIELDS}`, {
+        headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+      });
+      if (!r.ok) throw new Error(`JN /v2/invoices ${r.status}`);
+      const data = await r.json();
+      const page = data?.results ?? data?.data ?? [];
+      count = data?.count ?? data?.total ?? page.length;
+      for (const inv of page) { const id = inv.jnid ?? inv.id; if (id) out.set(String(id), inv); }
+      fetched += page.length;
+      if (page.length < 500) break;
+    }
+    if (fetched < count) throw new Error(`invoice window ${new Date(gte * 1000).toISOString().slice(0, 7)} incomplete: ${fetched}/${count}`);
+  }
+  return out;
+}
+
+// Cents (or null) — so 1234.5 vs "1234.50" vs 1234.499999 compare equal.
+const cents = v => (v == null || v === '' ? null : Math.round(Number(v) * 100));
+
+function invoiceDrifted(local, row) {
+  return local.status_name !== row.status_name
+    || cents(local.total) !== cents(row.total)
+    || cents(local.total_paid) !== cents(row.total_paid)
+    || cents(local.due) !== cents(row.due)
+    || (local.date_paid_in_full || null) !== (row.date_paid_in_full || null)
+    || (!local.job_id && !!row.job_id);
+}
+
+async function sweepInvoices() {
+  if (invoiceSweepRunning) return;
+  invoiceSweepRunning = true;
+  lastInvoiceSweep = { phase: 'started', at: new Date().toISOString() };
+  const nowISO = new Date().toISOString();
+  try {
+    // All local invoices (paged: PostgREST caps a response at max-rows).
+    const local = [];
+    for (let offset = 0; ; offset += 1000) {
+      const page = await sbSelect('invoices',
+        `select=jn_id,job_id,status_name,total,total_paid,due,date_paid_in_full,jn_created&order=jn_id&limit=1000&offset=${offset}`);
+      local.push(...page);
+      if (page.length < 1000) break;
+    }
+    let startMs = Date.UTC(2015, 0, 1);
+    for (const r of local) {
+      const t = r.jn_created ? new Date(r.jn_created).getTime() : NaN;
+      if (!isNaN(t) && t < startMs) startMs = t;
+    }
+    startMs -= 45 * 24 * 60 * 60 * 1000; // pad: JN date_created can predate ours
+
+    const jn = await jnFetchAllInvoices(startMs);
+    if (jn.size === 0) throw new Error('JN returned zero invoices — refusing to diff');
+
+    // 2. Heal drift + insert JN invoices we never ingested.
+    const localById = new Map(local.map(r => [r.jn_id, r]));
+    const jobMap = await resolveJobRefs([...jn.values()]);
+    const healRows = [];
+    let inserted = 0;
+    for (const [id, inv] of jn) {
+      const row = invoiceRowFromJN(inv, jobMap, nowISO);
+      const cur = localById.get(id);
+      if (!cur) { healRows.push(row); inserted++; }
+      else if (invoiceDrifted(cur, row)) healRows.push(row);
+    }
+    for (let i = 0; i < healRows.length; i += 500) await sbBulkUpsert('invoices', healRows.slice(i, i + 500));
+
+    // 3. Deletions: local − JN, each confirmed by a direct GET (404 only).
+    const candidates = local.map(r => r.jn_id).filter(id => id && !jn.has(id));
+    console.log(`[invoice-sweep] ${local.length} local, ${jn.size} in JN, healed ${healRows.length} (${inserted} new), ${candidates.length} delete candidates`);
+    const confirmed = [];
+    let skipped = 0;
+    for (const id of candidates.slice(0, INVOICE_SWEEP_VERIFY_CAP)) {
+      const r = await fetch(`${JN_BASE}/v2/invoices/${encodeURIComponent(id)}`, {
+        headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+      });
+      if (r.status === 404) confirmed.push(id);
+      else { skipped++; if (!r.ok) console.warn(`[invoice-sweep] ${id} verify got ${r.status} — skipped`); }
+      await new Promise(t => setTimeout(t, 100)); // gentle on the JN API
+    }
+    if (confirmed.length > INVOICE_SWEEP_MAX_DELETE) {
+      throw new Error(`${confirmed.length} confirmed deletions exceeds cap ${INVOICE_SWEEP_MAX_DELETE} — aborting, investigate before raising the cap`);
+    }
+    let deleted = 0;
+    for (let i = 0; i < confirmed.length; i += 50) {
+      const chunk = confirmed.slice(i, i + 50);
+      const inList = encodeURIComponent(chunk.map(id => `"${id}"`).join(','));
+      const dr = await fetch(`${SUPABASE_URL}/rest/v1/invoices?jn_id=in.(${inList})`, {
+        method: 'DELETE', headers: { ...sbHeaders, Prefer: 'return=minimal' },
+      });
+      if (!dr.ok) throw new Error(`invoices delete ${dr.status} ${(await dr.text()).slice(0, 200)}`);
+      deleted += chunk.length;
+    }
+    if (deleted) console.log(`[invoice-sweep] deleted ${deleted}: ${confirmed.join(',')}`);
+
+    console.log(`[invoice-sweep] done — healed ${healRows.length}, deleted ${deleted}, skipped ${skipped} unconfirmed`);
+    lastInvoiceSweep = {
+      phase: 'done', local: local.length, jn: jn.size, healed: healRows.length, inserted,
+      candidates: candidates.length, deleted, skipped, at: new Date().toISOString(),
+    };
+  } catch (err) {
+    console.error('[invoice-sweep] failed:', err.message);
+    lastInvoiceSweep = { phase: 'error', error: err.message, at: new Date().toISOString() };
+  } finally {
+    invoiceSweepRunning = false;
+  }
+}
+
+if (SUPABASE_SERVICE_KEY) {
+  setTimeout(sweepInvoices, 5 * 60 * 1000); // first pass after the jobs sweep has had its turn
+  setInterval(sweepInvoices, INVOICE_SWEEP_INTERVAL_MS);
+}
+
+app.post('/admin/invoices/sweep', requireAuth, requireAdmin, (req, res) => {
+  if (invoiceSweepRunning) return res.status(409).json({ error: 'Sweep already running', last: lastInvoiceSweep });
+  sweepInvoices(); // runs in background
+  res.status(202).json({ ok: true, started: true });
+});
+app.get('/admin/invoices/sweep', requireAuth, requireAdmin, (req, res) => {
+  res.json({ running: invoiceSweepRunning, last: lastInvoiceSweep });
 });
 
 // ── Location self-heal ────────────────────────────────────────────────────────
