@@ -3383,18 +3383,26 @@ const JN_NOTES_DRYRUN = process.env.JN_NOTES_DRYRUN === '1';
 const JN_NOTES_REDIRECT_JOB = (process.env.JN_NOTES_REDIRECT_JOB || '').trim();
 
 // First server-side JN note creator. Same payload the app sends via /jnapi.
-async function jnAddNote(jnJobId, text) {
+// opts.createdBy = the author's JobNimbus user id (profiles.jn_user_id) so the
+// note shows as written by the technician, not the API user; opts.tag = a
+// location's default @mention (locations.jn_note_tag, e.g. "@GTA"), prepended
+// like a hand-typed mention so JobNimbus notifies the group.
+async function jnAddNote(jnJobId, text, opts = {}) {
   const target = JN_NOTES_REDIRECT_JOB || jnJobId;
   if (!target) return { ok: false, error: 'Visit has no JobNimbus job id' };
+  const tag = String(opts.tag || '').trim();
+  const noteText = tag && !String(text).includes(tag) ? `${tag} ${text}` : text;
+  const payload = { record_type_name: 'Note', note: noteText, related: [{ id: target, type: 'job' }] };
+  if (opts.createdBy) payload.created_by = String(opts.createdBy);
   if (JN_NOTES_DRYRUN) {
-    console.log('[jn note dryrun]', target, JSON.stringify(text.slice(0, 160)));
+    console.log('[jn note dryrun]', target, JSON.stringify(noteText.slice(0, 160)), opts.createdBy ? `by ${opts.createdBy}` : '');
     return { ok: true, id: 'dryrun', dryrun: true };
   }
   try {
     const r = await fetch(`${JN_BASE}/activities`, {
       method: 'POST',
       headers: { Authorization: `bearer ${JN_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ record_type_name: 'Note', note: text, related: [{ id: target, type: 'job' }] }),
+      body: JSON.stringify(payload),
     });
     const body = await r.json().catch(() => null);
     if (!r.ok) {
@@ -3443,9 +3451,25 @@ function isAssigned(visit, profileId) {
   return (visit.assigned_to_ids || []).map(String).includes(String(profileId));
 }
 
+// Author + location tag for a visit's JobNimbus note.
+async function visitNoteContext(visit, actorId) {
+  const out = { createdBy: null, tag: null };
+  try {
+    if (actorId) {
+      const rows = await sbGet(`profiles?id=eq.${encodeURIComponent(actorId)}&select=jn_user_id`);
+      out.createdBy = (rows && rows[0] && rows[0].jn_user_id) || null;
+    }
+    if (visit && visit.location_id) {
+      const locs = await sbGet(`locations?id=eq.${encodeURIComponent(visit.location_id)}&select=jn_note_tag`);
+      out.tag = (locs && locs[0] && locs[0].jn_note_tag) || null;
+    }
+  } catch (e) { console.warn('[jn note] context lookup failed', e.message); }
+  return out;
+}
+
 // Shared by the token route and the signed-in route.
 async function completeVisit({ visitId, pct, note, actor, source }) {
-  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,assigned_to_ids,completion_pct');
+  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,assigned_to_ids,completion_pct,location_id');
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
   if (visit.status === 'cancelled') return { status: 409, body: { error: 'This visit was cancelled' } };
   let p = Number(pct);
@@ -3474,7 +3498,7 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
     const latest = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
     update = (latest && latest[0]) || { id: null };
   }
-  const jn = await jnAddNote(visit.jn_id, visitNoteText(visit, p, actor.name, cleanNote));
+  const jn = await jnAddNote(visit.jn_id, visitNoteText(visit, p, actor.name, cleanNote), await visitNoteContext(visit, actor.id));
   const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
   await Promise.all([
     sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, jnPatch).catch(() => {}),
@@ -3488,13 +3512,13 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
 
 // Re-post the JN note for the latest failed update.
 async function retryVisitJn(visitId) {
-  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status');
+  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,location_id');
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
   const rows = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
   const upd = rows && rows[0];
   if (!upd) return { status: 404, body: { error: 'Nothing to retry' } };
   if (!upd.jn_note_error) return { status: 200, body: { ok: true, jn: { ok: true, id: upd.jn_note_id } } };
-  const jn = await jnAddNote(visit.jn_id, visitNoteText(visit, upd.pct, upd.actor_name, upd.note));
+  const jn = await jnAddNote(visit.jn_id, visitNoteText(visit, upd.pct, upd.actor_name, upd.note), await visitNoteContext(visit, upd.actor_id));
   const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
   await Promise.all([
     sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, jnPatch).catch(() => {}),
