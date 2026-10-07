@@ -2796,6 +2796,10 @@ app.post('/invite-user', requireAuth, requireAdmin, async (req, res) => {
     // handle_new_user clamps metadata roles; set the real role + bundle via
     // service key once the profile row exists (same statement → satisfies the
     // app-role consistency trigger).
+    if (r.ok && body && body.id && req.body.jn_user_id) {
+      await sbPatch('profiles', `id=eq.${body.id}`, { jn_user_id: String(req.body.jn_user_id).trim() })
+        .catch((e) => console.warn('[invite-user] jn_user_id patch failed', e.message));
+    }
     if (r.ok && appRoleId && body && body.id) {
       const pr = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${body.id}`, {
         method: 'PATCH',
@@ -2866,6 +2870,7 @@ app.post('/admin/create-user', requireAuth, requireAdmin, async (req, res) => {
       app_role_id: appRoleId,
       location_id: location_id || null, location_name: location_name || null,
       location_ids: location_ids || [], location_names: location_names || [],
+      jn_user_id: req.body.jn_user_id ? String(req.body.jn_user_id).trim() : null,
       updated_at: new Date().toISOString(),
     };
     const pr = await fetch(`${SUPABASE_URL}/rest/v1/profiles?on_conflict=id`, {
@@ -3475,7 +3480,10 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
     sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, jnPatch).catch(() => {}),
     update.id ? sbPatch('visit_updates', `id=eq.${encodeURIComponent(update.id)}`, jnPatch).catch(() => {}) : Promise.resolve(),
   ]);
-  return { status: 200, body: { ok: true, visit: { ...(patched && patched[0]), ...jnPatch }, update: { ...update, ...jnPatch }, jn } };
+  // Mirror the status onto the JN task (is_completed). Failures stay on the
+  // row (jn_task_error) and the sweep retries; never block the completion.
+  const jnTask = await syncVisitJnTask(visitId).catch((e) => ({ ok: false, error: e.message }));
+  return { status: 200, body: { ok: true, visit: { ...(patched && patched[0]), ...jnPatch }, update: { ...update, ...jnPatch }, jn, jnTask } };
 }
 
 // Re-post the JN note for the latest failed update.
@@ -3608,6 +3616,384 @@ app.post('/admin/tech-links/:profileId/disable', requireAuth, requireAdmin, asyn
   try {
     await sbPatch('tech_links', `profile_id=eq.${encodeURIComponent(String(req.params.profileId))}`, { disabled: true });
     res.json({ ok: true });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Scheduling: visit ↔ JobNimbus TASK sync (one-way push).
+// (see dryops repo supabase/add_schedule_rules.sql)
+//
+// Every visit becomes one JN task: title "<Type> — <job>", description = the
+// visit notes (+ crew / unlinked-assignee lines), date_start/date_end from the
+// visit's date + arrival window in the location's timezone, owners = the
+// assigned people's JN user ids (profiles.jn_user_id), related = the JN job.
+// Editing updates the task, completing sets is_completed, cancelling sets
+// is_active=false. Nothing flows back from JN.
+//
+// Trigger point: the DB guard trigger marks rows `jn_task_dirty`. The app pings
+// POST /visits/:id/sync-jn-task right after a write (fast path) and the sweep
+// below pushes anything still dirty every minute (crashes, offline saves, JN
+// 5xx, dashboard inserts, SQL edits). Both call syncVisitJnTask().
+//
+// Knobs mirror the note knobs: JN_TASKS_DRYRUN=1 logs instead of posting;
+// JN_TASKS_REDIRECT_JOB relates every task to one test job; JN_TASKS_SWEEP=0
+// disables the periodic sweep.
+// ═══════════════════════════════════════════════════════════════════════════
+const JN_TASKS_DRYRUN = process.env.JN_TASKS_DRYRUN === '1';
+const JN_TASKS_REDIRECT_JOB = (process.env.JN_TASKS_REDIRECT_JOB || '').trim();
+const JN_TASKS_SWEEP = process.env.JN_TASKS_SWEEP !== '0';
+const JN_TASK_SWEEP_MS = Number(process.env.JN_TASK_SWEEP_MS || 60000);
+const JN_TASK_MAX_ATTEMPTS = 6;
+
+async function jnSendJson(method, pathAndQuery, body) {
+  const r = await fetch(`${JN_BASE}/${pathAndQuery}`, {
+    method,
+    headers: { Authorization: `bearer ${JN_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await r.text();
+  let json = null; try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+  return { ok: r.ok, status: r.status, body: json, text: text.slice(0, 300) };
+}
+
+// JN account task types (GET /account/settings → taskTypes). The shape is
+// account-dependent (strings or objects) — normalize to names and log the raw
+// shape once so it can be checked in Railway logs.
+let jnTaskTypesCache = { names: [], at: 0, raw: null, logged: false };
+async function jnTaskTypes(force = false) {
+  if (!force && jnTaskTypesCache.at && Date.now() - jnTaskTypesCache.at < 10 * 60 * 1000) return jnTaskTypesCache.names;
+  const j = await jnGetJson('account/settings');
+  const raw = (j && (j.taskTypes || j.task_types || j.TaskTypes || (j.settings && j.settings.taskTypes))) || [];
+  const names = (Array.isArray(raw) ? raw : [])
+    .map((t) => (typeof t === 'string' ? t : t && (t.name || t.TaskTypeName || t.label || t.value || t.Name)))
+    .filter((n) => typeof n === 'string' && n.trim())
+    .map((n) => n.trim());
+  if (!jnTaskTypesCache.logged) {
+    console.log('[jn tasks] taskTypes shape:', JSON.stringify(Array.isArray(raw) ? raw.slice(0, 3) : raw).slice(0, 300));
+    jnTaskTypesCache.logged = true;
+  }
+  jnTaskTypesCache = { ...jnTaskTypesCache, names, at: Date.now(), raw: Array.isArray(raw) ? raw.slice(0, 50) : raw };
+  return names;
+}
+
+let scheduleSettingsCache = { row: null, at: 0 };
+async function loadScheduleSettings() {
+  if (scheduleSettingsCache.at && Date.now() - scheduleSettingsCache.at < 60000) return scheduleSettingsCache.row;
+  const rows = await sbGet('schedule_settings?id=eq.1&select=*');
+  const row = (rows && rows[0]) || null;
+  scheduleSettingsCache = { row, at: Date.now() };
+  return row;
+}
+
+// Visit type → JN record_type_name: explicit map entry, else a JN type whose
+// name matches the visit label (case-insensitive), else the default, else omit.
+function resolveTaskTypeName(taskType, settings, names) {
+  const map = (settings && settings.jn_task_type_map) || {};
+  const want = map[taskType] || VISIT_TYPE_LABEL[taskType] || null;
+  const hit = want ? names.find((n) => n.toLowerCase() === String(want).toLowerCase()) : null;
+  return hit || (settings && settings.jn_default_task_type) || undefined;
+}
+
+// Minutes offset of `tz` from UTC at the given instant (e.g. Denver = -360 / -420).
+function tzOffsetMinutes(tz, epochMs) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const p = Object.fromEntries(dtf.formatToParts(new Date(epochMs)).map((x) => [x.type, x.value]));
+  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return (asUTC - epochMs) / 60000;
+}
+// Local calendar date (YYYY-MM-DD) + minutes-from-midnight in `tz` → unix seconds.
+function zonedToUnix(dateISO, minutes, tz) {
+  const [y, m, d] = String(dateISO).split('-').map(Number);
+  const h = Math.floor(minutes / 60), mi = minutes % 60;
+  const wall = Date.UTC(y, m - 1, d, h, mi, 0);
+  let guess = wall;
+  for (let i = 0; i < 2; i++) {
+    let off;
+    try { off = tzOffsetMinutes(tz, guess); } catch { off = tzOffsetMinutes('America/Denver', guess); }
+    guess = wall - off * 60000;
+  }
+  return Math.floor(guess / 1000);
+}
+
+function blockLine(v, settings) {
+  const ws = (settings && settings.work_start_min) || 480, we = (settings && settings.work_end_min) || 1080;
+  const win = v.slot_start_min == null ? 'Anytime' : `${fmtMin(v.slot_start_min)}–${fmtMin(v.slot_end_min)}`;
+  if (v.block_kind === 'full_day') return `Full day (${fmtMin(ws)}–${fmtMin(we)})`;
+  if (v.block_kind === 'half_day') return `Half day · arrival window ${win}`;
+  return `Arrival window ${win}`;
+}
+function fmtMin(min) {
+  const h24 = Math.floor(min / 60) % 24, m = min % 60;
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h12}${m ? ':' + String(m).padStart(2, '0') : ''}${h24 < 12 ? 'am' : 'pm'}`;
+}
+
+function buildJnTaskBody(v, job, techs, settings, typeName, tz) {
+  const ws = (settings && settings.work_start_min) || 480, we = (settings && settings.work_end_min) || 1080;
+  const anytime = v.slot_start_min == null || v.slot_end_min == null;
+  const start = anytime ? ws : v.slot_start_min;
+  const end = anytime ? we : v.slot_end_min;
+  const linked = techs.filter((t) => t.jn_user_id);
+  const unlinked = techs.filter((t) => !t.jn_user_id).map((t) => t.full_name || 'Unnamed');
+  const label = VISIT_TYPE_LABEL[v.task_type] || 'Visit';
+  const jobName = (job && (job.name || job.client_name)) || v.jn_id;
+  const crew = v.crew_size || (v.assigned_to_ids || []).length || null;
+  const lines = [
+    String(v.notes || '').trim() || null,
+    `${blockLine(v, settings)}${crew ? ` · crew of ${crew}` : ''}`,
+    unlinked.length ? `Assigned (no JobNimbus user): ${unlinked.join(', ')}` : null,
+    'Scheduled in DryOps',
+  ].filter(Boolean);
+  const body = {
+    title: `${label} — ${jobName}`,
+    description: lines.join('\n'),
+    date_start: zonedToUnix(v.scheduled_date, start, tz),
+    date_end: zonedToUnix(v.scheduled_date, end, tz),
+    all_day: anytime || v.block_kind === 'full_day',
+    owners: linked.map((t) => ({ id: t.jn_user_id })),
+    related: [{ id: JN_TASKS_REDIRECT_JOB || v.jn_id, type: 'job' }],
+    is_completed: v.status === 'completed',
+    is_active: v.status !== 'cancelled',
+  };
+  if (typeName) body.record_type_name = typeName;
+  return body;
+}
+
+// Everything JN would notice. Used to decide whether the row is still what we
+// pushed before clearing the dirty flag (edits racing the push stay dirty).
+function visitFingerprint(v) {
+  return JSON.stringify([v.scheduled_date, v.slot_start_min, v.slot_end_min, v.block_kind, v.crew_size,
+    v.task_type, v.status, v.notes, v.jn_id, [...(v.assigned_to_ids || [])].sort()]);
+}
+
+const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,slot_start_min,slot_end_min,block_kind,crew_size,task_type,status,notes,' +
+  'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,jobs(name,client_name,location_id)';
+
+const visitSyncLocks = new Set();
+// The one entry point for routes, completeVisit and the sweep.
+async function syncVisitJnTask(visitId, { force = false } = {}) {
+  const id = String(visitId);
+  if (visitSyncLocks.has(id)) return { ok: false, error: 'sync already in progress' };
+  visitSyncLocks.add(id);
+  try {
+    const rows = await sbGet(`inspections?id=eq.${encodeURIComponent(id)}&select=${VISIT_TASK_SELECT}`);
+    const v = rows && rows[0];
+    if (!v) return { ok: false, error: 'Visit not found' };
+    if (!v.jn_task_dirty && !force) return { ok: true, skipped: 'clean', id: v.jn_task_id };
+    const settings = await loadScheduleSettings();
+    const clear = async (extra) => {
+      // Only clear if the row is still what we pushed.
+      const again = await sbGet(`inspections?id=eq.${encodeURIComponent(id)}&select=${VISIT_TASK_SELECT}`);
+      const cur = again && again[0];
+      if (!cur || visitFingerprint(cur) !== visitFingerprint(v)) return false;
+      const done = await sbPatch('inspections', `id=eq.${encodeURIComponent(id)}&updated_at=eq.${encodeURIComponent(cur.updated_at)}`,
+        { jn_task_dirty: false, jn_task_synced_at: new Date().toISOString(), jn_task_error: null, jn_task_attempts: 0, ...(extra || {}) });
+      return Array.isArray(done) && done.length > 0;
+    };
+    if (settings && settings.jn_sync_enabled === false) { await clear(); return { ok: true, skipped: 'disabled' }; }
+    if (v.status === 'cancelled' && !v.jn_task_id) { await clear(); return { ok: true, skipped: 'cancelled-unsynced' }; }
+    if (!v.jn_id) {
+      await sbPatch('inspections', `id=eq.${encodeURIComponent(id)}`, { jn_task_error: 'Visit has no JobNimbus job id', jn_task_attempts: (v.jn_task_attempts || 0) + 1 }).catch(() => {});
+      return { ok: false, error: 'Visit has no JobNimbus job id' };
+    }
+
+    const techIds = (v.assigned_to_ids || []).map(String);
+    const techs = techIds.length
+      ? (await sbGet(`profiles?id=in.(${techIds.map(encodeURIComponent).join(',')})&select=id,full_name,jn_user_id`)) || []
+      : [];
+    let tz = (settings && settings.default_timezone) || 'America/Denver';
+    const locId = v.jobs && v.jobs.location_id;
+    if (locId) {
+      const loc = await sbGet(`locations?id=eq.${encodeURIComponent(locId)}&select=timezone`);
+      if (loc && loc[0] && loc[0].timezone) tz = loc[0].timezone;
+    }
+    let names = [];
+    try { names = await jnTaskTypes(); } catch (e) { console.warn('[jn tasks] taskTypes lookup failed:', e.message); }
+    const typeName = resolveTaskTypeName(v.task_type, settings, names);
+    const body = buildJnTaskBody(v, v.jobs, techs, settings, typeName, tz);
+
+    if (JN_TASKS_DRYRUN) {
+      console.log('[jn task dryrun]', v.jn_task_id ? `PUT tasks/${v.jn_task_id}` : 'POST tasks', JSON.stringify(body).slice(0, 400));
+      await clear(v.jn_task_id ? {} : { jn_task_id: `dryrun-${id.slice(0, 8)}` });
+      return { ok: true, dryrun: true, body };
+    }
+
+    const existing = v.jn_task_id && !String(v.jn_task_id).startsWith('dryrun') ? v.jn_task_id : null;
+    let r, taskId = existing;
+    if (existing) {
+      r = await jnSendJson('PUT', `tasks/${encodeURIComponent(existing)}`, body);
+      if (r.status === 404) { r = await jnSendJson('POST', 'tasks', body); taskId = null; } // task deleted in JN → recreate
+    } else {
+      r = await jnSendJson('POST', 'tasks', body);
+    }
+    if (!r.ok) {
+      const msg = `JobNimbus responded ${r.status}${r.body && (r.body.message || r.body.error) ? ': ' + (r.body.message || r.body.error) : ''}`;
+      console.warn('[jn task] failed', id, msg, r.text);
+      await sbPatch('inspections', `id=eq.${encodeURIComponent(id)}`, { jn_task_error: msg.slice(0, 500), jn_task_attempts: (v.jn_task_attempts || 0) + 1 }).catch(() => {});
+      return { ok: false, error: msg };
+    }
+    if (!taskId) {
+      taskId = (r.body && (r.body.jnid || r.body.id)) || null;
+      if (!taskId) {
+        await sbPatch('inspections', `id=eq.${encodeURIComponent(id)}`, { jn_task_error: 'JobNimbus created the task but returned no id', jn_task_attempts: (v.jn_task_attempts || 0) + 1 }).catch(() => {});
+        return { ok: false, error: 'no task id in JobNimbus response' };
+      }
+      // Claim the id; if another push won the race, deactivate our extra task.
+      const claimed = await sbPatch('inspections', `id=eq.${encodeURIComponent(id)}&jn_task_id=is.null`, { jn_task_id: taskId });
+      if (!Array.isArray(claimed) || !claimed.length) {
+        await jnSendJson('PUT', `tasks/${encodeURIComponent(taskId)}`, { is_active: false }).catch(() => {});
+        return { ok: true, id: null, note: 'duplicate push discarded' };
+      }
+    }
+    const cleared = await clear();
+    return { ok: true, id: taskId, cleared };
+  } catch (err) {
+    console.error('[jn task] error', visitId, err.message);
+    await sbPatch('inspections', `id=eq.${encodeURIComponent(id)}`, { jn_task_error: err.message.slice(0, 500) }).catch(() => {});
+    return { ok: false, error: err.message };
+  } finally {
+    visitSyncLocks.delete(id);
+  }
+}
+
+let jnTaskSweepRunning = false;
+let lastJnTaskSweep = null;
+async function sweepDirtyVisitTasks() {
+  if (jnTaskSweepRunning) return lastJnTaskSweep;
+  jnTaskSweepRunning = true;
+  const out = { at: new Date().toISOString(), pushed: 0, failed: 0, skipped: 0 };
+  try {
+    const rows = await sbGet(`inspections?jn_task_dirty=eq.true&jn_task_attempts=lt.${JN_TASK_MAX_ATTEMPTS}&order=updated_at.asc&limit=25&select=id`);
+    for (const row of rows || []) {
+      const r = await syncVisitJnTask(row.id);
+      if (r.ok && (r.id || r.dryrun)) out.pushed += 1;
+      else if (r.ok) out.skipped += 1;
+      else out.failed += 1;
+    }
+  } catch (err) {
+    console.error('[jn task sweep] error', err.message);
+    out.error = err.message;
+  } finally {
+    jnTaskSweepRunning = false;
+    lastJnTaskSweep = out;
+    if (out.pushed || out.failed) console.log('[jn task sweep]', JSON.stringify(out));
+  }
+  return out;
+}
+if (JN_TASKS_SWEEP && SUPABASE_SERVICE_KEY) {
+  setTimeout(() => { sweepDirtyVisitTasks(); setInterval(sweepDirtyVisitTasks, JN_TASK_SWEEP_MS); }, 30 * 1000);
+}
+
+// Dispatcher (or an assigned tech) asks for an immediate push after a write.
+async function visitSyncGuard(req, res) {
+  const actor = await appActor(req);
+  if (!actor) { res.status(403).json({ error: 'Profile not found' }); return null; }
+  const visit = await loadVisit(String(req.params.id), 'id,assigned_to_ids');
+  if (!visit) { res.status(404).json({ error: 'Visit not found' }); return null; }
+  if (!['admin', 'owner'].includes(actor.role) && !isAssigned(visit, actor.id)) { res.status(403).json({ error: 'Not allowed' }); return null; }
+  return actor;
+}
+app.post('/visits/:id/sync-jn-task', requireAuth, async (req, res) => {
+  try {
+    if (!(await visitSyncGuard(req, res))) return;
+    const out = await syncVisitJnTask(String(req.params.id));
+    res.json({ ok: !!out.ok, jn: out });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+app.post('/visits/:id/retry-jn-task', requireAuth, async (req, res) => {
+  try {
+    if (!(await visitSyncGuard(req, res))) return;
+    const id = String(req.params.id);
+    await sbPatch('inspections', `id=eq.${encodeURIComponent(id)}`, { jn_task_attempts: 0, jn_task_dirty: true }).catch(() => {});
+    const out = await syncVisitJnTask(id, { force: true });
+    res.json({ ok: !!out.ok, jn: out, error: out.ok ? undefined : out.error });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Admin: JN task types for the Settings → Scheduling mapping dropdowns.
+app.get('/admin/schedule/jn-task-types', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const names = await jnTaskTypes(req.query.force === '1');
+    res.json({ names, cached_at: new Date(jnTaskTypesCache.at).toISOString(), sample: jnTaskTypesCache.raw });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+app.post('/admin/schedule/sync-now', requireAuth, requireStrictAdmin, async (req, res) => {
+  try { res.json(await sweepDirtyVisitTasks()); } catch (err) { res.status(502).json({ error: err.message }); }
+});
+app.get('/admin/schedule/sync-status', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const dirty = await sbGet('inspections?jn_task_dirty=eq.true&select=id,jn_task_attempts,jn_task_error,scheduled_date&order=updated_at.asc&limit=50');
+    res.json({ dryrun: JN_TASKS_DRYRUN, redirect_job: JN_TASKS_REDIRECT_JOB || null, sweep: JN_TASKS_SWEEP, last_sweep: lastJnTaskSweep, dirty: dirty || [] });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Admin: link DryOps profiles to JobNimbus users by email (auth.users.email ↔
+// /account/users). Body { force: true } re-links already-linked profiles.
+app.post('/admin/profiles/backfill-jn-users', requireAuth, requireStrictAdmin, async (req, res) => {
+  try {
+    const force = !!(req.body && req.body.force);
+    const authByEmail = new Map(); const emailById = new Map();
+    for (let page = 1; page <= 20; page++) {
+      const r = await gotrueAdmin('GET', `users?page=${page}&per_page=1000`);
+      const list = (r.body && (r.body.users || r.body)) || [];
+      if (!Array.isArray(list) || !list.length) break;
+      for (const u of list) {
+        const e = String(u.email || '').trim().toLowerCase();
+        if (e) { authByEmail.set(e, u.id); emailById.set(String(u.id), e); }
+      }
+      if (list.length < 1000) break;
+    }
+    const jnUsers = await jnFetchAccountUsers();
+    const jnByEmail = new Map();
+    for (const [id, u] of jnUsers) {
+      const e = String(u.email || '').trim().toLowerCase();
+      if (!e || !u.active) continue;
+      if (!jnByEmail.has(e)) jnByEmail.set(e, []);
+      jnByEmail.get(e).push({ id, name: u.name });
+    }
+    const profiles = (await sbGet(`profiles?select=id,full_name,role,jn_user_id${force ? '' : '&jn_user_id=is.null'}`)) || [];
+    const matched = [], unmatched = [], ambiguous = [];
+    for (const p of profiles) {
+      const email = emailById.get(String(p.id));
+      const hits = email ? jnByEmail.get(email) || [] : [];
+      if (hits.length === 1) {
+        try {
+          await sbPatch('profiles', `id=eq.${encodeURIComponent(p.id)}`, { jn_user_id: hits[0].id });
+          matched.push({ id: p.id, name: p.full_name, email, jn_user_id: hits[0].id, jn_name: hits[0].name });
+        } catch (e) { unmatched.push({ id: p.id, name: p.full_name, email, error: e.message }); }
+      } else if (hits.length > 1) ambiguous.push({ id: p.id, name: p.full_name, email, candidates: hits });
+      else unmatched.push({ id: p.id, name: p.full_name, email: email || null });
+    }
+    res.json({ ok: true, matched, unmatched, ambiguous, jn_users: jnUsers.size });
+  } catch (err) {
+    console.error('[backfill-jn-users]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+// Admin: manual link / unlink. Body { jn_user_id: "<id>" | null }.
+app.post('/admin/profiles/:id/jn-user', requireAuth, requireStrictAdmin, async (req, res) => {
+  try {
+    const jnUserId = req.body && req.body.jn_user_id ? String(req.body.jn_user_id).trim() : null;
+    if (jnUserId) {
+      const users = await jnFetchAccountUsers();
+      if (!users.has(jnUserId)) return res.status(400).json({ error: 'That JobNimbus user id does not exist on the account' });
+    }
+    const rows = await sbPatch('profiles', `id=eq.${encodeURIComponent(String(req.params.id))}`, { jn_user_id: jnUserId });
+    if (!Array.isArray(rows) || !rows.length) return res.status(404).json({ error: 'Profile not found' });
+    res.json({ ok: true, profile: { id: rows[0].id, jn_user_id: rows[0].jn_user_id } });
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
