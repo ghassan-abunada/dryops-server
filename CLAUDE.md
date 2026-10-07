@@ -119,3 +119,36 @@ server.js for eligibility rules and dedupe logic.
   auto-detected reps for that location (loadSuppEmailOverrides, threaded into
   suppResolveRecipients as 5th arg; env SUPP_NOTIFY_OVERRIDES is fallback only).
   Live JN pool cached 5 min (?refresh=1). Schema: supabase_supp_admin.sql.
+
+## Collections classifier (owner Collections tab)
+
+`collections.js` reads each **Open AR** job's JobNimbus notes with a cheap LLM
+and writes a per-job classification the DryOps app shows on its Collections
+tab. Open AR = `AR_STATUSES` (same list as the hourly AR reconcile and
+`public.is_ar_status()`) AND `approved_invoice_due > 0` (~4.9k jobs). It never
+writes to JobNimbus.
+
+- Tables (schema in the DryOps repo, `supabase/add_collections.sql`):
+  `collections_reviews` (one row per job: category, needs_owner +
+  owner_request, comparative_sent + comparative_amount, summary, last human
+  note, notes_hash) and `collections_runs` (audit + token usage + est. cost).
+  The app reads the `collections_open_ar` view.
+- Model: `COLLECTIONS_MODEL=gemini:gemini-3.1-flash-lite` (default, needs
+  `GEMINI_API_KEY`) or `anthropic:claude-haiku-4-5` (reuses
+  `ANTHROPIC_API_KEY`). One LLM call per job whose notes changed; unchanged
+  jobs (same `notes_hash`) and jobs with no human notes in the lookback window
+  (`no_activity`, model `rule`) cost nothing. Bump `PROMPT_VERSION` in
+  collections.js to re-classify everything on the next full run.
+- Schedules: full pass once per Denver day at `COLLECTIONS_FULL_HOUR` (3am;
+  deduped via `collections_runs.report->>denver_day`) + incremental pass every
+  `COLLECTIONS_INCREMENTAL_HOURS` (jobs with new JN activity, plus AR jobs
+  without a row — the first incremental on an empty table is the seed).
+  `COLLECTIONS_ENABLED=false` turns the schedulers off.
+- Spend guards: `COLLECTIONS_MAX_LLM_JOBS` (6000) and
+  `COLLECTIONS_MAX_COST_USD` (10) per run; error-rate circuit breaker. Expected
+  cost on Flash-Lite: ~$3–4 for the seed, cents per day after.
+- Endpoints (admin or owner JWT): `POST /admin/collections/run`
+  `{full?, location_id?, limit?, force?, dry?}` (`dry:true` returns the prompt
+  payloads without calling the LLM or writing), `GET /admin/collections/status`,
+  `POST /admin/collections/jobs/:jobId/refresh` (single job, forced; the app's
+  "Re-check" button).
