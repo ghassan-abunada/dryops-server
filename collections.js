@@ -64,10 +64,15 @@ summary: max 160 characters, factual, naming the payer and the date of the key n
 
 Rules: be conservative; never invent amounts, names or dates; when the notes are silent, use awaiting_carrier if an invoice was sent to a carrier, otherwise no_activity; prefer the newest note when notes conflict; amounts are USD.`;
 
-// Activity types that are never a human collections note.
+// Activity types that are never a human collections note. JN stamps the acting
+// user's name on status changes, assignments, etc., so author alone can't tell
+// a note from a workflow event (seen in the first prod dry run: "Status
+// Changed|human" ×12, "Job Modified|human" ×23).
 const SYSTEM_TYPES = new Set([
-  'Job Modified', 'Attachment deleted', 'Task Created', 'Task Completed', 'Assigned Job',
-  'Unassigned Job', 'Assigned Contact', 'Related to task', 'Automation', 'Text Message',
+  'Job Modified', 'Job Created', 'Status Changed', 'Attachment deleted', 'Attachment added',
+  'Task Created', 'Task Completed', 'Assigned Job', 'Unassigned Job', 'Assigned Contact',
+  'Unassigned Contact', 'Related to task', 'Related to job', 'Related to contact', 'Contact Created',
+  'Automation', 'Text Message',
 ]);
 const ACT_FIELDS = 'jnid,note,record_type_name,created_by_name,date_created,date_updated,is_active,is_archived,related';
 
@@ -357,11 +362,14 @@ module.exports = function mountCollections(app, deps) {
     const byCategory = {}; const firstErrors = [];
     let cost = 0; let aborted = null;
 
-    const runRow = await sbInsert('collections_runs', {
-      mode, trigger, model: provider.name, prompt_version: PROMPT_VERSION, status: 'running',
+    // Mint the id client-side: PostgREST's return=representation has come back
+    // empty in prod (see sbInsert), and without the id the run could never
+    // patch its own row — leaving it 'running' forever with no cost totals.
+    const runId = crypto.randomUUID();
+    await sbInsert('collections_runs', {
+      id: runId, mode, trigger, model: provider.name, prompt_version: PROMPT_VERSION, status: 'running',
       report: { params: { location_id, limit, force, lookback_days: LOOKBACK_DAYS }, denver_day: denverDay },
     });
-    const runId = runRow?.id || null;
     running = { id: runId, mode, started_at: nowISO, progress: { phase: 'selecting', done: 0, total: 0 } };
     const finish = async (status) => {
       const patch = {
