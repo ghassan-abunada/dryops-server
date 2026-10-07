@@ -3468,10 +3468,10 @@ const DEMO_DRYWALL_LABEL = {
   full_walls: 'Full walls', full_gut: 'Full gut', ceiling_only: 'Ceiling only',
 };
 const DEMO_STAGED_LABEL = { moved: 'moved to a non-demo room', protected: 'protected with plastic', none_running: 'none running' };
-const DEMO_EQUIPMENT = ['Air Mover', 'Dehumidifier', 'Heater', 'Air Scrubber'];
+const DEMO_EQUIPMENT = ['Air Mover', 'Dehumidifier', 'Air Scrubber', 'Drying Mats'];
 const DEMO_EQUIPMENT_PLURAL = {
   'Air Mover': ['air mover', 'air movers'], 'Dehumidifier': ['dehumidifier', 'dehumidifiers'],
-  'Heater': ['heater', 'heaters'], 'Air Scrubber': ['air scrubber', 'air scrubbers'],
+  'Air Scrubber': ['air scrubber', 'air scrubbers'], 'Drying Mats': ['drying mat', 'drying mats'],
 };
 const DEMO_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const demoNeedsPerimeter = (k) => k === 'flood_cut_2ft' || k === 'flood_cut_4ft';
