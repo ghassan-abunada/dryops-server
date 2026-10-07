@@ -3458,6 +3458,214 @@ function isAssigned(visit, profileId) {
   return (visit.assigned_to_ids || []).map(String).includes(String(profileId));
 }
 
+// ── Post-demo report ─────────────────────────────────────────────────────────
+// The checklist + per-room demo details a technician submits from the public
+// tech page before a demo can be saved at 100% (DryOps lib/demoReport.ts is
+// the TypeScript twin; the summary text below must match it byte for byte —
+// both repos test the same fixture). Stored on inspections.demo_report.
+const DEMO_DRYWALL_LABEL = {
+  none: 'No drywall removed', flood_cut_2ft: '2 ft flood cut', flood_cut_4ft: '4 ft flood cut',
+  full_walls: 'Full walls', full_gut: 'Full gut', ceiling_only: 'Ceiling only',
+};
+const DEMO_STAGED_LABEL = { moved: 'moved to a non-demo room', protected: 'protected with plastic', none_running: 'none running' };
+const DEMO_EQUIPMENT = ['Air Mover', 'Dehumidifier', 'Heater', 'Air Scrubber'];
+const DEMO_EQUIPMENT_PLURAL = {
+  'Air Mover': ['air mover', 'air movers'], 'Dehumidifier': ['dehumidifier', 'dehumidifiers'],
+  'Heater': ['heater', 'heaters'], 'Air Scrubber': ['air scrubber', 'air scrubbers'],
+};
+const DEMO_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const demoNeedsPerimeter = (k) => k === 'flood_cut_2ft' || k === 'flood_cut_4ft';
+const demoNeedsSqft = (k) => k === 'full_walls' || k === 'full_gut' || k === 'ceiling_only';
+
+// Whitelist rebuild: unknown keys dropped, types coerced/validated. Returns
+// { ok: true, report } or { ok: false, errors }.
+function validateDemoReport(raw) {
+  const errors = [];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, errors: ['report must be an object'] };
+  if (Number(raw.v) !== 1) errors.push('unsupported report version');
+  const bool = (v, name) => { if (typeof v !== 'boolean') { errors.push(`${name} must be true/false`); return false; } return v; };
+  const text = (v, name, max) => {
+    if (v == null || v === '') return null;
+    if (typeof v !== 'string') { errors.push(`${name} must be text`); return null; }
+    const t = v.trim(); if (t.length > max) errors.push(`${name} is longer than ${max} characters`); return t.slice(0, max) || null;
+  };
+  const intIn = (v, name, lo, hi, allowNull) => {
+    if (v == null || v === '') { if (allowNull) return null; errors.push(`${name} is required`); return null; }
+    const n = Number(v); if (!Number.isInteger(n) || n < lo || n > hi) { errors.push(`${name} must be a whole number ${lo}–${hi}`); return null; } return n;
+  };
+  const rooms = Array.isArray(raw.rooms) ? raw.rooms : (errors.push('rooms must be a list'), []);
+  if (rooms.length > 30) errors.push('too many rooms');
+  const outRooms = rooms.slice(0, 30).map((r, i) => {
+    const label = `room ${i + 1}`;
+    if (!r || typeof r !== 'object') { errors.push(`${label} is invalid`); return null; }
+    const name = text(r.name, `${label} name`, 60) || '';
+    if (!name) errors.push(`${label} needs a name`);
+    const fl = r.flooring || {};
+    const types = Array.isArray(fl.types) ? fl.types.filter((t) => typeof t === 'string').map((t) => t.trim().slice(0, 40)).filter(Boolean).slice(0, 20) : [];
+    const dw = r.drywall || {};
+    const kind = Object.prototype.hasOwnProperty.call(DEMO_DRYWALL_LABEL, dw.kind) ? dw.kind : (errors.push(`${label} drywall kind is invalid`), 'none');
+    const perimeter = dw.perimeter == null ? null : bool(dw.perimeter, `${label} perimeter`);
+    const sqft = intIn(dw.sqft, `${label} square feet`, 0, 100000, true);
+    const eq = {};
+    const src = r.equipment_left && typeof r.equipment_left === 'object' ? r.equipment_left : {};
+    for (const t of DEMO_EQUIPMENT) eq[t] = intIn(src[t] == null ? 0 : src[t], `${label} ${t}`, 0, 99, false) || 0;
+    return {
+      name,
+      flooring: { removed: bool(fl.removed === undefined ? false : fl.removed, `${label} flooring removed`), types },
+      drywall: { kind, perimeter, sqft },
+      cabinets_removed: bool(r.cabinets_removed === undefined ? false : r.cabinets_removed, `${label} cabinets`),
+      appliances_detached: bool(r.appliances_detached === undefined ? false : r.appliances_detached, `${label} appliances`),
+      special_work: text(r.special_work, `${label} special work`, 500),
+      equipment_left: eq,
+    };
+  }).filter(Boolean);
+  const staged = raw.equipment_staged == null ? null
+    : (Object.prototype.hasOwnProperty.call(DEMO_STAGED_LABEL, raw.equipment_staged) ? raw.equipment_staged : (errors.push('equipment_staged is invalid'), null));
+  const completedTime = typeof raw.completed_time === 'string' && DEMO_TIME_RE.test(raw.completed_time) ? raw.completed_time : (errors.push('completed_time must be HH:MM'), '');
+  const report = {
+    v: 1,
+    ...(raw.eta_texted === undefined ? {} : { eta_texted: bool(raw.eta_texted, 'eta_texted') }),
+    pre_docusketch: bool(raw.pre_docusketch, 'pre_docusketch'),
+    equipment_staged: staged,
+    rooms: outRooms,
+    antimicrobial: bool(raw.antimicrobial, 'antimicrobial'),
+    cleaned_floors_cavities: bool(raw.cleaned_floors_cavities, 'cleaned_floors_cavities'),
+    equipment_reset: bool(raw.equipment_reset, 'equipment_reset'),
+    photos_detailed: bool(raw.photos_detailed, 'photos_detailed'),
+    photos_wide: bool(raw.photos_wide, 'photos_wide'),
+    photo_count: intIn(raw.photo_count, 'photo_count', 0, 999, true),
+    post_docusketch: bool(raw.post_docusketch, 'post_docusketch'),
+    completed_time: completedTime,
+    notes: text(raw.notes, 'notes', 2000),
+  };
+  if (JSON.stringify(report).length > 64 * 1024) errors.push('report is too large');
+  return errors.length ? { ok: false, errors } : { ok: true, report };
+}
+
+function isDemoRoomComplete(r) {
+  if (!r || !r.name || !String(r.name).trim()) return false;
+  if (r.flooring && r.flooring.removed && !(r.flooring.types || []).length) return false;
+  const k = r.drywall && r.drywall.kind;
+  if (demoNeedsPerimeter(k) && (r.drywall.perimeter == null)) return false;
+  if (demoNeedsSqft(k) && !(typeof r.drywall.sqft === 'number' && r.drywall.sqft > 0)) return false;
+  return true;
+}
+function isDemoReportComplete(r) {
+  if (!r || Number(r.v) !== 1) return false;
+  if (!r.pre_docusketch || !r.post_docusketch) return false;
+  if (!Array.isArray(r.rooms) || !r.rooms.length || !r.rooms.every(isDemoRoomComplete)) return false;
+  if (!r.antimicrobial || !r.cleaned_floors_cavities || !r.equipment_reset) return false;
+  if (!r.photos_detailed || !r.photos_wide) return false;
+  if (!DEMO_TIME_RE.test(r.completed_time || '')) return false;
+  return true;
+}
+function demoTotalEquipment(r) {
+  const out = {}; for (const t of DEMO_EQUIPMENT) out[t] = 0;
+  for (const room of r.rooms || []) for (const t of DEMO_EQUIPMENT) out[t] += Number(room.equipment_left && room.equipment_left[t]) || 0;
+  return out;
+}
+function demoEquipmentPhrase(c) {
+  if (!c) return '';
+  return DEMO_EQUIPMENT.filter((t) => (Number(c[t]) || 0) > 0)
+    .map((t) => `${Number(c[t])} ${DEMO_EQUIPMENT_PLURAL[t][Number(c[t]) === 1 ? 0 : 1]}`).join(', ');
+}
+function demoFmtClock(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm || ''); if (!m) return hhmm || '';
+  const h24 = Number(m[1]); const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h12}:${m[2]} ${h24 < 12 ? 'AM' : 'PM'}`;
+}
+const demoCheck = (b) => (b ? '✓' : '✗');
+function demoRoomLine(room) {
+  const seg = [];
+  const fl = room.flooring || { removed: false, types: [] };
+  seg.push(fl.removed && (fl.types || []).length ? `floor removed: ${fl.types.join(', ')}` : fl.removed ? 'floor removed' : 'floor not removed');
+  const dw = room.drywall || { kind: 'none', perimeter: null, sqft: null };
+  let walls = `walls: ${(DEMO_DRYWALL_LABEL[dw.kind] || DEMO_DRYWALL_LABEL.none).toLowerCase()}`;
+  if (demoNeedsPerimeter(dw.kind) && dw.perimeter != null) walls += dw.perimeter ? ', full perimeter' : ', partial';
+  if (dw.sqft && dw.sqft > 0) walls += ` (~${dw.sqft} sq ft)`;
+  seg.push(walls);
+  if (room.cabinets_removed) seg.push('cabinets removed');
+  if (room.appliances_detached) seg.push('appliances detached');
+  if (room.special_work && String(room.special_work).trim()) seg.push(`special: ${String(room.special_work).trim()}`);
+  const left = demoEquipmentPhrase(room.equipment_left);
+  seg.push(left ? `left: ${left}` : 'no equipment left');
+  return `• ${room.name} — ${seg.join('; ')}`;
+}
+function summarizeDemoReport(r) {
+  const lines = ['POST-DEMO REPORT', `DocuSketch: pre ${demoCheck(r.pre_docusketch)} · post ${demoCheck(r.post_docusketch)}`];
+  if (r.equipment_staged) lines.push(`Equipment on arrival: ${DEMO_STAGED_LABEL[r.equipment_staged]}`);
+  lines.push(`Rooms (${(r.rooms || []).length}):`);
+  for (const room of r.rooms || []) lines.push(demoRoomLine(room));
+  lines.push(`After demo: antimicrobial ${demoCheck(r.antimicrobial)} · floors & cavities cleaned ${demoCheck(r.cleaned_floors_cavities)} · equipment reset ${demoCheck(r.equipment_reset)}`);
+  const total = demoEquipmentPhrase(demoTotalEquipment(r));
+  lines.push(`Equipment left on site: ${total || 'none'}`);
+  const count = r.photo_count && r.photo_count > 0 ? ` (${r.photo_count})` : '';
+  lines.push(`Photos: detailed ${demoCheck(r.photos_detailed)} · wide ${demoCheck(r.photos_wide)}${count}`);
+  lines.push(`Completed ${demoFmtClock(r.completed_time)}`);
+  if (r.notes && String(r.notes).trim()) lines.push(`Notes: ${String(r.notes).trim()}`);
+  return lines.join('\n');
+}
+function demoReportTaskLine(r) {
+  const n = (r.rooms || []).length;
+  const total = demoEquipmentPhrase(demoTotalEquipment(r));
+  return `Post-demo report: ${n} room${n === 1 ? '' : 's'} · ${total ? `${total} left` : 'no equipment left'} · DocuSketch pre ${demoCheck(r.pre_docusketch)} post ${demoCheck(r.post_docusketch)}`;
+}
+
+// Shared by the token route and the signed-in route.
+async function saveDemoReport({ visitId, report: raw, actor, source }) {
+  const visit = await loadVisit(visitId, 'id,jn_id,job_id,task_type,status');
+  if (!visit) return { status: 404, body: { error: 'Visit not found' } };
+  if (visit.task_type !== 'demo') return { status: 409, body: { error: 'Only demo visits have a post-demo report' } };
+  if (visit.status === 'cancelled') return { status: 409, body: { error: 'This visit was cancelled' } };
+  const v = validateDemoReport(raw);
+  if (!v.ok) return { status: 400, body: { error: 'Report is incomplete or malformed', code: 'INVALID_REPORT', errors: v.errors } };
+  const now = new Date().toISOString();
+  const patched = await sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, {
+    demo_report: v.report, demo_report_submitted_at: now,
+    demo_report_by: actor.id || null, demo_report_by_name: actor.name, jn_task_dirty: true,
+  });
+  // Seed Scope rooms from the report when the job has none yet (names only).
+  if (visit.job_id) {
+    try {
+      const existing = await sbGet(`rooms?job_id=eq.${encodeURIComponent(visit.job_id)}&select=id&limit=1`);
+      if (Array.isArray(existing) && existing.length === 0 && v.report.rooms.length) {
+        await fetch(`${SUPABASE_URL}/rest/v1/rooms`, {
+          method: 'POST', headers: { ...SB_JSON_HEADERS, Prefer: 'return=minimal' },
+          body: JSON.stringify(v.report.rooms.map((r, i) => ({ job_id: visit.job_id, name: r.name, sort_order: i }))),
+        });
+      }
+    } catch (e) { console.warn('[demo report] room seeding failed', e.message); }
+  }
+  syncVisitJnTask(visitId).catch(() => {});
+  return { status: 200, body: { ok: true, visit: patched && patched[0], complete: isDemoReportComplete(v.report), summary: summarizeDemoReport(v.report) } };
+}
+
+app.post('/tech/visits/:id/demo-report', async (req, res) => {
+  try {
+    const tech = await techGuard(req, res);
+    if (!tech) return;
+    const out = await saveDemoReport({ visitId: String(req.params.id), report: req.body && req.body.report, actor: { id: tech.profileId, name: tech.name }, source: 'tech_link' });
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    console.error('[tech demo-report error]', err.message);
+    res.status(502).json({ error: 'Could not save the report right now. Please try again.' });
+  }
+});
+app.post('/visits/:id/demo-report', requireAuth, async (req, res) => {
+  try {
+    const actor = await appActor(req);
+    if (!actor) return res.status(403).json({ error: 'Profile not found' });
+    const visit = await loadVisit(String(req.params.id), 'id,assigned_to_ids');
+    if (!visit) return res.status(404).json({ error: 'Visit not found' });
+    if (!['admin', 'owner'].includes(actor.role) && !isAssigned(visit, actor.id)) return res.status(403).json({ error: 'Not allowed' });
+    const out = await saveDemoReport({ visitId: String(req.params.id), report: req.body && req.body.report, actor: { id: actor.id, name: actor.name }, source: 'app' });
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    console.error('[demo-report error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // Author + location tag for a visit's JobNimbus note.
 async function visitNoteContext(visit, actorId) {
   const out = { createdBy: null, tag: null, jnLocationId: null };
@@ -3482,12 +3690,17 @@ async function visitNoteContext(visit, actorId) {
 
 // Shared by the token route and the signed-in route.
 async function completeVisit({ visitId, pct, note, actor, source }) {
-  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,assigned_to_ids,completion_pct,location_id');
+  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,assigned_to_ids,completion_pct,location_id,demo_report');
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
   if (visit.status === 'cancelled') return { status: 409, body: { error: 'This visit was cancelled' } };
   let p = Number(pct);
   if (visit.task_type !== 'demo') p = 100;
   if (![25, 50, 75, 100].includes(p)) return { status: 400, body: { error: 'pct must be 25, 50, 75 or 100' } };
+  // Techs must finish the post-demo report before leaving (dispatchers in the
+  // app may override — the UI shows an explicit warning).
+  if (visit.task_type === 'demo' && p === 100 && source === 'tech_link' && !isDemoReportComplete(visit.demo_report)) {
+    return { status: 409, body: { error: 'Finish the post-demo report first', code: 'REPORT_REQUIRED' } };
+  }
   const cleanNote = String(note || '').trim().slice(0, 2000) || null;
 
   // Idempotent within 60 s (double taps, retried requests) — no second JN note.
@@ -3506,12 +3719,15 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
   });
   let update = await sbInsert('visit_updates', {
     visit_id: visitId, actor_id: actor.id || null, actor_name: actor.name, source, pct: p, note: cleanNote,
+    report_snapshot: visit.demo_report || null,
   });
   if (!update) {
     const latest = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
     update = (latest && latest[0]) || { id: null };
   }
-  const jn = await jnAddNote(visit.jn_id, visitNoteText(visit, p, actor.name, cleanNote), await visitNoteContext(visit, actor.id));
+  const noteText = visitNoteText(visit, p, actor.name, cleanNote)
+    + (visit.demo_report ? '\n\n' + summarizeDemoReport(visit.demo_report) : '');
+  const jn = await jnAddNote(visit.jn_id, noteText, await visitNoteContext(visit, actor.id));
   const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
   await Promise.all([
     sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, jnPatch).catch(() => {}),
@@ -3525,13 +3741,15 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
 
 // Re-post the JN note for the latest failed update.
 async function retryVisitJn(visitId) {
-  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,location_id');
+  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,location_id,demo_report');
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
   const rows = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
   const upd = rows && rows[0];
   if (!upd) return { status: 404, body: { error: 'Nothing to retry' } };
   if (!upd.jn_note_error) return { status: 200, body: { ok: true, jn: { ok: true, id: upd.jn_note_id } } };
-  const jn = await jnAddNote(visit.jn_id, visitNoteText(visit, upd.pct, upd.actor_name, upd.note), await visitNoteContext(visit, upd.actor_id));
+  const report = upd.report_snapshot || visit.demo_report;
+  const retryText = visitNoteText(visit, upd.pct, upd.actor_name, upd.note) + (report ? '\n\n' + summarizeDemoReport(report) : '');
+  const jn = await jnAddNote(visit.jn_id, retryText, await visitNoteContext(visit, upd.actor_id));
   const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
   await Promise.all([
     sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, jnPatch).catch(() => {}),
@@ -3784,6 +4002,7 @@ function buildJnTaskBody(v, job, techs, settings, typeName, tz) {
     String(v.notes || '').trim() || null,
     `${blockLine(v, settings)}${crew ? ` · crew of ${crew}` : ''}`,
     unlinked.length ? `Assigned (no JobNimbus user): ${unlinked.join(', ')}` : null,
+    v.demo_report ? demoReportTaskLine(v.demo_report) : null,
     'Scheduled in DryOps',
   ].filter(Boolean);
   const body = {
@@ -3812,7 +4031,7 @@ function visitFingerprint(v) {
 }
 
 const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,slot_start_min,slot_end_min,block_kind,crew_size,task_type,status,notes,' +
-  'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,jobs(name,client_name,location_id,jn_location_id)';
+  'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,demo_report,jobs(name,client_name,location_id,jn_location_id)';
 
 const visitSyncLocks = new Set();
 // The one entry point for routes, completeVisit and the sweep.
