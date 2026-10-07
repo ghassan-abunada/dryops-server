@@ -426,10 +426,25 @@ module.exports = function mountCollections(app, deps) {
         }
       });
 
+      // Flush finished rows in batches so a redeploy mid-run (Railway restarts
+      // on every merge) keeps what was already classified and paid for.
+      // PostgREST bulk rows must share one key set → one batch per shape.
+      const flush = async (all = false) => {
+        for (const batch of [detRows, fullRows, errRows]) {
+          while (batch.length >= 200 || (all && batch.length)) {
+            const chunk = batch.splice(0, 500);
+            await sbBulkUpsert('collections_reviews', chunk);
+            running.progress.written = (running.progress.written || 0) + chunk.length;
+          }
+        }
+      };
+      await flush(true); // deterministic + rule rows are complete already
+
       // 3. LLM
       const queue = limit ? llmQueue.slice(0, limit) : llmQueue;
       for (const inp of llmQueue.slice(queue.length)) detRows.push(inp.deterministic); // beyond limit: deterministic only
       running.progress = { phase: 'classifying', done: 0, total: queue.length };
+      let flushing = null;
       await runPool(queue, LLM_CONCURRENCY, async (inp) => {
         if (aborted) { detRows.push(inp.deterministic); return; }
         if (stats.llm_calls >= MAX_LLM_JOBS) { aborted = `max_llm_jobs (${MAX_LLM_JOBS})`; detRows.push(inp.deterministic); return; }
@@ -449,16 +464,16 @@ module.exports = function mountCollections(app, deps) {
           errRows.push({ ...inp.deterministic, error: String(err.message).slice(0, 300), error_at: nowISO }); // notes_hash not advanced → retried next run
         }
         running.progress.done++;
+        if (fullRows.length + errRows.length + detRows.length >= 200) {
+          if (!flushing) flushing = flush().catch(e => console.error('[collections] flush failed:', e.message)).finally(() => { flushing = null; });
+          await flushing;
+        }
       });
 
-      // 4. write (three batches — PostgREST bulk rows must share one key set)
-      running.progress = { phase: 'writing', done: 0, total: detRows.length + fullRows.length + errRows.length };
-      for (const batch of [detRows, fullRows, errRows]) {
-        for (let i = 0; i < batch.length; i += 500) {
-          await sbBulkUpsert('collections_reviews', batch.slice(i, i + 500));
-          running.progress.done += Math.min(500, batch.length - i);
-        }
-      }
+      // 4. write whatever is left
+      running.progress = { ...running.progress, phase: 'writing' };
+      if (flushing) await flushing;
+      await flush(true);
       console.log(`[collections] ${mode} done: scope ${stats.jobs_in_scope}, llm ${stats.llm_calls}, unchanged ${stats.skipped_unchanged}, no-activity ${stats.no_activity}, errors ${stats.errors}, ~$${cost.toFixed(3)}${aborted ? `, ABORTED (${aborted})` : ''}`);
       await finish(aborted ? 'aborted' : 'done');
     } catch (err) {
