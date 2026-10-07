@@ -3463,11 +3463,15 @@ function isAssigned(visit, profileId) {
 // tech page before a demo can be saved at 100% (DryOps lib/demoReport.ts is
 // the TypeScript twin; the summary text below must match it byte for byte —
 // both repos test the same fixture). Stored on inspections.demo_report.
+// Room quantities (LF / sq ft) are entered or derived from room dimensions so
+// an Xactimate invoice can be written from the note.
 const DEMO_DRYWALL_LABEL = {
   none: 'No drywall removed', flood_cut_2ft: '2 ft flood cut', flood_cut_4ft: '4 ft flood cut',
   full_walls: 'Full walls', full_gut: 'Full gut', ceiling_only: 'Ceiling only',
 };
+const DEMO_BASEBOARD_LABEL = { none: 'None removed', full_perimeter: 'Full perimeter', partial: 'Partial' };
 const DEMO_STAGED_LABEL = { moved: 'moved to a non-demo room', protected: 'protected with plastic', none_running: 'none running' };
+const DEMO_PROFILES = ['kitchen', 'bathroom', 'laundry', 'other'];
 const DEMO_EQUIPMENT = ['Air Mover', 'Dehumidifier', 'Air Scrubber', 'Drying Mats'];
 const DEMO_EQUIPMENT_PLURAL = {
   'Air Mover': ['air mover', 'air movers'], 'Dehumidifier': ['dehumidifier', 'dehumidifiers'],
@@ -3476,6 +3480,46 @@ const DEMO_EQUIPMENT_PLURAL = {
 const DEMO_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const demoNeedsPerimeter = (k) => k === 'flood_cut_2ft' || k === 'flood_cut_4ft';
 const demoNeedsSqft = (k) => k === 'full_walls' || k === 'full_gut' || k === 'ceiling_only';
+const demoRemovesDrywall = (k) => k && k !== 'none';
+const demoCutHeight = (k) => (k === 'flood_cut_2ft' ? 2 : k === 'flood_cut_4ft' ? 4 : null);
+const demoRound1 = (n) => Math.round(n * 10) / 10;
+function demoRoomProfile(name) {
+  const n = String(name || '').toLowerCase();
+  if (/kitchen|kitchenette|butler/.test(n)) return 'kitchen';
+  if (/bath|powder|restroom|washroom|\bwc\b|toilet|shower/.test(n)) return 'bathroom';
+  if (/laundry|utility|mud ?room|mudroom/.test(n)) return 'laundry';
+  return 'other';
+}
+function demoPerimeterLF(d) { return d && d.length_ft && d.width_ft ? demoRound1(2 * (d.length_ft + d.width_ft)) : null; }
+function demoFloorSF(d) { return d && d.length_ft && d.width_ft ? demoRound1(d.length_ft * d.width_ft) : null; }
+function demoWallSF(d) { const p = demoPerimeterLF(d); return p != null && d && d.ceiling_ft ? demoRound1(p * d.ceiling_ft) : null; }
+function demoFloodCutLF(room) {
+  if (!demoNeedsPerimeter(room.drywall.kind)) return null;
+  if (room.drywall.lf && room.drywall.lf > 0) return room.drywall.lf;
+  if (room.drywall.perimeter) return demoPerimeterLF(room.dims);
+  return null;
+}
+function demoDrywallSF(room) {
+  const k = room.drywall.kind;
+  if (k === 'none') return null;
+  if (room.drywall.sqft && room.drywall.sqft > 0) return room.drywall.sqft;
+  const h = demoCutHeight(k);
+  if (h) { const lf = demoFloodCutLF(room); return lf ? demoRound1(lf * h) : null; }
+  if (k === 'ceiling_only') return demoFloorSF(room.dims);
+  if (k === 'full_walls') return demoWallSF(room.dims);
+  if (k === 'full_gut') { const w = demoWallSF(room.dims); const c = demoFloorSF(room.dims); return w != null && c != null ? demoRound1(w + c) : null; }
+  return null;
+}
+function demoBaseboardLF(room) {
+  if (!room.baseboard.kind || room.baseboard.kind === 'none') return null;
+  if (room.baseboard.lf && room.baseboard.lf > 0) return room.baseboard.lf;
+  return room.baseboard.kind === 'full_perimeter' ? demoPerimeterLF(room.dims) : null;
+}
+function demoFlooringSF(room) {
+  if (!room.flooring.removed) return null;
+  if (room.flooring.sqft && room.flooring.sqft > 0) return room.flooring.sqft;
+  return demoFloorSF(room.dims);
+}
 
 // Whitelist rebuild: unknown keys dropped, types coerced/validated. Returns
 // { ok: true, report } or { ok: false, errors }.
@@ -3484,15 +3528,21 @@ function validateDemoReport(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, errors: ['report must be an object'] };
   if (Number(raw.v) !== 1) errors.push('unsupported report version');
   const bool = (v, name) => { if (typeof v !== 'boolean') { errors.push(`${name} must be true/false`); return false; } return v; };
+  const boolOrNull = (v, name) => (v == null ? null : bool(v, name));
   const text = (v, name, max) => {
     if (v == null || v === '') return null;
     if (typeof v !== 'string') { errors.push(`${name} must be text`); return null; }
     const t = v.trim(); if (t.length > max) errors.push(`${name} is longer than ${max} characters`); return t.slice(0, max) || null;
   };
+  const numIn = (v, name, lo, hi, allowNull) => {
+    if (v == null || v === '') { if (allowNull) return null; errors.push(`${name} is required`); return null; }
+    const n = Number(v); if (!Number.isFinite(n) || n < lo || n > hi) { errors.push(`${name} must be a number ${lo}–${hi}`); return null; } return Math.round(n * 10) / 10;
+  };
   const intIn = (v, name, lo, hi, allowNull) => {
     if (v == null || v === '') { if (allowNull) return null; errors.push(`${name} is required`); return null; }
     const n = Number(v); if (!Number.isInteger(n) || n < lo || n > hi) { errors.push(`${name} must be a whole number ${lo}–${hi}`); return null; } return n;
   };
+  const strList = (v, name, maxItems, maxLen) => (Array.isArray(v) ? v : []).filter((t) => typeof t === 'string').map((t) => t.trim().slice(0, maxLen)).filter(Boolean).slice(0, maxItems);
   const rooms = Array.isArray(raw.rooms) ? raw.rooms : (errors.push('rooms must be a list'), []);
   if (rooms.length > 30) errors.push('too many rooms');
   const outRooms = rooms.slice(0, 30).map((r, i) => {
@@ -3500,21 +3550,39 @@ function validateDemoReport(raw) {
     if (!r || typeof r !== 'object') { errors.push(`${label} is invalid`); return null; }
     const name = text(r.name, `${label} name`, 60) || '';
     if (!name) errors.push(`${label} needs a name`);
+    const profile = DEMO_PROFILES.includes(r.profile) ? r.profile : demoRoomProfile(name);
+    let dims = null;
+    if (r.dims && typeof r.dims === 'object') {
+      const L = numIn(r.dims.length_ft, `${label} length`, 0, 500, true);
+      const W = numIn(r.dims.width_ft, `${label} width`, 0, 500, true);
+      const H = numIn(r.dims.ceiling_ft, `${label} ceiling`, 0, 40, true);
+      if (L || W || H) dims = { length_ft: L, width_ft: W, ceiling_ft: H };
+    }
     const fl = r.flooring || {};
-    const types = Array.isArray(fl.types) ? fl.types.filter((t) => typeof t === 'string').map((t) => t.trim().slice(0, 40)).filter(Boolean).slice(0, 20) : [];
+    const bb = r.baseboard || {};
+    const bbKind = bb.kind == null ? null : (Object.prototype.hasOwnProperty.call(DEMO_BASEBOARD_LABEL, bb.kind) ? bb.kind : (errors.push(`${label} baseboard kind is invalid`), null));
     const dw = r.drywall || {};
     const kind = Object.prototype.hasOwnProperty.call(DEMO_DRYWALL_LABEL, dw.kind) ? dw.kind : (errors.push(`${label} drywall kind is invalid`), 'none');
-    const perimeter = dw.perimeter == null ? null : bool(dw.perimeter, `${label} perimeter`);
-    const sqft = intIn(dw.sqft, `${label} square feet`, 0, 100000, true);
+    const cabSrc = r.cabinets && typeof r.cabinets === 'object' ? r.cabinets : {};
+    const cabRemoved = strList(cabSrc.removed, `${label} cabinets`, 10, 40);
+    const cabLf = {};
+    for (const c of cabRemoved) { const v = cabSrc.lf && cabSrc.lf[c]; cabLf[c] = numIn(v, `${label} ${c} LF`, 0, 1000, true); }
+    const appliances = strList(r.appliances, `${label} appliances`, 12, 40);
     const eq = {};
     const src = r.equipment_left && typeof r.equipment_left === 'object' ? r.equipment_left : {};
     for (const t of DEMO_EQUIPMENT) eq[t] = intIn(src[t] == null ? 0 : src[t], `${label} ${t}`, 0, 99, false) || 0;
     return {
-      name,
-      flooring: { removed: bool(fl.removed === undefined ? false : fl.removed, `${label} flooring removed`), types },
-      drywall: { kind, perimeter, sqft },
-      cabinets_removed: bool(r.cabinets_removed === undefined ? false : r.cabinets_removed, `${label} cabinets`),
-      appliances_detached: bool(r.appliances_detached === undefined ? false : r.appliances_detached, `${label} appliances`),
+      name, profile, dims,
+      flooring: { removed: bool(fl.removed === undefined ? false : fl.removed, `${label} flooring removed`), types: strList(fl.types, `${label} flooring types`, 20, 40), sqft: numIn(fl.sqft, `${label} flooring sq ft`, 0, 100000, true) },
+      baseboard: { kind: bbKind, lf: numIn(bb.lf, `${label} baseboard LF`, 0, 10000, true) },
+      drywall: {
+        kind, perimeter: boolOrNull(dw.perimeter, `${label} perimeter`), lf: numIn(dw.lf, `${label} flood cut LF`, 0, 10000, true),
+        sqft: numIn(dw.sqft, `${label} drywall sq ft`, 0, 100000, true), insulation_removed: boolOrNull(dw.insulation_removed, `${label} insulation`),
+      },
+      cabinets: { removed: cabRemoved, lf: cabLf },
+      appliances,
+      cabinets_removed: cabRemoved.length > 0 || (r.cabinets_removed === true && !cabSrc.removed),
+      appliances_detached: appliances.length > 0 || (r.appliances_detached === true && !Array.isArray(r.appliances)),
       special_work: text(r.special_work, `${label} special work`, 500),
       equipment_left: eq,
     };
@@ -3545,9 +3613,15 @@ function validateDemoReport(raw) {
 function isDemoRoomComplete(r) {
   if (!r || !r.name || !String(r.name).trim()) return false;
   if (r.flooring && r.flooring.removed && !(r.flooring.types || []).length) return false;
+  if (!r.baseboard || r.baseboard.kind == null) return false;
+  if (r.baseboard.kind === 'partial' && !(r.baseboard.lf > 0)) return false;
   const k = r.drywall && r.drywall.kind;
-  if (demoNeedsPerimeter(k) && (r.drywall.perimeter == null)) return false;
-  if (demoNeedsSqft(k) && !(typeof r.drywall.sqft === 'number' && r.drywall.sqft > 0)) return false;
+  if (demoNeedsPerimeter(k)) {
+    if (r.drywall.perimeter == null) return false;
+    if (r.drywall.perimeter === false && !(r.drywall.lf > 0)) return false;
+  }
+  if (demoNeedsSqft(k) && !(demoDrywallSF(r) > 0)) return false;
+  if (demoRemovesDrywall(k) && r.drywall.insulation_removed == null) return false;
   return true;
 }
 function isDemoReportComplete(r) {
@@ -3575,21 +3649,52 @@ function demoFmtClock(hhmm) {
   return `${h12}:${m[2]} ${h24 < 12 ? 'AM' : 'PM'}`;
 }
 const demoCheck = (b) => (b ? '✓' : '✗');
+const demoQty = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+function demoDimsLabel(d) {
+  if (!d || !d.length_ft || !d.width_ft) return null;
+  return `${demoQty(d.length_ft)}×${demoQty(d.width_ft)}${d.ceiling_ft ? `, ${demoQty(d.ceiling_ft)} ft ceiling` : ''}`;
+}
 function demoRoomLine(room) {
   const seg = [];
+  const dims = demoDimsLabel(room.dims);
+  const head = dims ? `• ${room.name} (${dims}) — ` : `• ${room.name} — `;
   const fl = room.flooring || { removed: false, types: [] };
-  seg.push(fl.removed && (fl.types || []).length ? `floor removed: ${fl.types.join(', ')}` : fl.removed ? 'floor removed' : 'floor not removed');
-  const dw = room.drywall || { kind: 'none', perimeter: null, sqft: null };
+  if (fl.removed) {
+    const sf = demoFlooringSF(room);
+    seg.push(`floor removed: ${(fl.types || []).length ? fl.types.join(', ') : 'yes'}${sf ? ` (${demoQty(sf)} sq ft)` : ''}`);
+  } else {
+    seg.push('floor not removed');
+  }
+  const bb = room.baseboard || {};
+  if (bb.kind && bb.kind !== 'none') {
+    const lf = demoBaseboardLF(room);
+    seg.push(`baseboard removed: ${DEMO_BASEBOARD_LABEL[bb.kind].toLowerCase()}${lf ? ` (${demoQty(lf)} LF)` : ''}`);
+  }
+  const dw = room.drywall || { kind: 'none' };
   let walls = `walls: ${(DEMO_DRYWALL_LABEL[dw.kind] || DEMO_DRYWALL_LABEL.none).toLowerCase()}`;
-  if (demoNeedsPerimeter(dw.kind) && dw.perimeter != null) walls += dw.perimeter ? ', full perimeter' : ', partial';
-  if (dw.sqft && dw.sqft > 0) walls += ` (~${dw.sqft} sq ft)`;
+  if (demoNeedsPerimeter(dw.kind)) {
+    if (dw.perimeter != null) walls += dw.perimeter ? ', full perimeter' : ', partial';
+    const lf = demoFloodCutLF(room); const sf = demoDrywallSF(room);
+    const q = [lf ? `${demoQty(lf)} LF` : null, sf ? `~${demoQty(sf)} sq ft` : null].filter(Boolean);
+    if (q.length) walls += ` (${q.join(', ')})`;
+  } else if (demoNeedsSqft(dw.kind)) {
+    const sf = demoDrywallSF(room);
+    if (sf) walls += ` (~${demoQty(sf)} sq ft)`;
+  }
+  if (demoRemovesDrywall(dw.kind) && dw.insulation_removed) walls += ', insulation removed';
   seg.push(walls);
-  if (room.cabinets_removed) seg.push('cabinets removed');
-  if (room.appliances_detached) seg.push('appliances detached');
+  const cab = room.cabinets || { removed: [], lf: {} };
+  if ((cab.removed || []).length) {
+    seg.push(`cabinets removed: ${cab.removed.map((c) => { const lf = cab.lf && cab.lf[c]; return `${c.toLowerCase()}${lf > 0 ? ` (${demoQty(lf)} LF)` : ''}`; }).join(', ')}`);
+  } else if (room.cabinets_removed) {
+    seg.push('cabinets removed');
+  }
+  if ((room.appliances || []).length) seg.push(`detached: ${room.appliances.map((a) => a.toLowerCase()).join(', ')}`);
+  else if (room.appliances_detached) seg.push('appliances detached');
   if (room.special_work && String(room.special_work).trim()) seg.push(`special: ${String(room.special_work).trim()}`);
   const left = demoEquipmentPhrase(room.equipment_left);
   seg.push(left ? `left: ${left}` : 'no equipment left');
-  return `• ${room.name} — ${seg.join('; ')}`;
+  return head + seg.join('; ');
 }
 function summarizeDemoReport(r) {
   const lines = ['POST-DEMO REPORT', `DocuSketch: pre ${demoCheck(r.pre_docusketch)} · post ${demoCheck(r.post_docusketch)}`];
