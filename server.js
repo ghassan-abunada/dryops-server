@@ -4190,7 +4190,7 @@ const PDFDocument = require('pdfkit');
 const sharp = require('sharp');
 
 const PHOTO_REPORT_TARGET_PDF_BYTES = 5 * 1024 * 1024;   // ideal: whole report in one ≤5MB file
-const PHOTO_REPORT_MAX_PDF_BYTES = 9.4 * 1024 * 1024;   // hard cap per part (estimate; real PDFs land 3–6% UNDER it, so <10MB)
+const PHOTO_REPORT_MAX_PDF_BYTES = 9.6 * 1024 * 1024;   // hard cap per part (estimate; real PDFs land 3–6% UNDER it, so <10MB)
 const PHOTO_REPORT_MAX_PHOTOS = 200; // JN /files page cap — same as jn_photo_counts
 // Longest-side px + JPEG quality, best first. Each rung is ~15–25% smaller
 // than the one above (measured on real 12MP photos: ~85 / 70 / 55 / 49 KB).
@@ -4441,20 +4441,14 @@ async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
     if (estimate(photos) <= PHOTO_REPORT_TARGET_PDF_BYTES) break;
   }
 
-  // Split into parts so each PDF stays under the hard cap. Parts are
-  // balanced (e.g. 2 × 5MB rather than 9.4MB + 0.6MB): pick the part count
-  // from the total, then fill each part to an even share.
+  // Split into parts, each filled right up to the hard cap (owner 2026-10-07:
+  // on a split, max out each file at 10MB rather than balancing parts).
   const total = estimate(photos);
-  const photoBytes = total - baseBytes, maxPhoto = Math.max(...photos.map(p => p.buf.length + 1500));
-  const nParts = Math.max(1, Math.ceil(photoBytes / (PHOTO_REPORT_MAX_PDF_BYTES - baseBytes)));
-  // Even share per part + one photo of slack so greedy filling never leaves a
-  // straggler part holding the last photo or two.
-  const partBudget = Math.min(PHOTO_REPORT_MAX_PDF_BYTES, baseBytes + Math.ceil(photoBytes / nParts) + maxPhoto);
   const groups = [];
   let cur = [], bytes = baseBytes;
   for (const p of photos) {
     const add = p.buf.length + 1500;
-    if (cur.length && bytes + add > partBudget) { groups.push(cur); cur = []; bytes = baseBytes; }
+    if (cur.length && bytes + add > PHOTO_REPORT_MAX_PDF_BYTES) { groups.push(cur); cur = []; bytes = baseBytes; }
     cur.push(p);
     bytes += add;
   }
