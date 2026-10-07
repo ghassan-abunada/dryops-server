@@ -3392,7 +3392,14 @@ async function jnAddNote(jnJobId, text, opts = {}) {
   if (!target) return { ok: false, error: 'Visit has no JobNimbus job id' };
   const tag = String(opts.tag || '').trim();
   const noteText = tag && !String(text).includes(tag) ? `${tag} ${text}` : text;
-  const payload = { record_type_name: 'Note', note: noteText, related: [{ id: target, type: 'job' }] };
+  const payload = {
+    record_type_name: 'Note', note: noteText,
+    related: [{ id: target, type: 'job' }],
+    primary: { id: target, type: 'job' },
+  };
+  // JobNimbus scopes activity feeds by location; without this the note lands
+  // in location 1 and is invisible to the job's team.
+  if (opts.jnLocationId) payload.location = { id: Number(opts.jnLocationId) };
   if (opts.createdBy) payload.created_by = String(opts.createdBy);
   if (JN_NOTES_DRYRUN) {
     console.log('[jn note dryrun]', target, JSON.stringify(noteText.slice(0, 160)), opts.createdBy ? `by ${opts.createdBy}` : '');
@@ -3453,15 +3460,21 @@ function isAssigned(visit, profileId) {
 
 // Author + location tag for a visit's JobNimbus note.
 async function visitNoteContext(visit, actorId) {
-  const out = { createdBy: null, tag: null };
+  const out = { createdBy: null, tag: null, jnLocationId: null };
   try {
     if (actorId) {
       const rows = await sbGet(`profiles?id=eq.${encodeURIComponent(actorId)}&select=jn_user_id`);
       out.createdBy = (rows && rows[0] && rows[0].jn_user_id) || null;
     }
     if (visit && visit.location_id) {
-      const locs = await sbGet(`locations?id=eq.${encodeURIComponent(visit.location_id)}&select=jn_note_tag`);
+      const locs = await sbGet(`locations?id=eq.${encodeURIComponent(visit.location_id)}&select=jn_note_tag,jn_location_id`);
       out.tag = (locs && locs[0] && locs[0].jn_note_tag) || null;
+      out.jnLocationId = (locs && locs[0] && locs[0].jn_location_id) || null;
+    }
+    if (!out.jnLocationId && visit && visit.jn_id) {
+      // Fall back to the job's own JN location.
+      const jobs = await sbGet(`jobs?jn_id=eq.${encodeURIComponent(visit.jn_id)}&select=jn_location_id`);
+      out.jnLocationId = (jobs && jobs[0] && jobs[0].jn_location_id) || null;
     }
   } catch (e) { console.warn('[jn note] context lookup failed', e.message); }
   return out;
@@ -3781,9 +3794,12 @@ function buildJnTaskBody(v, job, techs, settings, typeName, tz) {
     all_day: anytime || v.block_kind === 'full_day',
     owners: linked.map((t) => ({ id: t.jn_user_id })),
     related: [{ id: JN_TASKS_REDIRECT_JOB || v.jn_id, type: 'job' }],
+    primary: { id: JN_TASKS_REDIRECT_JOB || v.jn_id, type: 'job' },
     is_completed: v.status === 'completed',
     is_active: v.status !== 'cancelled',
   };
+  // Same visibility rule as notes: JobNimbus scopes by location.
+  if (job && job.jn_location_id) body.location = { id: Number(job.jn_location_id) };
   if (typeName) body.record_type_name = typeName;
   return body;
 }
@@ -3796,7 +3812,7 @@ function visitFingerprint(v) {
 }
 
 const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,slot_start_min,slot_end_min,block_kind,crew_size,task_type,status,notes,' +
-  'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,jobs(name,client_name,location_id)';
+  'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,jobs(name,client_name,location_id,jn_location_id)';
 
 const visitSyncLocks = new Set();
 // The one entry point for routes, completeVisit and the sweep.
