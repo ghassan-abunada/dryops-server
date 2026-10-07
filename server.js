@@ -260,6 +260,32 @@ function jnToISO(v) {
 }
 function jnToDate(v) { const iso = jnToISO(v); return iso ? iso.slice(0, 10) : undefined; }
 
+// JobNimbus rolls each job's APPROVED invoices up onto the job record:
+// approved_invoice_total / approved_invoice_due (+ last_invoice_date_invoice
+// for the newest invoice's date). DryOps' Open AR sums approved_invoice_due
+// over jobs in an AR status (see supabase/add_job_invoice_balance.sql in the
+// app repo), so every path that writes a job row stores these. Only the
+// job-level fields — parent_approved_* are the CONTACT's rollup across all its
+// jobs and must not be used. Absent keys are left untouched (undefined).
+function jnNum(v) {
+  if (v === undefined || v === null || v === '') return undefined;
+  const n = Number(v); return Number.isFinite(n) ? n : undefined;
+}
+function invoiceBalanceCols(job) {
+  const out = {};
+  const total = jnNum(job.approved_invoice_total);
+  const due = jnNum(job.approved_invoice_due);
+  if (total !== undefined) out.approved_invoice_total = total;
+  if (due !== undefined) out.approved_invoice_due = due;
+  if (total !== undefined || due !== undefined) {
+    // 0 means "no invoice yet" — keep the column null rather than epoch.
+    const d = jnNum(job.last_invoice_date_invoice);
+    out.last_invoice_date = d ? jnToDate(d) : null;
+    out.invoice_balance_synced = new Date().toISOString();
+  }
+  return out;
+}
+
 app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   if (!webhookTokenOk(req)) return res.status(401).json({ error: 'unauthorized' });
 
@@ -311,6 +337,7 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   else if (job.is_active !== undefined) set('is_active', !!job.is_active);
   set('jn_created', jnToISO(job.date_created));
   set('jn_updated', jnToISO(job.date_modified || job.date_updated));
+  Object.assign(row, invoiceBalanceCols(job));
 
   // Resolve JobNimbus numeric location id -> our locations.id UUID. Unknown
   // ids (a location created in JN after our seed) get a placeholder row
@@ -1395,6 +1422,99 @@ if (SUPABASE_SERVICE_KEY) {
   setTimeout(reconcileFinancials, 15 * 1000); // catch-up shortly after boot
   setInterval(reconcileFinancials, RECONCILE_INTERVAL_MS);
 }
+
+// ── Invoice-balance reconcile (Open AR) ───────────────────────────────────────
+// Open AR = sum(jobs.approved_invoice_due) over jobs in an AR status. The job
+// webhook stores those fields on every job event, but paying an invoice down
+// in JobNimbus does not reliably fire a JOB webhook — so once an hour we
+// re-pull every JN job currently in an AR status (ALL record types: mitigation
+// locations also run Contents / Rebuild jobs) and refresh the three columns.
+// Rows are only written for jn_ids we already track (jn_id in local `jobs`),
+// via merge-duplicates upsert touching just these columns — never a skeleton
+// row for an untracked JN job. Jobs that LEFT an AR status drop out of the AR
+// sum by predicate, so there is nothing to zero.
+const AR_STATUSES = ['Invoice Created', 'Invoiced', 'Pending Payment', 'Pending Payments'];
+const INVOICE_BALANCE_INTERVAL_MS = 60 * 60 * 1000;
+let invoiceBalanceRunning = false;
+let lastInvoiceBalanceSync = null;
+
+// Every JN job in an AR status, slimmed to the fields we store. A terms filter
+// over status_name keeps the pull far under the ES 10k from+size cap (~6.5k
+// jobs across all record types as of 2026-10). Throws on any short page so a
+// flaky pull never writes a partial result.
+async function jnFetchArJobs() {
+  const out = [];
+  const filter = encodeURIComponent(JSON.stringify({ must: [{ terms: { status_name: AR_STATUSES } }] }));
+  const fields = 'jnid,status_name,record_type_name,approved_invoice_total,approved_invoice_due,last_invoice_date_invoice,date_updated';
+  let count = Infinity;
+  for (let from = 0; from < 10000 && out.length < count; from += 500) {
+    const r = await fetch(`${JN_BASE}/jobs?size=500&from=${from}&filter=${filter}&fields=${fields}`, {
+      headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+    });
+    if (!r.ok) throw new Error(`JN /jobs ${r.status}`);
+    const data = await r.json();
+    const page = data?.results ?? data?.data ?? [];
+    count = data?.count ?? data?.total ?? page.length;
+    out.push(...page);
+    if (page.length < 500) break;
+  }
+  if (count !== Infinity && out.length < Math.min(count, 10000)) {
+    throw new Error(`JN /jobs AR pull incomplete: ${out.length}/${count}`);
+  }
+  return out;
+}
+
+async function reconcileInvoiceBalances() {
+  if (invoiceBalanceRunning) return;
+  invoiceBalanceRunning = true;
+  lastInvoiceBalanceSync = { phase: 'started', at: new Date().toISOString() };
+  try {
+    const jnJobs = await jnFetchArJobs();
+
+    // Which of those do we track? (paged: PostgREST caps a response at max-rows)
+    const ids = jnJobs.map(j => String(j.jnid || j.id || j.recid || '')).filter(Boolean);
+    const tracked = new Set();
+    for (let i = 0; i < ids.length; i += 200) {
+      const inList = ids.slice(i, i + 200).map(id => `"${id}"`).join(',');
+      const rows = await sbSelect('jobs', `select=jn_id&jn_id=in.(${encodeURIComponent(inList)})`);
+      for (const r of rows) tracked.add(r.jn_id);
+    }
+
+    const rows = [];
+    for (const j of jnJobs) {
+      const id = String(j.jnid || j.id || j.recid || '');
+      if (!id || !tracked.has(id)) continue;
+      const cols = invoiceBalanceCols(j);
+      if (cols.approved_invoice_due === undefined && cols.approved_invoice_total === undefined) continue;
+      rows.push({ jn_id: id, ...cols });
+    }
+    for (let i = 0; i < rows.length; i += 500) await sbBulkUpsert('jobs', rows.slice(i, i + 500));
+
+    const withDue = rows.filter(r => (r.approved_invoice_due ?? 0) > 0).length;
+    console.log(`[ar-reconcile] JN AR-status jobs ${jnJobs.length}, tracked ${rows.length}, with balance ${withDue}`);
+    lastInvoiceBalanceSync = { phase: 'done', jn_jobs: jnJobs.length, updated: rows.length, with_balance: withDue, at: new Date().toISOString() };
+  } catch (err) {
+    console.error('[ar-reconcile] failed:', err.message);
+    lastInvoiceBalanceSync = { phase: 'error', error: err.message, at: new Date().toISOString() };
+  } finally {
+    invoiceBalanceRunning = false;
+  }
+}
+
+if (SUPABASE_SERVICE_KEY) {
+  setTimeout(reconcileInvoiceBalances, 45 * 1000); // first fill shortly after boot
+  setInterval(reconcileInvoiceBalances, INVOICE_BALANCE_INTERVAL_MS);
+}
+
+// Manual run + status (admin only).
+app.post('/admin/jobs/invoice-balances', requireAuth, requireAdmin, (req, res) => {
+  if (invoiceBalanceRunning) return res.status(409).json({ error: 'Reconcile already running', last: lastInvoiceBalanceSync });
+  reconcileInvoiceBalances(); // runs in background
+  res.status(202).json({ ok: true, started: true });
+});
+app.get('/admin/jobs/invoice-balances', requireAuth, requireAdmin, (req, res) => {
+  res.json({ running: invoiceBalanceRunning, last: lastInvoiceBalanceSync });
+});
 
 // ── Sales-rep backfill ────────────────────────────────────────────────────────
 // One-time: pull every JN job, extract sales_rep_name, and fill jobs.sales_rep
