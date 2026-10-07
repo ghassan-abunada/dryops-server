@@ -363,6 +363,10 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   // already have it stored.
   const rel = Array.isArray(job.related) ? job.related : [];
   const contactRef = rel.find(r => r && r.type === 'contact' && r.id);
+  // Contact jnid: sibling jobs (mitigation ↔ contents) share it, which is the
+  // first matching rule for "POs Referred" (packouts_by_location in the app
+  // repo's add_po_contact_link_matching.sql).
+  if (contactRef) set('jn_contact_id', String(contactRef.id));
   if (contactRef && contactRef.name) set('client_name', contactRef.name);
   if (contactRef && !(existing && existing.contact_created)) {
     const c = await jnGetContact(contactRef.id);
@@ -1514,6 +1518,95 @@ app.post('/admin/jobs/invoice-balances', requireAuth, requireAdmin, (req, res) =
 });
 app.get('/admin/jobs/invoice-balances', requireAuth, requireAdmin, (req, res) => {
   res.json({ running: invoiceBalanceRunning, last: lastInvoiceBalanceSync });
+});
+
+// ── JN contact-id backfill ────────────────────────────────────────────────────
+// One-time: fill jobs.jn_contact_id (the job's related contact jnid) for every
+// tracked job that doesn't have one. The webhook keeps new/updated jobs
+// current. Pulls every JN job in fixed month windows (the sales-rep backfill's
+// proven pattern), keeps only jnids we track, and bulk-upserts jn_id +
+// jn_contact_id in chunks — merge-duplicates touches just that column and can
+// never create a skeleton row because untracked ids are filtered out first.
+let contactBackfillRunning = false;
+let lastContactBackfill = null;
+
+async function backfillJnContactIds() {
+  if (contactBackfillRunning) return;
+  contactBackfillRunning = true;
+  lastContactBackfill = { phase: 'started', at: new Date().toISOString() };
+  try {
+    const missing = new Set();
+    for (let offset = 0; ; offset += 1000) {
+      const page = await sbSelect('jobs', `select=jn_id&jn_contact_id=is.null&order=jn_id&limit=1000&offset=${offset}`);
+      for (const r of page) missing.add(r.jn_id);
+      if (page.length < 1000) break;
+    }
+    console.log(`[contact-backfill] ${missing.size} local jobs missing jn_contact_id`);
+    if (missing.size === 0) { lastContactBackfill = { phase: 'done', updated: 0, at: new Date().toISOString() }; return; }
+
+    const rows = [];
+    const cur = new Date(Date.UTC(2024, 0, 1));
+    while (cur < new Date()) {
+      const gte = Math.floor(cur.getTime() / 1000);
+      cur.setUTCMonth(cur.getUTCMonth() + 1);
+      const lt = Math.floor(cur.getTime() / 1000);
+      const filter = encodeURIComponent(JSON.stringify({ must: [{ range: { date_created: { gte, lt } } }] }));
+      let count = Infinity, fetched = 0;
+      for (let from = 0; from < 10000 && fetched < count; from += 500) {
+        const r = await fetch(`${JN_BASE}/jobs?size=500&from=${from}&filter=${filter}&fields=jnid,related`, {
+          headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+        });
+        if (!r.ok) throw new Error(`JN /jobs ${r.status}`);
+        const data = await r.json();
+        const page = data?.results ?? data?.data ?? [];
+        count = data?.count ?? data?.total ?? page.length;
+        for (const j of page) {
+          const id = String(j.jnid || j.id || j.recid || '');
+          if (!id || !missing.has(id)) continue;
+          const rel = Array.isArray(j.related) ? j.related : [];
+          const c = rel.find(x => x && x.type === 'contact' && x.id);
+          if (c) rows.push({ jn_id: id, jn_contact_id: String(c.id) });
+        }
+        fetched += page.length;
+        if (page.length < 500) break;
+      }
+    }
+    for (let i = 0; i < rows.length; i += 500) await sbBulkUpsert('jobs', rows.slice(i, i + 500));
+    console.log(`[contact-backfill] done — set jn_contact_id on ${rows.length} jobs`);
+    lastContactBackfill = { phase: 'done', updated: rows.length, missing_before: missing.size, at: new Date().toISOString() };
+  } catch (err) {
+    console.error('[contact-backfill] failed:', err.message);
+    lastContactBackfill = { phase: 'error', error: err.message, at: new Date().toISOString() };
+  } finally {
+    contactBackfillRunning = false;
+  }
+}
+
+// Auto-run once after boot while coverage is clearly incomplete (ratio, not
+// an absolute count — live webhooks stamp a few rows within seconds of boot).
+if (SUPABASE_SERVICE_KEY) {
+  setTimeout(async () => {
+    try {
+      const countOf = async (q) => {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?select=id${q}&limit=1`, {
+          method: 'HEAD', headers: { ...sbHeaders, Prefer: 'count=exact' },
+        });
+        return Number((r.headers.get('content-range') || '').split('/')[1] || 0);
+      };
+      const [withContact, total] = await Promise.all([countOf('&jn_contact_id=not.is.null'), countOf('')]);
+      if (total > 0 && withContact / total < 0.9) backfillJnContactIds();
+      else console.log(`[contact-backfill] boot check: ${withContact}/${total} jobs have jn_contact_id — skipping`);
+    } catch (err) { console.error('[contact-backfill] boot check failed:', err.message); }
+  }, 60 * 1000);
+}
+
+app.post('/admin/jobs/backfill-contact-ids', requireAuth, requireAdmin, (req, res) => {
+  if (contactBackfillRunning) return res.status(409).json({ error: 'Backfill already running', last: lastContactBackfill });
+  backfillJnContactIds();
+  res.status(202).json({ ok: true, started: true });
+});
+app.get('/admin/jobs/backfill-contact-ids', requireAuth, requireAdmin, (req, res) => {
+  res.json({ running: contactBackfillRunning, last: lastContactBackfill });
 });
 
 // ── Sales-rep backfill ────────────────────────────────────────────────────────
