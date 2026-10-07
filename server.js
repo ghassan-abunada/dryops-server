@@ -5128,6 +5128,17 @@ async function jnGetJson(pathAndQuery) {
 }
 require('./wip')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet: jnGetJson, anthropic: wipAnthropic });
 
+// ── Collections classifier (owner Collections tab; see collections.js) ───────
+// Reads Open AR jobs' JobNimbus notes with a cheap LLM (COLLECTIONS_MODEL:
+// gemini:<model> needs GEMINI_API_KEY, anthropic:<model> reuses wipAnthropic)
+// and writes collections_reviews / collections_runs. Never writes to JobNimbus.
+require('./collections')(app, {
+  SUPABASE_URL, SUPABASE_SERVICE_KEY,
+  jnGet: jnGetJson, jnFetchUpdatedSince, AR_STATUSES,
+  sbSelect, sbBulkUpsert, sbInsert, sbPatch,
+  requireAuth, requireAdmin, anthropic: wipAnthropic, denverNow,
+});
+
 // Supplemental-billing admin dashboard (master-link gated, see supp-admin.js).
 // lastSuppRun/suppRunActive are mutating lets — passed as getters.
 require('./supp-admin')(app, {
