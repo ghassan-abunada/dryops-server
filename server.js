@@ -4027,7 +4027,8 @@ async function jnTaskTypes(force = false) {
   const j = await jnGetJson('account/settings');
   const raw = (j && (j.taskTypes || j.task_types || j.TaskTypes || (j.settings && j.settings.taskTypes))) || [];
   const names = (Array.isArray(raw) ? raw : [])
-    .map((t) => (typeof t === 'string' ? t : t && (t.name || t.TaskTypeName || t.label || t.value || t.Name)))
+    .filter((t) => typeof t === 'string' || !t || t.IsActive !== false)
+    .map((t) => (typeof t === 'string' ? t : t && (t.TypeName || t.DefaultName || t.name || t.TaskTypeName || t.label || t.value || t.Name)))
     .filter((n) => typeof n === 'string' && n.trim())
     .map((n) => n.trim());
   if (!jnTaskTypesCache.logged) {
@@ -4111,14 +4112,18 @@ function buildJnTaskBody(v, job, techs, settings, typeName, tz) {
     'Scheduled in DryOps',
   ].filter(Boolean);
   const body = {
-    title: `${label} — ${jobName}`,
+    // Just the type, like tasks made in the JobNimbus UI — the task already
+    // sits on the job. (jobName is kept for logs.)
+    title: label,
     description: lines.join('\n'),
     date_start: zonedToUnix(v.scheduled_date, start, tz),
     date_end: zonedToUnix(v.scheduled_date, end, tz),
     all_day: anytime || v.block_kind === 'full_day',
     owners: linked.map((t) => ({ id: t.jn_user_id })),
+    // related (not primary): a task whose PRIMARY record is the job makes
+    // JobNimbus overwrite the job's Start/End Date with the task's dates
+    // (seen 2026-10-08). UI-created tasks only relate to the job.
     related: [{ id: JN_TASKS_REDIRECT_JOB || v.jn_id, type: 'job' }],
-    primary: { id: JN_TASKS_REDIRECT_JOB || v.jn_id, type: 'job' },
     is_completed: v.status === 'completed',
     is_active: v.status !== 'cancelled',
   };
