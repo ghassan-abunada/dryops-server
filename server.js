@@ -779,14 +779,23 @@ app.post('/webhooks/callrail/calls', async (req, res) => {
       const t = await sbGet(`location_tracking_numbers?phone_norm=eq.${trackNorm}&select=location_id&limit=1`);
       if (Array.isArray(t) && t[0] && t[0].location_id) row.location_id = t[0].location_id;
     }
-    // Resolve job from the caller number (prefer same location).
+    // Resolve job from the caller number. CallRail lines are mitigation
+    // lines, so prefer a Mitigation job, then the tracking number's location,
+    // then an active job, then the newest (same order as callrail_resolve_all
+    // in the app repo's supabase/add_call_matching_mitigation.sql).
     const custNorm = normPhone(call.customer_phone_number);
     if (custNorm) {
-      let j = row.location_id
-        ? await sbGet(`jobs?client_phone_norm=eq.${custNorm}&location_id=eq.${row.location_id}&select=id,date_contacted&order=jn_created.asc&limit=1`)
-        : null;
-      if (!j || !j.length) j = await sbGet(`jobs?client_phone_norm=eq.${custNorm}&select=id,date_contacted&order=jn_created.asc&limit=1`);
-      if (Array.isArray(j) && j[0]) {
+      const pick = (rows) => {
+        const list = Array.isArray(rows) ? rows : [];
+        const rank = (j) => [j.record_type === 'Mitigation' ? 0 : 1, row.location_id && j.location_id === row.location_id ? 0 : 1, j.is_active === false ? 1 : 0];
+        return list.slice().sort((a, b) => {
+          const ra = rank(a), rb = rank(b);
+          for (let i = 0; i < ra.length; i++) if (ra[i] !== rb[i]) return ra[i] - rb[i];
+          return String(b.jn_created || '').localeCompare(String(a.jn_created || ''));
+        })[0] || null;
+      };
+      const j = [pick(await sbGet(`jobs?client_phone_norm=eq.${custNorm}&select=id,date_contacted,location_id,record_type,is_active,jn_created&order=jn_created.desc&limit=25`))];
+      if (j[0]) {
         row.job_id = j[0].id;
         // Set date_contacted to the earliest matched call.
         if (row.start_time && (!j[0].date_contacted || new Date(row.start_time) < new Date(j[0].date_contacted))) {
