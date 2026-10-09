@@ -4021,22 +4021,27 @@ async function jnSendJson(method, pathAndQuery, body) {
 // JN account task types (GET /account/settings → taskTypes). The shape is
 // account-dependent (strings or objects) — normalize to names and log the raw
 // shape once so it can be checked in Railway logs.
-let jnTaskTypesCache = { names: [], at: 0, raw: null, logged: false };
-async function jnTaskTypes(force = false) {
-  if (!force && jnTaskTypesCache.at && Date.now() - jnTaskTypesCache.at < 10 * 60 * 1000) return jnTaskTypesCache.names;
+let jnTaskTypesCache = { names: [], types: [], at: 0, raw: null, logged: false };
+// Account task types as [{ id, name }] (JobNimbus keys: TaskTypeId / TypeName).
+async function jnTaskTypeList(force = false) {
+  if (!force && jnTaskTypesCache.at && Date.now() - jnTaskTypesCache.at < 10 * 60 * 1000) return jnTaskTypesCache.types;
   const j = await jnGetJson('account/settings');
   const raw = (j && (j.taskTypes || j.task_types || j.TaskTypes || (j.settings && j.settings.taskTypes))) || [];
-  const names = (Array.isArray(raw) ? raw : [])
-    .map((t) => (typeof t === 'string' ? t : t && (t.name || t.TaskTypeName || t.label || t.value || t.Name)))
-    .filter((n) => typeof n === 'string' && n.trim())
-    .map((n) => n.trim());
+  const types = (Array.isArray(raw) ? raw : [])
+    .filter((t) => typeof t === 'string' || (t && t.IsActive !== false))
+    .map((t) => (typeof t === 'string'
+      ? { id: null, name: t.trim() }
+      : { id: t.TaskTypeId != null ? Number(t.TaskTypeId) : (t.id != null ? Number(t.id) : null),
+          name: String(t.TypeName || t.DefaultName || t.name || t.TaskTypeName || t.label || t.value || t.Name || '').trim() }))
+    .filter((t) => t.name);
   if (!jnTaskTypesCache.logged) {
     console.log('[jn tasks] taskTypes shape:', JSON.stringify(Array.isArray(raw) ? raw.slice(0, 3) : raw).slice(0, 300));
     jnTaskTypesCache.logged = true;
   }
-  jnTaskTypesCache = { ...jnTaskTypesCache, names, at: Date.now(), raw: Array.isArray(raw) ? raw.slice(0, 50) : raw };
-  return names;
+  jnTaskTypesCache = { ...jnTaskTypesCache, types, names: types.map((t) => t.name), at: Date.now(), raw: Array.isArray(raw) ? raw.slice(0, 50) : raw };
+  return types;
 }
+async function jnTaskTypes(force = false) { return (await jnTaskTypeList(force)).map((t) => t.name); }
 
 let scheduleSettingsCache = { row: null, at: 0 };
 async function loadScheduleSettings() {
@@ -4049,11 +4054,11 @@ async function loadScheduleSettings() {
 
 // Visit type → JN record_type_name: explicit map entry, else a JN type whose
 // name matches the visit label (case-insensitive), else the default, else omit.
-function resolveTaskTypeName(taskType, settings, names) {
+// → { id, name } for the task body (record_type + record_type_name), or null.
+function resolveTaskType(taskType, settings, types) {
   const map = (settings && settings.jn_task_type_map) || {};
-  const want = map[taskType] || VISIT_TYPE_LABEL[taskType] || null;
-  const hit = want ? names.find((n) => n.toLowerCase() === String(want).toLowerCase()) : null;
-  return hit || (settings && settings.jn_default_task_type) || undefined;
+  const byName = (n) => (n ? types.find((t) => t.name.toLowerCase() === String(n).toLowerCase()) : null);
+  return byName(map[taskType]) || byName(VISIT_TYPE_LABEL[taskType]) || byName(settings && settings.jn_default_task_type) || null;
 }
 
 // Minutes offset of `tz` from UTC at the given instant (e.g. Denver = -360 / -420).
@@ -4093,7 +4098,7 @@ function fmtMin(min) {
   return `${h12}${m ? ':' + String(m).padStart(2, '0') : ''}${h24 < 12 ? 'am' : 'pm'}`;
 }
 
-function buildJnTaskBody(v, job, techs, settings, typeName, tz) {
+function buildJnTaskBody(v, job, techs, settings, taskType, tz) {
   const ws = (settings && settings.work_start_min) || 480, we = (settings && settings.work_end_min) || 1080;
   const anytime = v.slot_start_min == null || v.slot_end_min == null;
   const start = anytime ? ws : v.slot_start_min;
@@ -4111,20 +4116,27 @@ function buildJnTaskBody(v, job, techs, settings, typeName, tz) {
     'Scheduled in DryOps',
   ].filter(Boolean);
   const body = {
-    title: `${label} — ${jobName}`,
+    // Just the type, like tasks made in the JobNimbus UI — the task already
+    // sits on the job. (jobName is kept for logs.)
+    title: label,
     description: lines.join('\n'),
     date_start: zonedToUnix(v.scheduled_date, start, tz),
     date_end: zonedToUnix(v.scheduled_date, end, tz),
     all_day: anytime || v.block_kind === 'full_day',
     owners: linked.map((t) => ({ id: t.jn_user_id })),
+    // related (not primary): a task whose PRIMARY record is the job makes
+    // JobNimbus overwrite the job's Start/End Date with the task's dates
+    // (seen 2026-10-08). UI-created tasks only relate to the job.
     related: [{ id: JN_TASKS_REDIRECT_JOB || v.jn_id, type: 'job' }],
-    primary: { id: JN_TASKS_REDIRECT_JOB || v.jn_id, type: 'job' },
     is_completed: v.status === 'completed',
     is_active: v.status !== 'cancelled',
   };
   // Same visibility rule as notes: JobNimbus scopes by location.
   if (job && job.jn_location_id) body.location = { id: Number(job.jn_location_id) };
-  if (typeName) body.record_type_name = typeName;
+  if (taskType) {
+    body.record_type_name = taskType.name;
+    if (taskType.id != null) body.record_type = taskType.id;   // PUT requires the numeric id
+  }
   return body;
 }
 
@@ -4176,10 +4188,10 @@ async function syncVisitJnTask(visitId, { force = false } = {}) {
       const loc = await sbGet(`locations?id=eq.${encodeURIComponent(locId)}&select=timezone`);
       if (loc && loc[0] && loc[0].timezone) tz = loc[0].timezone;
     }
-    let names = [];
-    try { names = await jnTaskTypes(); } catch (e) { console.warn('[jn tasks] taskTypes lookup failed:', e.message); }
-    const typeName = resolveTaskTypeName(v.task_type, settings, names);
-    const body = buildJnTaskBody(v, v.jobs, techs, settings, typeName, tz);
+    let types = [];
+    try { types = await jnTaskTypeList(); } catch (e) { console.warn('[jn tasks] taskTypes lookup failed:', e.message); }
+    const taskType = resolveTaskType(v.task_type, settings, types);
+    const body = buildJnTaskBody(v, v.jobs, techs, settings, taskType, tz);
 
     if (JN_TASKS_DRYRUN) {
       console.log('[jn task dryrun]', v.jn_task_id ? `PUT tasks/${v.jn_task_id}` : 'POST tasks', JSON.stringify(body).slice(0, 400));
