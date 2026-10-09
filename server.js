@@ -4938,16 +4938,34 @@ app.get('/geocode', requireAuth, geocodeRoute);
 //   3. upload the PDF(s) back onto the job's JN Files (related=[job jnid] —
 //      JN's /files POST wants related as an ARRAY OF JNID STRINGS, not
 //      {id,type} objects; the object form errors "invalid document").
-// Reports must be emailable: photos are recompressed (sharp, ≤1400px JPEG
-// q72) and the report splits into "Part N of M" documents so no single PDF
-// exceeds ~18MB (owner requirement: stay under the 20MB email cap).
+// Reports must be small: the owner wants every PDF under 10MB and ideally
+// under 5MB (2026-10-07), while burned-in camera timestamps stay readable.
+// Photos are recompressed with sharp (mozjpeg) down a quality ladder — the
+// first rung that fits the whole report in PHOTO_REPORT_TARGET_PDF_BYTES
+// wins; if even the floor rung can't, the report splits into "Part N of M"
+// documents at PHOTO_REPORT_MAX_PDF_BYTES. The floor (900px, q50) was
+// verified by eye: a typical camera-app timestamp (~2.5% of frame height)
+// is still crisp at 3× zoom; 800px starts to ring.
 // Re-fires are deliberate: every Work Complete transition uploads a fresh
 // report (owner decision 2026-08-25) — date-stamped filenames disambiguate.
 const PDFDocument = require('pdfkit');
 const sharp = require('sharp');
 
-const PHOTO_REPORT_MAX_PDF_BYTES = 17 * 1024 * 1024; // actual PDFs land ~2% over this estimate — 17MB keeps them safely under the 20MB email cap
+const PHOTO_REPORT_TARGET_PDF_BYTES = 5 * 1024 * 1024;   // ideal: whole report in one ≤5MB file
+const PHOTO_REPORT_MAX_PDF_BYTES = 9.6 * 1024 * 1024;   // hard cap per part (estimate; real PDFs land 3–6% UNDER it, so <10MB)
 const PHOTO_REPORT_MAX_PHOTOS = 200; // JN /files page cap — same as jn_photo_counts
+// Longest-side px + JPEG quality, best first. Each rung is ~15–25% smaller
+// than the one above (measured on real 12MP photos: ~85 / 70 / 55 / 49 KB).
+const PHOTO_REPORT_LADDER = [
+  { px: 1100, quality: 62 },
+  { px: 1000, quality: 58 },
+  { px: 900, quality: 54 },
+  { px: 900, quality: 50 }, // floor — timestamps verified legible here
+];
+// Masters are decoded once at the top rung's size and kept as high-quality
+// JPEGs (~250KB each, ≤50MB for a 200-photo job) so lower rungs re-encode
+// from memory instead of re-downloading from JobNimbus.
+const PHOTO_REPORT_MASTER = { px: PHOTO_REPORT_LADDER[0].px, quality: 90 };
 
 // Franchise name before the territory suffix — port of the app's
 // lib/logos.ts brandOf(); keep the two in sync.
@@ -5114,6 +5132,24 @@ function renderPhotoReportPdf(header, photos) {
   });
 }
 
+// Re-encode every master at one ladder rung (mozjpeg, 4:2:0). Bounded
+// concurrency so a 200-photo job doesn't fan out 200 libvips jobs at once.
+async function encodePhotosAtRung(masters, { px, quality }) {
+  const out = new Array(masters.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= masters.length) break;
+      const buf = await sharp(masters[i].buf)
+        .resize({ width: px, height: px, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality, mozjpeg: true }).toBuffer();
+      out[i] = { buf, caption: masters[i].caption };
+    }
+  }));
+  return out;
+}
+
 // Full pipeline for one job. dryrun writes PDFs to os.tmpdir() instead of
 // uploading (hit the webhook with ?dryrun=1&force=1 to preview a job).
 async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
@@ -5127,9 +5163,9 @@ async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
 
   const logoBuf = await photoReportLogoForJob(jobJnId);
 
-  // Download + recompress with a small worker pool; slot by index so the
-  // oldest-first order survives concurrency.
-  const out = new Array(files.length).fill(null);
+  // Download + decode to an in-memory master with a small worker pool; slot
+  // by index so the oldest-first order survives concurrency.
+  const masters = new Array(files.length).fill(null);
   let next = 0, failed = 0;
   await Promise.all(Array.from({ length: 4 }, async () => {
     for (;;) {
@@ -5139,22 +5175,37 @@ async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
       try {
         const raw = await jnDownloadFile(f.jnid || f.id);
         const buf = await sharp(raw).rotate()
-          .resize({ width: 1400, height: 1400, fit: 'inside', withoutEnlargement: true })
-          .jpeg({ quality: 72 }).toBuffer();
-        out[i] = { buf, caption: f.filename || f.name || `photo-${i + 1}.jpg` };
+          .resize({ width: PHOTO_REPORT_MASTER.px, height: PHOTO_REPORT_MASTER.px, fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: PHOTO_REPORT_MASTER.quality, mozjpeg: true }).toBuffer();
+        masters[i] = { buf, caption: f.filename || f.name || `photo-${i + 1}.jpg` };
       } catch (err) {
         failed++;
         if (failed <= 3) console.warn('[photo-report] photo skipped', f.jnid || f.id, err.message);
       }
     }
   }));
-  const photos = out.filter(Boolean);
-  if (!photos.length) throw new Error(`all ${files.length} photo downloads failed`);
+  const kept = masters.filter(Boolean);
+  if (!kept.length) throw new Error(`all ${files.length} photo downloads failed`);
 
-  // Split into parts so each PDF stays under the email-safe cap. The estimate
-  // (compressed bytes + per-image overhead + fixed header allowance) tracks
-  // real pdfkit output closely because JPEGs embed byte-for-byte.
+  // Size estimate = compressed bytes + per-image object overhead + fixed
+  // header allowance; tracks real pdfkit output closely (JPEGs embed
+  // byte-for-byte, pdfkit adds ~1.3KB of objects per image).
   const baseBytes = 90 * 1024 + (logoBuf ? logoBuf.length : 0);
+  const estimate = list => baseBytes + list.reduce((n, p) => n + p.buf.length + 1500, 0);
+
+  // Walk the quality ladder: stop at the first rung whose whole report fits
+  // the ideal single-file target; otherwise the floor rung is used and the
+  // report splits into parts below.
+  let photos = null, rung = null;
+  for (const r of PHOTO_REPORT_LADDER) {
+    rung = r;
+    photos = await encodePhotosAtRung(kept, r);
+    if (estimate(photos) <= PHOTO_REPORT_TARGET_PDF_BYTES) break;
+  }
+
+  // Split into parts, each filled right up to the hard cap (owner 2026-10-07:
+  // on a split, max out each file at 10MB rather than balancing parts).
+  const total = estimate(photos);
   const groups = [];
   let cur = [], bytes = baseBytes;
   for (const p of photos) {
@@ -5164,6 +5215,7 @@ async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
     bytes += add;
   }
   if (cur.length) groups.push(cur);
+  console.log('[photo-report]', jobJnId, `${photos.length} photos @ ${rung.px}px q${rung.quality} → est ${(total / 1048576).toFixed(1)}MB in ${groups.length} part(s)`);
 
   const rt = (job && job.record_type_name) || 'Job';
   const header = {
@@ -5193,7 +5245,7 @@ async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
       uploaded.push({ jnid, filename, bytes: pdf.length });
     }
   }
-  return { photos: photos.length, failed, parts: groups.length, uploaded };
+  return { photos: photos.length, failed, parts: groups.length, rung: `${rung.px}px q${rung.quality}`, uploaded };
 }
 
 // The URL for the JobNimbus automation (status = Work Complete → webhook):
@@ -5221,7 +5273,7 @@ app.post('/webhooks/jobnimbus/photo-report', async (req, res) => {
   }
   res.status(202).json({ ok: true, queued: true });
   generatePhotoReport(String(jnid)).then(
-    r => console.log('[photo-report]', jnid, 'done —', r.photos, 'photos →', r.parts, 'part(s)'),
+    r => console.log('[photo-report]', jnid, 'done —', r.photos, 'photos →', r.parts, 'part(s)', r.uploaded.map(u => `${(u.bytes / 1048576).toFixed(1)}MB`).join(', ')),
     err => console.error('[photo-report]', jnid, 'failed:', err.message),
   );
 });
