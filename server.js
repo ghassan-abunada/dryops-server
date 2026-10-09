@@ -534,7 +534,10 @@ async function photonSearch(q, limit = 5, bias = GEO_BIAS_DEFAULT) {
       const formatted = [line1, cityLine, stateLine].filter(Boolean).join(', ');
       if (!formatted || seen.has(formatted)) continue;
       seen.add(formatted);
-      out.push({ formatted, lat: Number(c[1]), lng: Number(c[0]) });
+      // Components ride along so /places/details can fill street/city/state/zip
+      // for a synthetic geo: place id (the New Job form needs them).
+      out.push({ formatted, lat: Number(c[1]), lng: Number(c[0]),
+        street: line1, city: cityLine, state: String(p.state || ''), zip: String(p.postcode || '') });
       if (out.length >= limit) break;
     }
     return geoCacheSet(key, out);
@@ -3385,13 +3388,19 @@ const JN_NOTES_REDIRECT_JOB = (process.env.JN_NOTES_REDIRECT_JOB || '').trim();
 // First server-side JN note creator. Same payload the app sends via /jnapi.
 // opts.createdBy = the author's JobNimbus user id (profiles.jn_user_id) so the
 // note shows as written by the technician, not the API user; opts.tag = a
-// location's default @mention (locations.jn_note_tag, e.g. "@GTA"), prepended
-// like a hand-typed mention so JobNimbus notifies the group.
+// location's default @mention (locations.jn_note_tag, e.g. "@GTA") and
+// opts.mentions = extra "@FirstLast" tags. Owner rule (2026-10-09): every tag
+// goes at the BOTTOM of the activity — two blank lines, then one tag per line —
+// so JobNimbus still notifies the people without burying the note text.
 async function jnAddNote(jnJobId, text, opts = {}) {
   const target = JN_NOTES_REDIRECT_JOB || jnJobId;
   if (!target) return { ok: false, error: 'Visit has no JobNimbus job id' };
-  const tag = String(opts.tag || '').trim();
-  const noteText = tag && !String(text).includes(tag) ? `${tag} ${text}` : text;
+  const tags = [];
+  for (const t of [opts.tag, ...(Array.isArray(opts.mentions) ? opts.mentions : [])]) {
+    const s = String(t || '').trim();
+    if (s && !tags.includes(s) && !String(text).includes(s)) tags.push(s);
+  }
+  const noteText = tags.length ? `${String(text).replace(/\s+$/, '')}\n\n\n${tags.join('\n')}` : text;
   const payload = {
     record_type_name: 'Note', note: noteText,
     related: [{ id: target, type: 'job' }],
@@ -4830,6 +4839,7 @@ async function placesAutocomplete(req, res) {
     // Photon fallback. The synthetic "geo:<lat>,<lng>" place_id carries the
     // coordinates so the app needs no details round-trip.
     const alt = await freeSuggest(q, 5, biasFromQuery(req.query));
+    for (const a of alt) geoCacheSet(`details:geo:${a.lat},${a.lng}`, a);
     return res.json({
       predictions: alt.map(a => ({ description: a.formatted, place_id: `geo:${a.lat},${a.lng}` })),
     });
@@ -4846,7 +4856,11 @@ async function placesAutocomplete(req, res) {
 async function placesDetails(req, res) {
   const placeId = String(req.query.place_id || '').trim();
   const geo = /^geo:(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/.exec(placeId);
-  if (geo) return res.json({ street: '', city: '', state: '', zip: '', formatted: '', lat: Number(geo[1]), lng: Number(geo[2]) });
+  if (geo) {
+    const cached = geoCacheGet(`details:${placeId}`) || {};
+    return res.json({ street: cached.street || '', city: cached.city || '', state: cached.state || '', zip: cached.zip || '',
+      formatted: cached.formatted || '', lat: Number(geo[1]), lng: Number(geo[2]) });
+  }
   if (!placeId || !GOOGLE_MAPS_KEY) return res.json({});
   try {
     const params = new URLSearchParams({
@@ -5966,6 +5980,17 @@ require('./supp-admin')(app, {
   },
   getLastSuppRun: () => lastSuppRun,
   getSuppRunActive: () => suppRunActive,
+});
+
+// New Job intake (app → JobNimbus contact → job → note → visit; see intake.js).
+require('./intake')(app, {
+  SUPABASE_URL, SUPABASE_SERVICE_KEY, WEB_APP_URL: process.env.WEB_APP_URL || 'https://dryops.app',
+  requireAuth, requireAdmin,
+  sbGet, sbInsert, sbPatch, sbUpsert,
+  jnSendJson, jnGetJson, jnAddNote, jnFetchAccountUsers,
+  geocode, normPhone, toE164, UUID_RE, EMAIL_RE,
+  callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
+  syncVisitJnTask, loadScheduleSettings, fmtMin,
 });
 
 app.listen(PORT, () => {
