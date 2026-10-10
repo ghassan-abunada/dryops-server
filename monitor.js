@@ -26,7 +26,7 @@ const {
 
 const PROMPT_VERSION = 'm1'; // bump to re-read every job on the next full run
 
-const SCOPE_STATUSES = ['Scheduled', 'Pending Results', 'Pending Abatement', 'In Progress', 'Work Complete'];
+const SCOPE_STATUSES = ['Scheduled', 'Pending Results', 'Pending Abatement', 'In Progress'];
 const DRY_STATUSES = ['drying', 'nearly_dry', 'dry', 'unknown'];
 
 const MonitorReviewSchema = z.object({
