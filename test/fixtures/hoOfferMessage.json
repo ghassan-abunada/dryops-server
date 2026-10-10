@@ -1,0 +1,21 @@
+[
+  { "name": "two windows with portal link, tomorrow",
+    "input": { "clientName": "John Smith", "techName": "Kyson Miller", "taskType": "monitor", "date": "2026-10-14", "today": "2026-10-13",
+               "options": [{ "startMin": 600, "endMin": 720 }, { "startMin": 840, "endMin": 960 }], "url": "https://dryops.app/h/abc123?v=v1" },
+    "expected": "Hi John, this is Kyson, your restoration technician. Pick a time for your monitoring visit tomorrow: https://dryops.app/h/abc123?v=v1 (or reply 1 for 10am–12pm, 2 for 2pm–4pm)" },
+  { "name": "closeout, later date, no link",
+    "input": { "clientName": "Smith, Jane", "techName": null, "taskType": "closeout", "date": "2026-10-20", "today": "2026-10-13",
+               "options": [{ "startMin": 480, "endMin": 600 }, { "startMin": 960, "endMin": 1080 }], "url": null },
+    "expected": "Hi Jane, this is your restoration technician. For your equipment pickup on Tue Oct 20, would 8am–10am (reply 1) or 4pm–6pm (reply 2) work? Reply and we'll lock it in." },
+  { "name": "single window today with link, no client name",
+    "input": { "clientName": "", "techName": "Ali Zayyad", "taskType": "monitor", "date": "2026-10-13", "today": "2026-10-13",
+               "options": [{ "startMin": 750, "endMin": 870 }], "url": "https://dryops.app/h/zzz" },
+    "expected": "Hi, this is Ali, your restoration technician. Pick a time for your monitoring visit today: https://dryops.app/h/zzz (or reply 1 for 12:30pm–2:30pm)" },
+  { "name": "reminder with link", "kind": "reminder",
+    "input": { "taskType": "monitor", "date": "2026-10-14", "today": "2026-10-13",
+               "options": [{ "startMin": 600, "endMin": 720 }, { "startMin": 840, "endMin": 960 }], "url": "https://dryops.app/h/abc123?v=v1" },
+    "expected": "Quick reminder from your restoration technician: pick a time at https://dryops.app/h/abc123?v=v1 or reply 1 for 10am–12pm or 2 for 2pm–4pm for your monitoring visit tomorrow." },
+  { "name": "confirmation", "kind": "confirm",
+    "input": { "window": { "startMin": 840, "endMin": 960 }, "date": "2026-10-14", "today": "2026-10-13" },
+    "expected": "Got it — 2pm–4pm tomorrow. Reply here if anything changes." }
+]

@@ -21,6 +21,7 @@
 // forces every created record into one test JN location.
 
 const crypto = require('crypto');
+const { deliver, notifyChannels } = require('./notify');
 
 module.exports = function mountIntake(app, deps) {
   const {
@@ -734,7 +735,6 @@ module.exports = function mountIntake(app, deps) {
   });
 
   // ── Notifications (Telegram / Slack) ──────────────────────────────────────
-  const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   function buildJobMessage({ loc, body, row, result, rep, leadLabel, actor }) {
     const d = body.details || {};
     const lines = [];
@@ -751,43 +751,9 @@ module.exports = function mountIntake(app, deps) {
     if (row.callrail_call_id) buttons.push({ text: '▶ Listen to call', url: `https://app.callrail.com/calls/${enc(row.callrail_call_id)}` });
     return { lines, buttons };
   }
-  async function sendTelegram(cfg, msg) {
-    const token = clean(cfg.bot_token, 200), chat = clean(cfg.chat_id, 64);
-    if (!token || !chat) return { ok: false, error: 'Telegram bot_token / chat_id missing' };
-    const text = msg.lines.map((l) => (typeof l === 'string' ? escHtml(l) : `<b>${escHtml(l.b)}</b>`)).join('\n');
-    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chat, text, parse_mode: 'HTML', disable_web_page_preview: true,
-        reply_markup: { inline_keyboard: msg.buttons.map((b) => [{ text: b.text, url: b.url }]) } }),
-    });
-    const j = await r.json().catch(() => null);
-    return r.ok && j && j.ok ? { ok: true } : { ok: false, error: (j && j.description) || `Telegram ${r.status}` };
-  }
-  async function sendSlack(cfg, msg) {
-    const url = clean(cfg.webhook_url, 300);
-    if (!/^https:\/\/hooks\.slack\.com\//.test(url)) return { ok: false, error: 'Slack webhook_url must start with https://hooks.slack.com/' };
-    const text = msg.lines.map((l) => (typeof l === 'string' ? l : `*${l.b}*`)).join('\n');
-    const r = await fetch(url, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text } },
-        { type: 'actions', elements: msg.buttons.map((b) => ({ type: 'button', text: { type: 'plain_text', text: b.text }, url: b.url })) },
-      ] }),
-    });
-    return r.ok ? { ok: true } : { ok: false, error: `Slack ${r.status} ${(await r.text()).slice(0, 120)}` };
-  }
-  async function deliver(channel, msg) {
-    const cfg = channel.config || {};
-    return channel.kind === 'telegram' ? sendTelegram(cfg, msg) : channel.kind === 'slack' ? sendSlack(cfg, msg) : { ok: false, error: 'Unknown channel kind' };
-  }
+  // sendTelegram / sendSlack / deliver live in notify.js (shared with homeowner.js).
   async function notifyJobCreated(ctx) {
-    const channels = (await sbGet(`notification_channels?active=eq.true&events=cs.{job_created}&or=(location_id.is.null,location_id.eq.${enc(ctx.loc.id)})&select=id,kind,name,config`)) || [];
-    if (!channels.length) return;
-    const msg = buildJobMessage(ctx);
-    for (const ch of channels) {
-      const r = await deliver(ch, msg).catch((e) => ({ ok: false, error: e.message }));
-      if (!r.ok) warn('notify', ch.kind, ch.name, r.error);
-    }
+    await notifyChannels({ sbGet, events: ['job_created'], locationId: ctx.loc.id, msg: buildJobMessage(ctx), log: (...a) => warn('notify', ...a) });
   }
   app.post('/admin/notifications/channels/:id/test', requireAuth, requireAdmin, async (req, res) => {
     try {
