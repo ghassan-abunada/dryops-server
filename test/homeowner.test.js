@@ -13,7 +13,7 @@ test('stageOf mirrors public.homeowner_stage()', () => {
   assert.strictEqual(stageOf('Scheduled'), 'demo');
   assert.strictEqual(stageOf('Pending Abatement'), 'demo');
   assert.strictEqual(stageOf('In Progress'), 'drying');
-  assert.strictEqual(stageOf('Work Complete'), 'pickup');
+  assert.strictEqual(stageOf('Work Complete'), 'complete');
   assert.strictEqual(stageOf('Invoice Created'), 'complete');
   assert.strictEqual(stageOf('Paid & Closed'), 'complete');
   assert.strictEqual(stageOf('Public Adjuster'), 'complete');
