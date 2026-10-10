@@ -286,6 +286,10 @@ function invoiceBalanceCols(job) {
   return out;
 }
 
+// Modules mounted at the bottom of this file register here (homeowner.js:
+// stage texts when a job's status moves forward). Fire-and-forget.
+const hooks = { jobStatusChanged: null };
+
 app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   if (!webhookTokenOk(req)) return res.status(401).json({ error: 'unauthorized' });
 
@@ -402,6 +406,12 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
       console.error('[jn-webhook] upsert failed', up.status, t.slice(0, 300));
       return res.status(502).json({ ok: false, error: 'upsert failed' }); // JN may retry
     }
+    const prevStatus = existing ? existing.status || null : null;
+    if (row.status && row.status !== prevStatus && hooks.jobStatusChanged) {
+      Promise.resolve()
+        .then(() => hooks.jobStatusChanged({ jnId: String(jnid), prevStatus, newStatus: row.status, isNew: !existing }))
+        .catch((e) => console.warn('[jn-webhook] status hook', e.message));
+    }
     return res.status(200).json({ ok: true, jn_id: String(jnid) });
   } catch (err) {
     console.error('[jn-webhook] error', err.message);
@@ -412,7 +422,7 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
 // Current stored row for a job (null if new) — used to enrich only when needed.
 async function getExistingJob(jnId) {
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?jn_id=eq.${encodeURIComponent(jnId)}&select=id,address,lat,contact_created`, {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?jn_id=eq.${encodeURIComponent(jnId)}&select=id,address,lat,contact_created,status`, {
       headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
     });
     const rows = await r.json();
@@ -6022,6 +6032,24 @@ require('./intake')(app, {
   geocode, normPhone, toE164, UUID_RE, EMAIL_RE,
   callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
   syncVisitJnTask, loadScheduleSettings, fmtMin,
+});
+
+// Homeowner portal API (dryops.app/h/<token>; see homeowner.js) — links,
+// window choice, prefs, claim info, photo uploads, requests → staff; stage
+// texts via hooks.jobStatusChanged. Then the window-offer flow (hoWindows.js):
+// POST /visits/:id/offer-windows, the Twilio inbound webhook, reminder sweep.
+const homeowner = require('./homeowner')(app, {
+  SUPABASE_URL, SUPABASE_SERVICE_KEY, WEB_APP_URL,
+  requireAuth, sbGet, sbInsert, sbPatch, sbUpsert,
+  jnSendJson, jnAddNote, sendSms, normPhone, toE164, UUID_RE, EMAIL_RE,
+  loadScheduleSettings, syncVisitJnTask, hooks,
+});
+require('./hoWindows')(app, {
+  requireAuth, appActor, loadVisit, isAssigned,
+  sbGet, sbPatch, sbUpsert, sendSms, normPhone, toE164,
+  syncVisitJnTask, loadScheduleSettings,
+  ensureHomeownerLink: homeowner.ensureHomeownerLink, portalEnabledFor: homeowner.portalEnabledFor,
+  tzFor: homeowner.tzFor, todayIn: homeowner.todayIn, hourIn: homeowner.hourIn,
 });
 
 app.listen(PORT, () => {
