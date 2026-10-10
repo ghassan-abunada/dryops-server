@@ -5976,6 +5976,28 @@ require('./collections')(app, {
   requireAuth, requireAdmin, anthropic: wipAnthropic, denverNow,
 });
 
+// ── Monitor note reviewer (Schedule → monitor planner; see monitor.js) ───────
+// Reads in-progress Mitigation jobs' JobNimbus notes with the same cheap LLM
+// (MONITOR_MODEL) and writes monitor_reviews / monitor_review_runs: last
+// monitored date, equipment on site, dry status, HO availability, blockers.
+require('./monitor')(app, {
+  SUPABASE_URL, SUPABASE_SERVICE_KEY,
+  jnGet: jnGetJson, jnFetchUpdatedSince,
+  sbSelect, sbBulkUpsert, sbInsert, sbPatch,
+  requireAuth, requireAdmin, anthropic: wipAnthropic, denverNow,
+});
+
+// SMS readiness for the app (Schedule tab shows whether ETA texts / inbound
+// replies are wired up). Same env names sendSms() reads.
+app.get('/admin/sms/status', requireAuth, requireAdmin, (req, res) => {
+  const inboundEnv = (process.env.TWILIO_INBOUND_ENABLED || '').trim();
+  res.json({
+    inbound: !!inboundEnv && inboundEnv !== '0',
+    configured: !!(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM_NUMBER),
+    from: TWILIO_FROM_NUMBER || null,
+  });
+});
+
 // Supplemental-billing admin dashboard (master-link gated, see supp-admin.js).
 // lastSuppRun/suppRunActive are mutating lets — passed as getters.
 require('./supp-admin')(app, {
