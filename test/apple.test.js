@@ -259,3 +259,140 @@ test('401 from the API refreshes the token once and retries', async (t) => {
   assert.strictEqual(tokens, 2);
   assert.strictEqual(geocodes, 2);
 });
+
+// ── directions / road geometry ───────────────────────────────────────────────
+
+// Three steps whose stepIndexes are deliberately out of array order (2, 0, 1):
+// the route is A→B→C→D only when walked in stepIndexes order.
+const DIRECTIONS_STUB = {
+  origin: { latitude: 32.7, longitude: -96.8 },
+  destination: { latitude: 32.73, longitude: -96.77 },
+  routes: [{
+    distanceMeters: 4321, durationSeconds: 540, hasTolls: true, name: 'I-35E N', transportType: 'Automobile',
+    stepIndexes: [2, 0, 1],
+  }, {
+    distanceMeters: 9999, durationSeconds: 999, hasTolls: false, name: 'slow way', transportType: 'Automobile', stepIndexes: [0],
+  }],
+  steps: [
+    { distanceMeters: 1000, durationSeconds: 100, instructions: 'middle', stepPathIndex: 1, transportType: 'Automobile' },
+    { distanceMeters: 1000, durationSeconds: 100, instructions: 'last', stepPathIndex: 2, transportType: 'Automobile' },
+    { distanceMeters: 2321, durationSeconds: 340, instructions: 'first', stepPathIndex: 0, transportType: 'Automobile' },
+  ],
+  stepPaths: [
+    [{ latitude: 32.7, longitude: -96.8 }, { latitude: 32.71, longitude: -96.8 }],                                   // A → B
+    [{ latitude: 32.71, longitude: -96.8 }, { latitude: 32.71, longitude: -96.8 }, { latitude: 32.71, longitude: -96.78 }], // B (dup) → C
+    [{ latitude: 32.71, longitude: -96.78 }, { latitude: 32.73, longitude: -96.77 }],                                   // C → D
+  ],
+};
+
+test('joinStepPaths: follows routes[0].stepIndexes order and drops repeated vertices', () => {
+  const { joinStepPaths } = apple;
+  assert.deepStrictEqual(joinStepPaths(DIRECTIONS_STUB), [
+    [32.7, -96.8], [32.71, -96.8], [32.71, -96.78], [32.73, -96.77],
+  ]);
+  // a different route index walks its own steps
+  assert.deepStrictEqual(joinStepPaths(DIRECTIONS_STUB, 1), [[32.71, -96.8], [32.71, -96.78]]);
+  // garbage in → [] (never throws)
+  assert.deepStrictEqual(joinStepPaths(null), []);
+  assert.deepStrictEqual(joinStepPaths({ routes: [] }), []);
+  assert.deepStrictEqual(joinStepPaths({ routes: [{ stepIndexes: [5, 'x'] }], steps: [{ stepPathIndex: 9 }], stepPaths: [] }), []);
+  // a point missing coordinates is skipped, not emitted as NaN
+  assert.deepStrictEqual(joinStepPaths({ routes: [{ stepIndexes: [0] }], steps: [{ stepPathIndex: 0 }],
+    stepPaths: [[{ latitude: 1, longitude: 2 }, { latitude: 'nope' }, null, { latitude: 1, longitude: 3 }]] }), [[1, 2], [1, 3]]);
+});
+
+test('simplifyPath: keeps the endpoints, collapses sub-tolerance jitter, caps a 2,000-point zigzag at ≤ 400', () => {
+  const { simplifyPath, PATH_MAX_POINTS } = apple;
+  // (1) a 2,000-point zigzag with ±5 m wobble around a straight line → Douglas–Peucker (8 m) collapses it to the two ends
+  const jitter = Array.from({ length: 2000 }, (_, i) => [32.7 + i * 0.00001, -96.8 + (i % 2 ? 0.00005 : 0)]);
+  const a = simplifyPath(jitter);
+  assert.deepStrictEqual(a[0], jitter[0]);
+  assert.deepStrictEqual(a[a.length - 1], jitter[jitter.length - 1]);
+  assert.ok(a.length <= 4, `jitter collapses (got ${a.length})`);
+  // (2) a 2,000-point zigzag with ±100 m swings: every vertex survives DP, so the even thinning caps it at PATH_MAX_POINTS
+  const big = Array.from({ length: 2000 }, (_, i) => [32.7 + i * 0.0001, -96.8 + (i % 2 ? 0.001 : 0)]);
+  const b = simplifyPath(big);
+  assert.strictEqual(b.length, PATH_MAX_POINTS);
+  assert.ok(b.length < 2000 && b.length <= 400);
+  assert.deepStrictEqual(b[0], big[0]);
+  assert.deepStrictEqual(b[b.length - 1], big[big.length - 1]);
+  // output is strictly a subsequence (monotonic latitude here)
+  for (let i = 1; i < b.length; i++) assert.ok(b[i][0] > b[i - 1][0]);
+  // (3) tolerance 0 = even thinning only; maxPoints honoured
+  const c = simplifyPath(big, { tolerance: 0, maxPoints: 50 });
+  assert.strictEqual(c.length, 50);
+  assert.deepStrictEqual(c[0], big[0]);
+  assert.deepStrictEqual(c[49], big[1999]);
+  // (4) a real corner is preserved: L-shape stays 3 points
+  const L = [[32.7, -96.8], [32.7, -96.79], [32.71, -96.79]];
+  assert.deepStrictEqual(simplifyPath(L), L);
+  // (5) short / malformed input
+  assert.deepStrictEqual(simplifyPath([[1, 2]]), [[1, 2]]);
+  assert.deepStrictEqual(simplifyPath([[1, 2], ['x', 3], [1, 3]]), [[1, 2], [1, 3]]);
+  assert.deepStrictEqual(simplifyPath(null), []);
+  // input not mutated
+  assert.strictEqual(big.length, 2000);
+});
+
+test('directions(): request shape, routes[0] mapping, rounding, cache, null on no route (stubbed fetch)', async (t) => {
+  const quiet = { error() {}, warn() {}, log() {} };
+  const a = createApple({ APPLE_MAPS_TEAM_ID: 'T', APPLE_MAPS_KEY_ID: 'K', APPLE_MAPS_ID: 'M', APPLE_MAPS_PRIVATE_KEY: pem }, { log: quiet });
+  const calls = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push({ url: String(url), auth: opts && opts.headers && opts.headers.Authorization });
+    const u = new URL(String(url));
+    const json = (body, status = 200) => ({ ok: status < 300, status, json: async () => body, text: async () => JSON.stringify(body) });
+    if (u.pathname === '/v1/token') return json({ accessToken: 'ACCESS', expiresInSeconds: 1800 });
+    if (u.pathname === '/v1/directions') {
+      if (u.searchParams.get('origin') === '0.000000,0.000000') return json({ routes: [], steps: [], stepPaths: [] });
+      if (u.searchParams.get('origin') === '1.000000,1.000000') return json({ message: 'no route' }, 404);
+      // precise coordinates in the stub exercise the 5 dp rounding
+      const d = JSON.parse(JSON.stringify(DIRECTIONS_STUB));
+      d.stepPaths[0][0] = { latitude: 32.700004999, longitude: -96.800005001 };
+      return json(d);
+    }
+    return json({ message: 'nope' }, 404);
+  };
+  t.after(() => { global.fetch = realFetch; });
+
+  const depart = new Date(Date.now() + 3600e3).toISOString();
+  const leg = await a.directions({ origin: { lat: 32.7, lng: -96.8 }, destination: '32.73,-96.77', departureDate: depart });
+  const call = calls.find(c => c.url.includes('/v1/directions'));
+  assert.ok(call, 'hit /v1/directions');
+  assert.strictEqual(call.auth, 'Bearer ACCESS');
+  const q = new URL(call.url).searchParams;
+  assert.strictEqual(q.get('origin'), '32.700000,-96.800000');
+  assert.strictEqual(q.get('destination'), '32.730000,-96.770000');
+  assert.strictEqual(q.get('transportType'), 'Automobile');
+  assert.strictEqual(q.get('lang'), 'en-US');
+  assert.match(q.get('departureDate'), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  assert.deepStrictEqual(leg, {
+    seconds: 540, meters: 4321, hasTolls: true,
+    path: [[32.7, -96.80001], [32.71, -96.8], [32.71, -96.78], [32.73, -96.77]],
+  });
+  assert.ok(leg.path.length <= apple.PATH_MAX_POINTS);
+
+  // cached: same leg + same departure hour → no second network call
+  const n = calls.length;
+  const again = await a.directions({ origin: '32.7,-96.8', destination: { lat: 32.73, lng: -96.77 }, departureDate: depart });
+  assert.strictEqual(again, leg);
+  assert.strictEqual(calls.length, n);
+
+  // a departure in the past is ignored (sent without departureDate, separate cache slot)
+  await a.directions({ origin: '32.7,-96.8', destination: '32.73,-96.77', departureDate: '2001-01-01T00:00:00Z' });
+  const last = new URL(calls[calls.length - 1].url).searchParams;
+  assert.strictEqual(last.has('departureDate'), false);
+
+  // no route / API error / bad input → null, never throws
+  assert.strictEqual(await a.directions({ origin: '0,0', destination: '0.1,0.1' }), null);
+  assert.strictEqual(await a.directions({ origin: '1,1', destination: '1.1,1.1' }), null);
+  assert.strictEqual(await a.directions({ origin: 'nope', destination: '1.1,1.1' }), null);
+  assert.strictEqual(await a.directions({}), null);
+
+  // unconfigured provider is inert (no network)
+  const off = createApple({}, { log: quiet });
+  const before = calls.length;
+  assert.strictEqual(await off.directions({ origin: '32.7,-96.8', destination: '32.73,-96.77' }), null);
+  assert.strictEqual(calls.length, before);
+});
