@@ -5101,6 +5101,37 @@ app.get('/maps/snapshot-url', requireAuth, (req, res) => {
   res.json({ url: apple.snapshotUrl({ lat: p.lat, lng: p.lng, w: req.query.w, h: req.query.h, zoom: req.query.zoom }) });
 });
 
+// Diagnostic: fetch the snapshot server-side for each signing variant so we
+// can read Apple's status/message (browsers hide it behind CORS / <img>).
+app.get('/maps/snapshot-check', requireAuth, requireAdmin, async (req, res) => {
+  if (!apple.configured()) return res.json({ configured: false, variants: [] });
+  const lat = Number(req.query.lat) || 33.0670151;
+  const lng = Number(req.query.lng) || -96.8723196;
+  const variants = [];
+  for (const sig of ['ieee-p1363', 'der']) {
+    for (const noExpires of [false, true]) {
+      for (const noAnnotations of [false, true]) {
+        for (const noScale of [false, true]) {
+          variants.push({ sig, noExpires, noAnnotations, noScale });
+        }
+      }
+    }
+  }
+  const out = [];
+  for (const v of variants) {
+    const url = apple.snapshotUrl({ lat, lng, ...v });
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      const ct = r.headers.get('content-type') || '';
+      const body = ct.includes('image') ? `(image ${r.headers.get('content-length') || '?'} bytes)` : (await r.text()).slice(0, 300);
+      out.push({ ...v, status: r.status, contentType: ct, body });
+    } catch (err) {
+      out.push({ ...v, error: err.message });
+    }
+  }
+  res.json({ configured: true, envSig: process.env.APPLE_MAPS_SNAPSHOT_SIG || null, variants: out });
+});
+
 // ── JobNimbus photo report (Work Complete → PDF → job Files) ─────────────────
 // A JobNimbus automation fires POST /webhooks/jobnimbus/photo-report?token=…
 // whenever a job's status changes to Work Complete. We then:
