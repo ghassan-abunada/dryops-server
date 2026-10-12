@@ -381,8 +381,9 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   }
 
   // Geocode when we have an address and either the job is new, has no
-  // coordinates yet, or the address changed. Skips silently if no key set.
-  if (row.address && GOOGLE_MAPS_KEY) {
+  // coordinates yet, or the address changed. Skips silently when neither
+  // Apple Maps nor a Google key is configured.
+  if (row.address && (apple.configured() || GOOGLE_MAPS_KEY)) {
     const needsGeocode = !existing || existing.lat == null || existing.address !== row.address;
     if (needsGeocode) {
       const coords = await geocode(row.address);
@@ -589,18 +590,30 @@ function biasFromQuery(query) {
   return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? { lat, lon } : GEO_BIAS_DEFAULT;
 }
 
-// Server-side geocode via Google Maps (mirrors the app's geocodeAddress),
-// falling back to Photon whenever Google can't answer.
+// Apple Maps Server API (apple.js) — primary provider for geocode, type-ahead,
+// ETAs and snapshots when APPLE_MAPS_* are set. Autocomplete pre-seeds
+// `details:geo:<lat>,<lng>` in geoCache so /places/details answers from it.
+const apple = require('./apple')(process.env, { geoCacheSet });
+const { parseLatLng } = require('./apple');
+
+// Server-side geocode: Apple first, then Google (only when GOOGLE_MAPS_KEY is
+// set; mirrors the app's geocodeAddress), then the keyless chain.
 async function geocode(address) {
-  try {
-    const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_KEY}`);
-    const d = r.ok ? await r.json().catch(() => null) : null;
-    if (d && d.status === 'OK' && d.results && d.results.length) {
-      const loc = d.results[0].geometry.location;
-      return { lat: loc.lat, lng: loc.lng };
-    }
-    if (d && d.status !== 'ZERO_RESULTS') console.warn('[jn-webhook] geocode status', d.status, d.error_message || '');
-  } catch (err) { console.error('[jn-webhook] geocode error', err.message); }
+  if (apple.configured()) {
+    const hits = await apple.geocode(address);
+    if (hits[0]) return { lat: hits[0].lat, lng: hits[0].lng };
+  }
+  if (GOOGLE_MAPS_KEY) {
+    try {
+      const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_MAPS_KEY}`);
+      const d = r.ok ? await r.json().catch(() => null) : null;
+      if (d && d.status === 'OK' && d.results && d.results.length) {
+        const loc = d.results[0].geometry.location;
+        return { lat: loc.lat, lng: loc.lng };
+      }
+      if (d && d.status !== 'ZERO_RESULTS') console.warn('[jn-webhook] geocode status', d.status, d.error_message || '');
+    } catch (err) { console.error('[jn-webhook] geocode error', err.message); }
+  }
   const alt = await freeGeocode(address);
   return alt ? { lat: alt.lat, lng: alt.lng } : null;
 }
@@ -4826,14 +4839,33 @@ app.post('/admin/lead-sources/bank-reveal', requireAuth, requireAdmin, async (re
   }
 });
 
-// Google Places address autocomplete, proxied so the Maps key stays server-side.
+// Address autocomplete, proxied so the Maps credentials stay server-side.
 // Used by the app's address fields (e.g. new lead-source company). Same
-// admin/owner gating as the rest of /admin. Requires the "Places API" to be
-// enabled on the GOOGLE_MAPS_KEY project (Geocoding alone is not enough).
+// admin/owner gating as the rest of /admin. Apple Maps first when configured
+// (place_id "geo:<lat>,<lng>" when Apple already knows the coordinates, else
+// "apple:<b64 completionUrl>" resolved by /places/details); then Google
+// (requires the "Places API" on the GOOGLE_MAPS_KEY project); then Photon.
 async function placesAutocomplete(req, res) {
   const q = String(req.query.q || '').trim();
   if (q.length < 3) return res.json({ predictions: [] });
-  if (!GOOGLE_MAPS_KEY) return res.json({ predictions: [], error: 'Maps key not configured' });
+  if (!GOOGLE_MAPS_KEY && !apple.configured()) return res.json({ predictions: [], error: 'Maps key not configured' });
+  if (apple.configured()) {
+    const predictions = await apple.autocomplete(q, { bias: biasFromQuery(req.query), limit: 5 });
+    if (predictions.length < 3) {
+      // Thin result: top up from the keyless chain (Photon + Census) so partial
+      // text still gets suggestions. Same synthetic geo: ids as the fallback path.
+      const seen = new Set(predictions.map(p => p.description.toLowerCase()));
+      const alt = await freeSuggest(q, 5, biasFromQuery(req.query)).catch(() => []);
+      for (const a of alt) {
+        if (predictions.length >= 5 || seen.has(a.formatted.toLowerCase())) continue;
+        seen.add(a.formatted.toLowerCase());
+        geoCacheSet(`details:geo:${a.lat},${a.lng}`, a);
+        predictions.push({ description: a.formatted, place_id: `geo:${a.lat},${a.lng}` });
+      }
+    }
+    if (predictions.length) return res.json({ predictions });
+    if (!GOOGLE_MAPS_KEY) return res.json({ predictions: [] });
+  }
   try {
     const params = new URLSearchParams({
       input: q.slice(0, 200),
@@ -4880,6 +4912,13 @@ async function placesDetails(req, res) {
     return res.json({ street: cached.street || '', city: cached.city || '', state: cached.state || '', zip: cached.zip || '',
       formatted: cached.formatted || '', lat: Number(geo[1]), lng: Number(geo[2]) });
   }
+  if (placeId.startsWith('apple:')) {
+    // Apple autocomplete row without coordinates → follow its completionUrl.
+    const p = await apple.resolveCompletion(placeId);
+    if (!p) return res.json({});
+    return res.json({ street: p.street || '', city: p.city || '', state: p.state || '', zip: p.zip || '',
+      formatted: p.formatted || '', lat: p.lat, lng: p.lng });
+  }
   if (!placeId || !GOOGLE_MAPS_KEY) return res.json({});
   try {
     const params = new URLSearchParams({
@@ -4924,20 +4963,25 @@ async function placesDetails(req, res) {
 async function geocodeRoute(req, res) {
   const address = String(req.query.address || '').trim();
   if (address.length < 3) return res.json({ results: [] });
-  if (!GOOGLE_MAPS_KEY) return res.json({ results: [], error: 'Maps key not configured' });
+  if (!GOOGLE_MAPS_KEY && !apple.configured()) return res.json({ results: [], error: 'Maps key not configured' });
   try {
-    const params = new URLSearchParams({ address: address.slice(0, 300), key: GOOGLE_MAPS_KEY, components: 'country:US' });
-    const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${params}`);
-    const d = await r.json().catch(() => null);
     let results = [];
-    if (d && d.status === 'OK') {
-      results = (d.results || []).slice(0, 5).map(x => ({
-        formatted: x.formatted_address || '',
-        lat: x.geometry && x.geometry.location ? x.geometry.location.lat : null,
-        lng: x.geometry && x.geometry.location ? x.geometry.location.lng : null,
-      })).filter(x => typeof x.lat === 'number' && typeof x.lng === 'number');
-    } else if (d && d.status !== 'ZERO_RESULTS') {
-      console.warn('[geocode] status', d && d.status, (d && d.error_message) || '');
+    if (apple.configured()) {
+      results = (await apple.geocode(address)).map(x => ({ formatted: x.formatted, lat: x.lat, lng: x.lng }));
+    }
+    if (!results.length && GOOGLE_MAPS_KEY) {
+      const params = new URLSearchParams({ address: address.slice(0, 300), key: GOOGLE_MAPS_KEY, components: 'country:US' });
+      const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${params}`);
+      const d = await r.json().catch(() => null);
+      if (d && d.status === 'OK') {
+        results = (d.results || []).slice(0, 5).map(x => ({
+          formatted: x.formatted_address || '',
+          lat: x.geometry && x.geometry.location ? x.geometry.location.lat : null,
+          lng: x.geometry && x.geometry.location ? x.geometry.location.lng : null,
+        })).filter(x => typeof x.lat === 'number' && typeof x.lng === 'number');
+      } else if (d && d.status !== 'ZERO_RESULTS') {
+        console.warn('[geocode] status', d && d.status, (d && d.error_message) || '');
+      }
     }
     if (!results.length) {
       const best = await freeGeocode(address);
@@ -4960,6 +5004,66 @@ app.get('/admin/places/details', requireAuth, requireAdmin, placesDetails);
 app.get('/places/autocomplete', requireAuth, placesAutocomplete);
 app.get('/places/details', requireAuth, placesDetails);
 app.get('/geocode', requireAuth, geocodeRoute);
+
+// ── Apple Maps extras: drive times, static map snapshots, provider status ────
+// Which map providers this deployment can use (app decides whether to ask for
+// ETAs / snapshots or stick to its own heuristics and Street View).
+app.get('/maps/status', requireAuth, (req, res) => {
+  res.json({ apple: apple.configured(), google: !!GOOGLE_MAPS_KEY });
+});
+
+// Chained drive-time legs for a planned route (Route Planner / tech day page).
+//   ?origin=lat,lng&stops=lat,lng|lat,lng|…(≤25)[&depart=ISO][&service=25]
+// Leg i runs from stop i-1 (or the origin) to stop i. With `depart`, each leg's
+// departureDate is advanced by the previous legs' drive seconds plus `service`
+// minutes on site (so the legs run sequentially — traffic depends on when you
+// leave); without it legs are independent and run 4 at a time. Responds
+//   { provider: 'apple', legs: [{ seconds, staticSeconds, meters } | null] }
+// or { provider: null, legs: [] } when Apple Maps is not configured, so the
+// app falls back to its speed heuristic.
+app.get('/routes/etas', requireAuth, async (req, res) => {
+  const origin = parseLatLng(req.query.origin);
+  const stops = String(req.query.stops || '').split('|').map(parseLatLng).filter(Boolean).slice(0, 25);
+  if (!origin || !stops.length) return res.status(400).json({ error: 'origin=lat,lng and stops=lat,lng|… required' });
+  if (!apple.configured()) return res.json({ provider: null, legs: [] });
+  const serviceMin = Math.max(0, Math.min(240, Number(req.query.service) || 25));
+  const departMs = req.query.depart ? new Date(String(req.query.depart)).getTime() : NaN;
+  const chained = Number.isFinite(departMs);
+  const points = [origin, ...stops];
+  const legs = new Array(stops.length).fill(null);
+  try {
+    if (chained) {
+      let clock = departMs;
+      for (let i = 0; i < stops.length; i++) {
+        const [eta] = await apple.etas({ origin: points[i], destinations: [points[i + 1]], departureDate: new Date(clock).toISOString() });
+        legs[i] = eta ? { seconds: eta.seconds, staticSeconds: eta.staticSeconds, meters: eta.meters } : null;
+        clock += ((eta ? eta.seconds : 0) + serviceMin * 60) * 1000;
+      }
+    } else {
+      const CONCURRENCY = 4;
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, stops.length) }, async () => {
+        while (next < stops.length) {
+          const i = next++;
+          const [eta] = await apple.etas({ origin: points[i], destinations: [points[i + 1]] });
+          legs[i] = eta ? { seconds: eta.seconds, staticSeconds: eta.staticSeconds, meters: eta.meters } : null;
+        }
+      }));
+    }
+  } catch (err) {
+    console.error('[routes/etas]', err.message);
+  }
+  res.json({ provider: 'apple', legs });
+});
+
+// Signed Apple Web Snapshot URL for a job pin (static map image, 1 h expiry).
+//   ?lat=&lng=[&w=600&h=300&zoom=16] → { url } or { url: null } when not configured.
+app.get('/maps/snapshot-url', requireAuth, (req, res) => {
+  const p = parseLatLng({ lat: req.query.lat, lng: req.query.lng });
+  if (!p) return res.status(400).json({ error: 'lat and lng required' });
+  if (!apple.configured()) return res.json({ url: null });
+  res.json({ url: apple.snapshotUrl({ lat: p.lat, lng: p.lng, w: req.query.w, h: req.query.h, zoom: req.query.zoom }) });
+});
 
 // ── JobNimbus photo report (Work Complete → PDF → job Files) ─────────────────
 // A JobNimbus automation fires POST /webhooks/jobnimbus/photo-report?token=…
