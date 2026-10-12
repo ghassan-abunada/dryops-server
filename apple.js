@@ -461,7 +461,7 @@ function createApple(env = process.env, deps = {}) {
   }
 
   // ── Web Snapshot URL ──
-  function snapshotUrl({ lat, lng, w = 600, h = 300, zoom = 16, scale = 2, colorScheme = 'light', annotations, expiresIn = 3600, now } = {}) {
+  function snapshotUrl({ lat, lng, w = 600, h = 300, zoom = 16, scale = 2, colorScheme = 'light', annotations, expiresIn = 3600, now, sig, noExpires, noAnnotations, noScale } = {}) {
     const p = parseLatLng({ lat, lng });
     if (!p || !configured()) return null;
     const W = Math.max(50, Math.min(640, Math.round(Number(w) || 600)));
@@ -473,15 +473,15 @@ function createApple(env = process.env, deps = {}) {
       `center=${p.lat},${p.lng}`,
       `z=${Z}`,
       `size=${W}x${H}`,
-      `scale=${scale === 1 ? 1 : 2}`,
-      `colorScheme=${colorScheme === 'dark' ? 'dark' : 'light'}`,
-      `annotations=${encodeURIComponent(JSON.stringify(ann))}`,
-      `expires=${expires}`,
+      noScale ? null : `scale=${scale === 1 ? 1 : 2}`,
+      noScale ? null : `colorScheme=${colorScheme === 'dark' ? 'dark' : 'light'}`,
+      noAnnotations ? null : `annotations=${encodeURIComponent(JSON.stringify(ann))}`,
+      noExpires ? null : `expires=${expires}`,
       `teamId=${encodeURIComponent(TEAM_ID)}`,
       `keyId=${encodeURIComponent(KEY_ID)}`,
-    ].join('&');
+    ].filter(Boolean).join('&');
     const pathAndQuery = `${SNAPSHOT_PATH}?${query}`;
-    const signature = signSnapshotQuery(pathAndQuery, key(), SNAPSHOT_SIG);
+    const signature = signSnapshotQuery(pathAndQuery, key(), sig === 'der' || sig === 'ieee-p1363' ? sig : SNAPSHOT_SIG);
     return `${SNAPSHOT_API}${pathAndQuery}&signature=${signature}`;
   }
 
