@@ -467,7 +467,9 @@ function createApple(env = process.env, deps = {}) {
     const W = Math.max(50, Math.min(640, Math.round(Number(w) || 600)));
     const H = Math.max(50, Math.min(640, Math.round(Number(h) || 300)));
     const Z = Math.max(3, Math.min(20, Number(zoom) || 16));
-    const ann = Array.isArray(annotations) ? annotations : [{ point: `${p.lat},${p.lng}`, color: 'red', glyphText: '' }];
+    // Apple rejects the whole request (400 Bad Request) when glyphText is not exactly one
+    // alphanumeric character, so a plain pin omits it. Colors are hex without '#'.
+    const ann = Array.isArray(annotations) ? annotations : [{ point: `${p.lat},${p.lng}`, color: 'e11d48', markerStyle: 'balloon' }];
     const expires = Math.floor(((now == null ? Date.now() : Number(now)) / 1000) + expiresIn);
     const query = [
       `center=${p.lat},${p.lng}`,
