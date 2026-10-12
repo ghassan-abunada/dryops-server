@@ -148,7 +148,7 @@ test('snapshotUrl: signed Web Snapshot URL whose signature covers path+query min
   assert.strictEqual(u.searchParams.get('teamId'), 'TEAM1');
   assert.strictEqual(u.searchParams.get('keyId'), 'KEY1');
   assert.strictEqual(u.searchParams.get('expires'), String(1_760_000_000 + 3600));
-  assert.deepStrictEqual(JSON.parse(u.searchParams.get('annotations')), [{ point: '32.7767,-96.797', color: 'red', glyphText: '' }]);
+  assert.deepStrictEqual(JSON.parse(u.searchParams.get('annotations')), [{ point: '32.7767,-96.797', color: 'e11d48', markerStyle: 'balloon' }]);
   const [unsigned, sig] = url.replace('https://snapshot.apple-mapkit.com', '').split('&signature=');
   assert.ok(sig && !sig.includes('&'), 'signature is the last param');
   assert.ok(crypto.verify('sha256', Buffer.from(unsigned), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(sig, 'base64url')));
