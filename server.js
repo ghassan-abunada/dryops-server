@@ -594,7 +594,7 @@ function biasFromQuery(query) {
 // ETAs and snapshots when APPLE_MAPS_* are set. Autocomplete pre-seeds
 // `details:geo:<lat>,<lng>` in geoCache so /places/details answers from it.
 const apple = require('./apple')(process.env, { geoCacheSet });
-const { parseLatLng } = require('./apple');
+const { parseLatLng, simplifyPath, PATH_MAX_POINTS } = require('./apple');
 
 // Server-side geocode: Apple first, then Google (only when GOOGLE_MAPS_KEY is
 // set; mirrors the app's geocodeAddress), then the keyless chain.
@@ -5052,6 +5052,42 @@ app.get('/routes/etas', requireAuth, async (req, res) => {
     }
   } catch (err) {
     console.error('[routes/etas]', err.message);
+  }
+  res.json({ provider: 'apple', legs });
+});
+
+// Road geometry for a route: one Apple /v1/directions leg per hop.
+//   ?origin=lat,lng&stops=lat,lng|…(≤25)[&depart=ISO]
+//   → { provider: 'apple', legs: [{ seconds, meters, hasTolls, path: [[lat, lng], …] } | null] }
+// Leg i is origin/stop i-1 → stop i. Legs are independent (no ETA chaining —
+// geometry barely changes with departure), fetched 4 at a time; `depart` is
+// passed through as given. Each path is capped at PATH_MAX_POINTS points.
+// { provider: null, legs: [] } when Apple is not configured.
+app.get('/routes/path', requireAuth, async (req, res) => {
+  const origin = parseLatLng(req.query.origin);
+  const stops = String(req.query.stops || '').split('|').map(parseLatLng).filter(Boolean).slice(0, 25);
+  if (!origin || !stops.length) return res.status(400).json({ error: 'origin=lat,lng and stops=lat,lng|… required' });
+  if (!apple.configured()) return res.json({ provider: null, legs: [] });
+  const departMs = req.query.depart ? new Date(String(req.query.depart)).getTime() : NaN;
+  const departureDate = Number.isFinite(departMs) ? String(req.query.depart) : undefined;
+  const points = [origin, ...stops];
+  const legs = new Array(stops.length).fill(null);
+  try {
+    const CONCURRENCY = 4;
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, stops.length) }, async () => {
+      while (next < stops.length) {
+        const i = next++;
+        const leg = await apple.directions({ origin: points[i], destination: points[i + 1], departureDate });
+        if (!leg) continue;
+        const path = Array.isArray(leg.path) && leg.path.length > PATH_MAX_POINTS
+          ? simplifyPath(leg.path, { tolerance: 0, maxPoints: PATH_MAX_POINTS })
+          : (leg.path || []);
+        legs[i] = { seconds: leg.seconds, meters: leg.meters, hasTolls: !!leg.hasTolls, path };
+      }
+    }));
+  } catch (err) {
+    console.error('[routes/path]', err.message);
   }
   res.json({ provider: 'apple', legs });
 });

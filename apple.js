@@ -1,6 +1,7 @@
 'use strict';
 // Apple Maps Server API — primary provider for geocoding, address type-ahead,
-// drive-time ETAs and static map snapshots. Google (GOOGLE_MAPS_KEY) and the
+// drive-time ETAs, turn-by-turn road geometry (directions) and static map
+// snapshots. Google (GOOGLE_MAPS_KEY) and the
 // keyless Census / Nominatim / Photon chain in server.js remain the fallbacks:
 // every function here swallows network errors (logged with an [apple] prefix)
 // and returns [] / null so the caller moves on to the next provider.
@@ -27,6 +28,8 @@ const CACHE_TTL_MS = 60 * 60 * 1000;
 const CACHE_MAX = 2000;
 const ETA_CHUNK = 10;
 const FETCH_TIMEOUT_MS = 8000;
+const PATH_MAX_POINTS = 400;   // cap per leg returned by directions()
+const PATH_TOLERANCE_M = 8;    // Douglas–Peucker tolerance (metres)
 
 // ── Pure helpers (exported for tests) ────────────────────────────────────────
 
@@ -106,6 +109,81 @@ function chunk(arr, size) {
 
 const fmtCoord = (p) => `${Number(p.lat).toFixed(6)},${Number(p.lng).toFixed(6)}`;
 const round4 = (n) => Number(n).toFixed(4);
+const round5 = (n) => Math.round(Number(n) * 1e5) / 1e5;
+
+/**
+ * Apple /v1/directions response → one [[lat, lng], …] polyline for
+ * routes[routeIndex]: walk its stepIndexes (in the order Apple gives them, not
+ * array order) → steps[i].stepPathIndex → stepPaths[idx], concatenating the
+ * coordinates and skipping any point equal to the previous one (step paths
+ * share their end/start vertex). Missing or malformed pieces are skipped.
+ */
+function joinStepPaths(d, routeIndex = 0) {
+  if (!d || !Array.isArray(d.routes) || !d.routes[routeIndex]) return [];
+  const route = d.routes[routeIndex];
+  const steps = Array.isArray(d.steps) ? d.steps : [];
+  const stepPaths = Array.isArray(d.stepPaths) ? d.stepPaths : [];
+  const idxs = Array.isArray(route.stepIndexes) ? route.stepIndexes : steps.map((_, i) => i);
+  const out = [];
+  for (const si of idxs) {
+    const step = steps[Number(si)];
+    if (!step) continue;
+    const path = stepPaths[Number(step.stepPathIndex)];
+    if (!Array.isArray(path)) continue;
+    for (const p of path) {
+      if (!p) continue;
+      const lat = Number(p.latitude != null ? p.latitude : p.lat);
+      const lng = Number(p.longitude != null ? p.longitude : p.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      const prev = out[out.length - 1];
+      if (prev && prev[0] === lat && prev[1] === lng) continue;
+      out.push([lat, lng]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Thin a [[lat, lng], …] polyline: Douglas–Peucker with `tolerance` metres
+ * (0 disables it), then — if still over `maxPoints` — keep evenly spaced
+ * points. Both ends are always kept; the input is not mutated.
+ */
+function simplifyPath(path, { tolerance = PATH_TOLERANCE_M, maxPoints = PATH_MAX_POINTS } = {}) {
+  const pts = (Array.isArray(path) ? path : [])
+    .filter(p => Array.isArray(p) && Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1])))
+    .map(p => [Number(p[0]), Number(p[1])]);
+  const n = pts.length;
+  if (n <= 2) return pts;
+  let out = pts;
+  if (tolerance > 0) {
+    // local equirectangular metres so the tolerance is in metres
+    const kx = 111320 * Math.cos(pts[0][0] * Math.PI / 180), ky = 110540;
+    const X = pts.map(p => p[1] * kx), Y = pts.map(p => p[0] * ky);
+    const keep = new Uint8Array(n);
+    keep[0] = 1; keep[n - 1] = 1;
+    const stack = [[0, n - 1]];
+    while (stack.length) {
+      const [a, b] = stack.pop();
+      if (b - a < 2) continue;
+      const dx = X[b] - X[a], dy = Y[b] - Y[a];
+      const len = Math.hypot(dx, dy);
+      let maxD = -1, maxI = -1;
+      for (let i = a + 1; i < b; i++) {
+        const d = len === 0
+          ? Math.hypot(X[i] - X[a], Y[i] - Y[a])
+          : Math.abs(dx * (Y[i] - Y[a]) - dy * (X[i] - X[a])) / len;
+        if (d > maxD) { maxD = d; maxI = i; }
+      }
+      if (maxD > tolerance) { keep[maxI] = 1; stack.push([a, maxI], [maxI, b]); }
+    }
+    out = pts.filter((_, i) => keep[i]);
+  }
+  if (maxPoints >= 2 && out.length > maxPoints) {
+    const m = out.length;
+    out = Array.from({ length: maxPoints }, (_, i) => out[Math.round(i * (m - 1) / (maxPoints - 1))]);
+  }
+  return out;
+}
 
 /** Apple place/search result → the shape the app's address fields consume. */
 function placeFromResult(r) {
@@ -129,7 +207,7 @@ function placeFromResult(r) {
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 /**
- * createApple(env, deps) → { configured, geocode, autocomplete, resolveCompletion, etas, snapshotUrl }
+ * createApple(env, deps) → { configured, geocode, autocomplete, resolveCompletion, etas, directions, snapshotUrl }
  * deps.geoCacheSet(key, value): server.js's geo cache, so autocomplete can
  * pre-seed `details:geo:<lat>,<lng>` for the existing /places/details path.
  */
@@ -334,6 +412,54 @@ function createApple(env = process.env, deps = {}) {
     return results;
   }
 
+  // ── Directions (road geometry for one leg) ──
+  /**
+   * directions({ origin, destination, departureDate? }) →
+   *   { seconds, meters, hasTolls, path: [[lat, lng], …] } or null.
+   * routes[0] of GET /v1/directions (Automobile); the path is the joined step
+   * geometry, simplified to ≤ PATH_MAX_POINTS points and rounded to 5 dp.
+   * Cached 1 h by rounded coords + departure hour.
+   */
+  async function directions({ origin, destination, departureDate } = {}) {
+    const o = parseLatLng(origin);
+    const dst = parseLatLng(destination);
+    if (!o || !dst || !configured()) return null;
+    let depart = null;
+    if (departureDate) {
+      const dt = new Date(departureDate);
+      if (Number.isFinite(dt.getTime()) && dt.getTime() > Date.now() - 5 * 60 * 1000) depart = dt;
+    }
+    const departHour = depart ? Math.floor(depart.getTime() / 3600000) : 'now';
+    const ck = `dir:${round4(o.lat)},${round4(o.lng)}>${round4(dst.lat)},${round4(dst.lng)}@${departHour}`;
+    const hit = cacheGet(ck);
+    if (hit) return hit;
+    const params = new URLSearchParams({
+      origin: fmtCoord(o),
+      destination: fmtCoord(dst),
+      transportType: 'Automobile',
+      lang: 'en-US',
+    });
+    if (depart) params.set('departureDate', depart.toISOString().replace(/\.\d{3}Z$/, 'Z'));
+    const d = await api(`/v1/directions?${params}`);
+    if (!d || !Array.isArray(d.routes) || !d.routes[0]) return null;
+    const route = d.routes[0];
+    const seconds = Number(route.durationSeconds);
+    if (!Number.isFinite(seconds)) return null;
+    const path = [];
+    for (const [la, lo] of simplifyPath(joinStepPaths(d, 0))) {
+      const p = [round5(la), round5(lo)];
+      const prev = path[path.length - 1];
+      if (prev && prev[0] === p[0] && prev[1] === p[1]) continue;
+      path.push(p);
+    }
+    return cacheSet(ck, {
+      seconds,
+      meters: Number.isFinite(Number(route.distanceMeters)) ? Number(route.distanceMeters) : null,
+      hasTolls: !!route.hasTolls,
+      path,
+    });
+  }
+
   // ── Web Snapshot URL ──
   function snapshotUrl({ lat, lng, w = 600, h = 300, zoom = 16, scale = 2, colorScheme = 'light', annotations, expiresIn = 3600, now } = {}) {
     const p = parseLatLng({ lat, lng });
@@ -359,7 +485,7 @@ function createApple(env = process.env, deps = {}) {
     return `${SNAPSHOT_API}${pathAndQuery}&signature=${signature}`;
   }
 
-  return { configured, geocode, autocomplete, resolveCompletion, etas, snapshotUrl };
+  return { configured, geocode, autocomplete, resolveCompletion, etas, directions, snapshotUrl };
 }
 
 module.exports = createApple;
@@ -370,6 +496,10 @@ module.exports.signSnapshotQuery = signSnapshotQuery;
 module.exports.parseLatLng = parseLatLng;
 module.exports.placeFromResult = placeFromResult;
 module.exports.chunk = chunk;
+module.exports.joinStepPaths = joinStepPaths;
+module.exports.simplifyPath = simplifyPath;
+module.exports.PATH_MAX_POINTS = PATH_MAX_POINTS;
+module.exports.PATH_TOLERANCE_M = PATH_TOLERANCE_M;
 module.exports.ETA_CHUNK = ETA_CHUNK;
 module.exports.MAPS_API = MAPS_API;
 module.exports.SNAPSHOT_API = SNAPSHOT_API;
