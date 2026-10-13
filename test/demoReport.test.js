@@ -85,3 +85,24 @@ test('validate rejects bad shapes; completeness gates', () => {
   assert.strictEqual(fns.isDemoReportComplete(v.report), false);
   assert.strictEqual(fns.demoRoomProfile('Laundry Room'), 'laundry');
 });
+
+// Phase d — demo extras (site protection, cleaning, per-room counts). Shared
+// fixture with DryOps lib/__tests__/fixtures/demoReportExtras.json.
+const EXTRAS = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'demoReportExtras.json'), 'utf8'));
+
+test('extras fixture: validate keeps extras and the summary matches the app byte for byte', () => {
+  const v = fns.validateDemoReport(EXTRAS.input);
+  assert.ok(v.ok, JSON.stringify(v.errors));
+  assert.strictEqual(fns.summarizeDemoReport(v.report), EXTRAS.expected_summary);
+  assert.strictEqual(v.report.rooms[0].extras.toe_kick_lf, 6.5);
+  assert.strictEqual(v.report.extras.protection.containment.zippers, 2);
+  assert.ok(!v.report.rooms[1].extras, 'rooms without extras stay without them');
+});
+
+test('extras fixture: a report without extras prints exactly as before', () => {
+  const bare = { ...EXTRAS.input, extras: undefined, rooms: EXTRAS.input.rooms.map(r => ({ ...r, extras: undefined })) };
+  const v = fns.validateDemoReport(bare);
+  assert.ok(v.ok);
+  const s = fns.summarizeDemoReport(v.report);
+  assert.ok(!s.includes('Protection:') && !s.includes('Cleaning:') && !s.includes('extras:'));
+});
