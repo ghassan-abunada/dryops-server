@@ -5156,7 +5156,7 @@ const PDFDocument = require('pdfkit');
 const sharp = require('sharp');
 
 const PHOTO_REPORT_TARGET_PDF_BYTES = 5 * 1024 * 1024;   // ideal: whole report in one ≤5MB file
-const PHOTO_REPORT_MAX_PDF_BYTES = 9.6 * 1024 * 1024;   // hard cap per part (estimate; real PDFs land 3–6% UNDER it, so <10MB)
+const PHOTO_REPORT_MAX_PDF_BYTES = 9.85 * 1024 * 1024;  // hard cap per part on the calibrated estimate (~1% conservative) → real PDFs ≤9.8MB
 // Safety cap on photos per report. JN /files pages at ≤500 per request, so
 // jnListJobImages walks `from=` pages until short; this only bounds memory
 // (masters ≈200KB each → ~200MB at the cap). A 617-photo job (2026-10-13)
@@ -5165,11 +5165,26 @@ const PHOTO_REPORT_MAX_PHOTOS = 1000;
 const PHOTO_REPORT_PAGE = 500;
 // Longest-side px + JPEG quality, best first. Each rung is ~15–25% smaller
 // than the one above (measured on real 12MP photos: ~85 / 70 / 55 / 49 KB).
+// Walked until the whole report fits PHOTO_REPORT_TARGET_PDF_BYTES.
 const PHOTO_REPORT_LADDER = [
   { px: 1100, quality: 62 },
   { px: 1000, quality: 58 },
   { px: 900, quality: 54 },
-  { px: 900, quality: 50 }, // floor — timestamps verified legible here
+  { px: 900, quality: 50 }, // quality floor — timestamps crisp at 3× zoom
+];
+// Squeeze rungs (owner 2026-10-13: keep every photo in ONE document, even
+// for 600-photo jobs). Only walked when the quality floor still exceeds the
+// per-file cap. Full chroma (4:4:4) is what keeps a yellow/orange camera
+// timestamp readable this small — 4:2:0 turns it to mush below ~700px — and
+// costs only ~15% bytes. Measured: ~44 / 34 / 26 / 21 / 19 / 16 KB per photo.
+// 450px q52 is the legibility floor; past it the report splits instead.
+const PHOTO_REPORT_SQUEEZE = [
+  { px: 800, quality: 50, chroma: '4:4:4' },
+  { px: 700, quality: 48, chroma: '4:4:4' },
+  { px: 600, quality: 48, chroma: '4:4:4' },
+  { px: 500, quality: 55, chroma: '4:4:4' },
+  { px: 500, quality: 48, chroma: '4:4:4' },
+  { px: 450, quality: 52, chroma: '4:4:4' }, // last resort (~16KB): stamp still readable, just
 ];
 // Masters are decoded once at the top rung's size and kept as high-quality
 // JPEGs (~250KB each, ≤50MB for a 200-photo job) so lower rungs re-encode
@@ -5297,8 +5312,9 @@ function fmtCentral(unixSecs) {
 }
 
 // One report document. Header (logo | claim/date/rep | name+address), centered
-// title, then photos two per row: one row on the title page, two per page
-// after. No captions under photos (owner request 2026-08-25).
+// title, then a 3-column photo grid: 4 rows on the title page, 5 per page
+// after (owner 2026-10-13: more photos per page; was 2-up, 4 per page). No
+// captions under photos (owner request 2026-08-25).
 function renderPhotoReportPdf(header, photos) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'LETTER', margin: 36, autoFirstPage: false });
@@ -5308,8 +5324,8 @@ function renderPhotoReportPdf(header, photos) {
     doc.on('error', reject);
 
     const M = 36, PAGE_W = 612, PAGE_H = 792, W = PAGE_W - 2 * M;
-    const COL_W = 258, X_L = M, X_R = PAGE_W - M - COL_W;
-    const IMG_H = 300, ROW_H = IMG_H + 6; // no captions (owner request 2026-08-25)
+    const COLS = 3, GAP = 15, COL_W = (W - GAP * (COLS - 1)) / COLS; // 170pt
+    const IMG_H = 128, ROW_H = IMG_H + 10; // 4:3 cell; no captions (owner request 2026-08-25)
 
     const INK = '#1a1a1a', MUTED = '#6b7076', RULE = '#d8dadd';
 
@@ -5346,18 +5362,18 @@ function renderPhotoReportPdf(header, photos) {
     doc.font('Helvetica-Bold').fontSize(14).fillColor(INK)
       .text(header.title, M, 174, { width: W, align: 'center', characterSpacing: 0.3 });
 
-    let y = 206;
-    for (let i = 0; i < photos.length; i += 2) {
-      if (y + ROW_H > PAGE_H - M) { doc.addPage(); y = 40; }
-      photos.slice(i, i + 2).forEach((p, k) => {
-        const x = k === 0 ? X_L : X_R;
+    let y = 200;
+    for (let i = 0; i < photos.length; i += COLS) {
+      if (y + IMG_H > PAGE_H - M) { doc.addPage(); y = 40; }
+      photos.slice(i, i + COLS).forEach((p, k) => {
+        const x = M + k * (COL_W + GAP);
         try {
-          doc.image(p.buf, x, y, { fit: [COL_W, IMG_H] });
+          doc.image(p.buf, x, y, { fit: [COL_W, IMG_H], align: 'center', valign: 'center' });
         } catch (e) {
-          doc.font('Helvetica').fontSize(9).text(`[photo failed to embed: ${p.caption}]`, x, y, { width: COL_W });
+          doc.font('Helvetica').fontSize(8).text(`[photo failed to embed: ${p.caption}]`, x, y, { width: COL_W });
         }
       });
-      y += ROW_H + 12;
+      y += ROW_H;
     }
     doc.end();
   });
@@ -5365,7 +5381,7 @@ function renderPhotoReportPdf(header, photos) {
 
 // Re-encode every master at one ladder rung (mozjpeg, 4:2:0). Bounded
 // concurrency so a 200-photo job doesn't fan out 200 libvips jobs at once.
-async function encodePhotosAtRung(masters, { px, quality }) {
+async function encodePhotosAtRung(masters, { px, quality, chroma = '4:2:0' }) {
   const out = new Array(masters.length);
   let next = 0;
   await Promise.all(Array.from({ length: 4 }, async () => {
@@ -5374,7 +5390,7 @@ async function encodePhotosAtRung(masters, { px, quality }) {
       if (i >= masters.length) break;
       const buf = await sharp(masters[i].buf)
         .resize({ width: px, height: px, fit: 'inside', withoutEnlargement: true })
-        .jpeg({ quality, mozjpeg: true }).toBuffer();
+        .jpeg({ quality, mozjpeg: true, chromaSubsampling: chroma }).toBuffer();
       out[i] = { buf, caption: masters[i].caption };
     }
   }));
@@ -5419,19 +5435,31 @@ async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
   if (!kept.length) throw new Error(`all ${files.length} photo downloads failed`);
 
   // Size estimate = compressed bytes + per-image object overhead + fixed
-  // header allowance; tracks real pdfkit output closely (JPEGs embed
-  // byte-for-byte, pdfkit adds ~1.3KB of objects per image).
-  const baseBytes = 90 * 1024 + (logoBuf ? logoBuf.length : 0);
-  const estimate = list => baseBytes + list.reduce((n, p) => n + p.buf.length + 1500, 0);
+  // header allowance. Calibrated 2026-10-13 by regressing real pdfkit output
+  // (JPEGs embed byte-for-byte): ~240B of objects per image, ~2KB base +
+  // logo; the constants below keep a margin so the estimate stays ABOVE the
+  // real size. (The old 1.5KB/image + 90KB wasted ~1MB on a 600-photo job.)
+  const baseBytes = 20 * 1024 + (logoBuf ? logoBuf.length : 0);
+  const PER_IMAGE = 400;
+  const estimate = list => baseBytes + list.reduce((n, p) => n + p.buf.length + PER_IMAGE, 0);
 
   // Walk the quality ladder: stop at the first rung whose whole report fits
-  // the ideal single-file target; otherwise the floor rung is used and the
-  // report splits into parts below.
+  // the ideal single-file target. If even the quality floor exceeds the
+  // per-file cap, keep squeezing (smaller, full-chroma rungs) until the
+  // whole report fits ONE file; only past the legibility floor does the
+  // report split into parts.
   let photos = null, rung = null;
   for (const r of PHOTO_REPORT_LADDER) {
     rung = r;
     photos = await encodePhotosAtRung(kept, r);
     if (estimate(photos) <= PHOTO_REPORT_TARGET_PDF_BYTES) break;
+  }
+  if (estimate(photos) > PHOTO_REPORT_MAX_PDF_BYTES) {
+    for (const r of PHOTO_REPORT_SQUEEZE) {
+      rung = r;
+      photos = await encodePhotosAtRung(kept, r);
+      if (estimate(photos) <= PHOTO_REPORT_MAX_PDF_BYTES) break;
+    }
   }
 
   // Split into parts, each filled right up to the hard cap (owner 2026-10-07:
@@ -5440,7 +5468,7 @@ async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
   const groups = [];
   let cur = [], bytes = baseBytes;
   for (const p of photos) {
-    const add = p.buf.length + 1500;
+    const add = p.buf.length + PER_IMAGE;
     if (cur.length && bytes + add > PHOTO_REPORT_MAX_PDF_BYTES) { groups.push(cur); cur = []; bytes = baseBytes; }
     cur.push(p);
     bytes += add;
