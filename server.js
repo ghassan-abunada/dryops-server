@@ -5157,7 +5157,12 @@ const sharp = require('sharp');
 
 const PHOTO_REPORT_TARGET_PDF_BYTES = 5 * 1024 * 1024;   // ideal: whole report in one ≤5MB file
 const PHOTO_REPORT_MAX_PDF_BYTES = 9.6 * 1024 * 1024;   // hard cap per part (estimate; real PDFs land 3–6% UNDER it, so <10MB)
-const PHOTO_REPORT_MAX_PHOTOS = 200; // JN /files page cap — same as jn_photo_counts
+// Safety cap on photos per report. JN /files pages at ≤500 per request, so
+// jnListJobImages walks `from=` pages until short; this only bounds memory
+// (masters ≈200KB each → ~200MB at the cap). A 617-photo job (2026-10-13)
+// used to be silently truncated to the first page of 200.
+const PHOTO_REPORT_MAX_PHOTOS = 1000;
+const PHOTO_REPORT_PAGE = 500;
 // Longest-side px + JPEG quality, best first. Each rung is ~15–25% smaller
 // than the one above (measured on real 12MP photos: ~85 / 70 / 55 / 49 KB).
 const PHOTO_REPORT_LADDER = [
@@ -5233,12 +5238,30 @@ async function jnGetContactFull(contactId) {
 // Every image file on the job, oldest first — the same listing files.tsx and
 // jnCountFilesForJob use, so the report matches the app's Files tab.
 async function jnListJobImages(jobJnId) {
-  const r = await fetch(`${JN_BASE}/files?size=${PHOTO_REPORT_MAX_PHOTOS}&related=${encodeURIComponent(jobJnId)}`, {
-    headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
-  });
-  if (!r.ok) throw new Error(`JN /files related=${jobJnId} ${r.status}`);
-  const files = (((await r.json()) || {}).files || []).filter(f => (f.jnid || f.id) && isJnImage(f));
+  const seen = new Set();
+  const files = [];
+  let total = 0;
+  for (let from = 0; from < PHOTO_REPORT_MAX_PHOTOS * 4; from += PHOTO_REPORT_PAGE) {
+    const r = await fetch(`${JN_BASE}/files?size=${PHOTO_REPORT_PAGE}&from=${from}&related=${encodeURIComponent(jobJnId)}`, {
+      headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+    });
+    if (!r.ok) throw new Error(`JN /files related=${jobJnId} from=${from} ${r.status}`);
+    const page = (((await r.json()) || {}).files || []);
+    total += page.length;
+    for (const f of page) {
+      const id = f.jnid || f.id;
+      if (!id || seen.has(id) || !isJnImage(f)) continue; // dedupe: JN pages can overlap when files land mid-walk
+      seen.add(id);
+      files.push(f);
+    }
+    if (page.length < PHOTO_REPORT_PAGE) break;
+  }
   files.sort((a, b) => (a.date_created || 0) - (b.date_created || 0));
+  console.log('[photo-report]', jobJnId, `${files.length} images of ${total} files`);
+  if (files.length > PHOTO_REPORT_MAX_PHOTOS) {
+    console.warn('[photo-report]', jobJnId, `truncating ${files.length} images to the ${PHOTO_REPORT_MAX_PHOTOS} oldest`);
+    files.length = PHOTO_REPORT_MAX_PHOTOS;
+  }
   return files;
 }
 
