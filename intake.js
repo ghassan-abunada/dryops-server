@@ -639,13 +639,20 @@ module.exports = function mountIntake(app, deps) {
       const slot = body.inspection.slot || null;
       const label = windowLabel(slot);
       try {
-        const ins = await sbInsert('inspections', {
+        let ins = await sbInsert('inspections', {
           job_id: jobId, jn_id: jobJnId, scheduled_date: body.inspection.date,
           slot_start_min: slot ? slot.start_min : null, slot_end_min: slot ? slot.end_min : null,
           scheduled_time: label, task_type: 'inspection', status: 'scheduled',
           assigned_to_ids: [rep.id], notes: null, location_id: loc.id, created_by: actor.id,
           block_kind: 'window', crew_size: null, jn_task_dirty: true,
         });
+        if (!ins || !ins.id) {
+          // PostgREST sometimes returns an empty representation even though the
+          // insert succeeded (seen in prod — the visit was on the schedule while
+          // the form said it failed). Read the row back before giving up.
+          const back = await sbGet(`inspections?job_id=eq.${enc(jobId)}&task_type=eq.inspection&status=eq.scheduled&order=created_at.desc&limit=1&select=id`);
+          if (back && back[0] && back[0].id) ins = back[0];
+        }
         if (ins && ins.id) {
           visit = { id: ins.id, date: body.inspection.date, window: label };
           syncVisitJnTask(ins.id).catch((e) => warn(rid, 'task sync', e.message));
