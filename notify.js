@@ -4,20 +4,45 @@
 // { kind: 'telegram' | 'slack', config: { bot_token, chat_id } | { webhook_url },
 //   events: text[], location_id: uuid | null, active }.
 // Extracted from intake.js (New Job alerts) so homeowner.js can post portal
-// requests to the SAME channels. A message is { lines: (string | {b: string})[],
-// buttons: [{ text, url }] } — `{b}` lines render bold.
+// requests to the SAME channels. A message is { lines: Line[], buttons: [{ text, url }] }
+// where a Line is one of:
+//   'plain text'                       plain line ('' = blank line)
+//   { b: 'text' }                      bold line
+//   { i: 'text' }                      italic line
+//   { label: 'Phone', value: '…', url?, prefix? }   "• Phone: value" (prefix defaults
+//                                      to '• '; value links to url when given)
+// Buttons: up to two per row (Open in JobNimbus / Open in DryOps side by side).
 
 const clean = (v, max = 200) => (v === undefined || v === null ? '' : String(v)).trim().slice(0, max);
 const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+function renderLine(l, fmt) {
+  if (typeof l === 'string') return fmt.text(l);
+  if (l && typeof l.b === 'string') return fmt.bold(l.b);
+  if (l && typeof l.i === 'string') return fmt.italic(l.i);
+  if (l && typeof l.label === 'string') {
+    const prefix = l.prefix === undefined ? '• ' : String(l.prefix);
+    const value = l.url ? fmt.link(l.value, l.url) : fmt.text(l.value);
+    return `${fmt.text(prefix)}${fmt.bold(l.label + ':')} ${value}`;
+  }
+  return '';
+}
+const TG_FMT = { text: escHtml, bold: (s) => `<b>${escHtml(s)}</b>`, italic: (s) => `<i>${escHtml(s)}</i>`, link: (s, u) => `<a href="${escHtml(u)}">${escHtml(s)}</a>` };
+const SLACK_FMT = { text: (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'), bold: (s) => `*${SLACK_FMT.text(s)}*`, italic: (s) => `_${SLACK_FMT.text(s)}_`, link: (s, u) => `<${u}|${SLACK_FMT.text(s)}>` };
+function buttonRows(buttons) {
+  const rows = [];
+  for (const b of buttons || []) { const last = rows[rows.length - 1]; if (last && last.length < 2) last.push(b); else rows.push([b]); }
+  return rows;
+}
+
 async function sendTelegram(cfg, msg) {
   const token = clean(cfg.bot_token, 200), chat = clean(cfg.chat_id, 64);
   if (!token || !chat) return { ok: false, error: 'Telegram bot_token / chat_id missing' };
-  const text = msg.lines.map((l) => (typeof l === 'string' ? escHtml(l) : `<b>${escHtml(l.b)}</b>`)).join('\n');
+  const text = msg.lines.map((l) => renderLine(l, TG_FMT)).join('\n');
   const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chat, text, parse_mode: 'HTML', disable_web_page_preview: true,
-      reply_markup: { inline_keyboard: msg.buttons.map((b) => [{ text: b.text, url: b.url }]) } }),
+      reply_markup: { inline_keyboard: buttonRows(msg.buttons).map((row) => row.map((b) => ({ text: b.text, url: b.url }))) } }),
   });
   const j = await r.json().catch(() => null);
   return r.ok && j && j.ok ? { ok: true } : { ok: false, error: (j && j.description) || `Telegram ${r.status}` };
@@ -26,7 +51,7 @@ async function sendTelegram(cfg, msg) {
 async function sendSlack(cfg, msg) {
   const url = clean(cfg.webhook_url, 300);
   if (!/^https:\/\/hooks\.slack\.com\//.test(url)) return { ok: false, error: 'Slack webhook_url must start with https://hooks.slack.com/' };
-  const text = msg.lines.map((l) => (typeof l === 'string' ? l : `*${l.b}*`)).join('\n');
+  const text = msg.lines.map((l) => renderLine(l, SLACK_FMT)).join('\n');
   const r = await fetch(url, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, blocks: [
