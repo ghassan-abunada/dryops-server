@@ -5248,13 +5248,17 @@ async function jnListJobImages(jobJnId) {
     if (!r.ok) throw new Error(`JN /files related=${jobJnId} from=${from} ${r.status}`);
     const page = (((await r.json()) || {}).files || []);
     total += page.length;
+    let fresh = 0;
     for (const f of page) {
       const id = f.jnid || f.id;
-      if (!id || seen.has(id) || !isJnImage(f)) continue; // dedupe: JN pages can overlap when files land mid-walk
+      if (!id || seen.has(id)) continue; // dedupe: JN pages can overlap when files land mid-walk
       seen.add(id);
-      files.push(f);
+      fresh++;
+      if (isJnImage(f)) files.push(f);
     }
-    if (page.length < PHOTO_REPORT_PAGE) break;
+    // Short page = done. A page with nothing new = `from` not honored; stop
+    // rather than re-reading the same page to the bound.
+    if (page.length < PHOTO_REPORT_PAGE || !fresh) break;
   }
   files.sort((a, b) => (a.date_created || 0) - (b.date_created || 0));
   console.log('[photo-report]', jobJnId, `${files.length} images of ${total} files`);
