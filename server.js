@@ -3758,32 +3758,82 @@ function demoReportTaskLine(r) {
 }
 
 // Shared by the token route and the signed-in route.
-async function saveDemoReport({ visitId, report: raw, actor, source }) {
-  const visit = await loadVisit(visitId, 'id,jn_id,job_id,task_type,status');
+async function saveDemoReport(args) { return saveVisitReport({ ...args, kind: 'demo' }); }
+
+// ── Visit reports (any kind) ─────────────────────────────────────────────────
+// One save path for every per-visit report: validate by kind (visitReports.js;
+// the demo functions above), store it on its own inspections column, then let
+// scopeWriter.js turn it into drying-log rows. A seeding failure never fails
+// the save — the report is the record; the rows are a projection of it.
+const visitReports = require('./visitReports');
+const REPORT_KINDS = visitReports.createReportKinds({ validateDemoReport, isDemoReportComplete, summarizeDemoReport, demoReportTaskLine });
+const REPORT_COLUMNS = Object.values(REPORT_KINDS).map((k) => k.column);
+const scopeWriter = require('./scopeWriter')({ SUPABASE_URL, SB_JSON_HEADERS, sbGet, sbInsert, sbPatch, sbUpsert });
+
+function reportOf(visit) {
+  const spec = REPORT_KINDS[visit && visit.task_type];
+  return spec ? visit[spec.column] || null : null;
+}
+function summarizeVisitReport(taskType, report) {
+  const spec = REPORT_KINDS[taskType];
+  return spec && report ? spec.summarize(report) : '';
+}
+async function visitTimezone(visit) {
+  try {
+    if (visit && visit.location_id) {
+      const loc = await sbGet(`locations?id=eq.${encodeURIComponent(visit.location_id)}&select=timezone`);
+      if (loc && loc[0] && loc[0].timezone) return loc[0].timezone;
+    }
+    const settings = await loadScheduleSettings();
+    if (settings && settings.default_timezone) return settings.default_timezone;
+  } catch { /* fall through */ }
+  return 'America/Denver';
+}
+/** ISO timestamp for 'HH:MM' on `dateISO` in `tz`; null when the time is unknown. */
+function zonedTimeISO(dateISO, hhmm, tz) {
+  const m = /^(\d{2}):(\d{2})$/.exec(hhmm || '');
+  if (!m || !dateISO) return null;
+  try { return new Date(zonedToUnix(dateISO, Number(m[1]) * 60 + Number(m[2]), tz) * 1000).toISOString(); } catch { return null; }
+}
+
+async function saveVisitReport({ visitId, kind, report: raw, actor, source }) {
+  const spec = REPORT_KINDS[kind];
+  if (!spec) return { status: 400, body: { error: `Unknown report kind: ${kind}`, code: 'KIND_UNKNOWN' } };
+  const visit = await loadVisit(visitId, 'id,jn_id,job_id,task_type,status,scheduled_date,location_id');
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
-  if (visit.task_type !== 'demo') return { status: 409, body: { error: 'Only demo visits have a post-demo report' } };
+  if (visit.task_type !== kind) return { status: 409, body: { error: `This is a ${VISIT_TYPE_LABEL[visit.task_type] || 'different'} visit, not a ${kind}`, code: 'KIND_MISMATCH' } };
   if (visit.status === 'cancelled') return { status: 409, body: { error: 'This visit was cancelled' } };
-  const v = validateDemoReport(raw);
+  const v = spec.validate(raw);
   if (!v.ok) return { status: 400, body: { error: 'Report is incomplete or malformed', code: 'INVALID_REPORT', errors: v.errors } };
   const now = new Date().toISOString();
-  const patched = await sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, {
-    demo_report: v.report, demo_report_submitted_at: now,
-    demo_report_by: actor.id || null, demo_report_by_name: actor.name, jn_task_dirty: true,
-  });
-  // Seed Scope rooms from the report when the job has none yet (names only).
+  const patch = kind === 'demo'
+    ? { demo_report: v.report, demo_report_submitted_at: now, demo_report_by: actor.id || null, demo_report_by_name: actor.name, jn_task_dirty: true }
+    : { [spec.column]: v.report, report_submitted_at: now, report_by: actor.id || null, report_by_name: actor.name, jn_task_dirty: true };
+  const patched = await sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, patch);
+  let scope = null;
+  let scopeWarning = null;
   if (visit.job_id) {
     try {
-      const existing = await sbGet(`rooms?job_id=eq.${encodeURIComponent(visit.job_id)}&select=id&limit=1`);
-      if (Array.isArray(existing) && existing.length === 0 && v.report.rooms.length) {
-        await fetch(`${SUPABASE_URL}/rest/v1/rooms`, {
-          method: 'POST', headers: { ...SB_JSON_HEADERS, Prefer: 'return=minimal' },
-          body: JSON.stringify(v.report.rooms.map((r, i) => ({ job_id: visit.job_id, name: r.name, sort_order: i }))),
-        });
+      if (kind === 'demo') {
+        // Seed Scope rooms from the report when the job has none yet (names only).
+        const existing = await sbGet(`rooms?job_id=eq.${encodeURIComponent(visit.job_id)}&select=id&limit=1`);
+        if (Array.isArray(existing) && existing.length === 0 && v.report.rooms.length) {
+          await fetch(`${SUPABASE_URL}/rest/v1/rooms`, {
+            method: 'POST', headers: { ...SB_JSON_HEADERS, Prefer: 'return=minimal' },
+            body: JSON.stringify(v.report.rooms.map((r, i) => ({ job_id: visit.job_id, name: r.name, sort_order: i }))),
+          });
+        }
+      } else if (kind === 'monitor') {
+        const tz = await visitTimezone(visit);
+        scope = await scopeWriter.applyMonitorReport({ visit, report: v.report, actor, when: (hhmm) => zonedTimeISO(v.report.session_date, hhmm, tz) });
       }
-    } catch (e) { console.warn('[demo report] room seeding failed', e.message); }
+    } catch (e) {
+      console.warn(`[${kind} report] scope write failed`, e.message);
+      scopeWarning = 'Report saved, but the drying-log rows could not be written. They will be rebuilt on the next save.';
+    }
   }
   syncVisitJnTask(visitId).catch(() => {});
-  return { status: 200, body: { ok: true, visit: patched && patched[0], complete: isDemoReportComplete(v.report), summary: summarizeDemoReport(v.report) } };
+  return { status: 200, body: { ok: true, visit: patched && patched[0], complete: spec.isComplete(v.report), summary: spec.summarize(v.report), scope, scope_warning: scopeWarning } };
 }
 
 app.post('/tech/visits/:id/demo-report', async (req, res) => {
@@ -3812,6 +3862,68 @@ app.post('/visits/:id/demo-report', requireAuth, async (req, res) => {
   }
 });
 
+// Any visit report, by kind ({ kind, report }). Same guards as the demo routes.
+app.post('/tech/visits/:id/report', async (req, res) => {
+  try {
+    const tech = await techGuard(req, res);
+    if (!tech) return;
+    const out = await saveVisitReport({ visitId: String(req.params.id), kind: String((req.body && req.body.kind) || ''), report: req.body && req.body.report, actor: { id: tech.profileId, name: tech.name }, source: 'tech_link' });
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    console.error('[tech report error]', err.message);
+    res.status(502).json({ error: 'Could not save the report right now. Please try again.' });
+  }
+});
+app.post('/visits/:id/report', requireAuth, async (req, res) => {
+  try {
+    const actor = await appActor(req);
+    if (!actor) return res.status(403).json({ error: 'Profile not found' });
+    const visit = await loadVisit(String(req.params.id), 'id,assigned_to_ids');
+    if (!visit) return res.status(404).json({ error: 'Visit not found' });
+    if (!['admin', 'owner'].includes(actor.role) && !isAssigned(visit, actor.id)) return res.status(403).json({ error: 'Not allowed' });
+    const out = await saveVisitReport({ visitId: String(req.params.id), kind: String((req.body && req.body.kind) || ''), report: req.body && req.body.report, actor: { id: actor.id, name: actor.name }, source: 'app' });
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    console.error('[report error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Scope tab "Log a visit now": a visit for today, assigned to the signed-in
+// user, so an unscheduled monitor / inspection still has a visit row for its
+// report (and the drying log stays date-keyed). Service role bypasses the
+// assignee-eligibility guard on purpose; the report submit completes it.
+app.post('/jobs/:id/visits/adhoc', requireAuth, async (req, res) => {
+  try {
+    const actor = await appActor(req);
+    if (!actor) return res.status(403).json({ error: 'Profile not found' });
+    const kind = String((req.body && req.body.kind) || '');
+    if (!VISIT_TYPE_LABEL[kind]) return res.status(400).json({ error: 'kind must be inspection, monitor, demo or closeout' });
+    const jobs = await sbGet(`jobs?id=eq.${encodeURIComponent(String(req.params.id))}&select=id,jn_id,location_id`);
+    const job = jobs && jobs[0];
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const tz = await visitTimezone({ location_id: job.location_id });
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    const row = {
+      jn_id: job.jn_id, job_id: job.id, location_id: job.location_id || null,
+      scheduled_date: today, scheduled_time: null, slot_start_min: null, slot_end_min: null,
+      task_type: kind, status: 'in_progress', notes: 'Logged from the Scope tab',
+      assigned_to_ids: [actor.id], block_kind: kind === 'demo' ? 'half_day' : 'window', crew_size: null,
+      jn_task_dirty: true,
+    };
+    if (kind === 'demo') { row.slot_start_min = 480; row.slot_end_min = 720; }
+    const made = await sbInsert('inspections', row);
+    const id = made && made.id;
+    if (!id) return res.status(502).json({ error: 'Could not create the visit' });
+    const full = await sbGet(`inspections?id=eq.${encodeURIComponent(id)}&select=*,jobs(id,name,client_name,address,status,lat,lng,location_id)`);
+    syncVisitJnTask(id).catch(() => {});
+    res.json({ ok: true, visit: (full && full[0]) || made });
+  } catch (err) {
+    console.error('[adhoc visit error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // Author + location tag for a visit's JobNimbus note.
 async function visitNoteContext(visit, actorId) {
   const out = { createdBy: null, tag: null, jnLocationId: null };
@@ -3836,16 +3948,18 @@ async function visitNoteContext(visit, actorId) {
 
 // Shared by the token route and the signed-in route.
 async function completeVisit({ visitId, pct, note, actor, source }) {
-  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,assigned_to_ids,completion_pct,location_id,demo_report');
+  const visit = await loadVisit(visitId, `id,jn_id,task_type,status,assigned_to_ids,completion_pct,location_id,${REPORT_COLUMNS.join(',')}`);
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
   if (visit.status === 'cancelled') return { status: 409, body: { error: 'This visit was cancelled' } };
   let p = Number(pct);
   if (visit.task_type !== 'demo') p = 100;
   if (![25, 50, 75, 100].includes(p)) return { status: 400, body: { error: 'pct must be 25, 50, 75 or 100' } };
-  // Techs must finish the post-demo report before leaving (dispatchers in the
+  // Techs must finish the visit's report before leaving (dispatchers in the
   // app may override — the UI shows an explicit warning).
-  if (visit.task_type === 'demo' && p === 100 && source === 'tech_link' && !isDemoReportComplete(visit.demo_report)) {
-    return { status: 409, body: { error: 'Finish the post-demo report first', code: 'REPORT_REQUIRED' } };
+  const spec = REPORT_KINDS[visit.task_type];
+  const report = reportOf(visit);
+  if (spec && spec.requiredFromTechLink && p === 100 && source === 'tech_link' && !spec.isComplete(report)) {
+    return { status: 409, body: { error: `Finish the ${spec.label} first`, code: 'REPORT_REQUIRED' } };
   }
   const cleanNote = String(note || '').trim().slice(0, 2000) || null;
 
@@ -3865,14 +3979,14 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
   });
   let update = await sbInsert('visit_updates', {
     visit_id: visitId, actor_id: actor.id || null, actor_name: actor.name, source, pct: p, note: cleanNote,
-    report_snapshot: visit.demo_report || null,
+    report_snapshot: report || null,
   });
   if (!update) {
     const latest = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
     update = (latest && latest[0]) || { id: null };
   }
   const noteText = visitNoteText(visit, p, actor.name, cleanNote)
-    + (visit.demo_report ? '\n\n' + summarizeDemoReport(visit.demo_report) : '');
+    + (report ? '\n\n' + summarizeVisitReport(visit.task_type, report) : '');
   const jn = await jnAddNote(visit.jn_id, noteText, await visitNoteContext(visit, actor.id));
   const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
   await Promise.all([
@@ -3887,14 +4001,14 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
 
 // Re-post the JN note for the latest failed update.
 async function retryVisitJn(visitId) {
-  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,location_id,demo_report');
+  const visit = await loadVisit(visitId, `id,jn_id,task_type,status,location_id,${REPORT_COLUMNS.join(',')}`);
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
   const rows = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
   const upd = rows && rows[0];
   if (!upd) return { status: 404, body: { error: 'Nothing to retry' } };
   if (!upd.jn_note_error) return { status: 200, body: { ok: true, jn: { ok: true, id: upd.jn_note_id } } };
-  const report = upd.report_snapshot || visit.demo_report;
-  const retryText = visitNoteText(visit, upd.pct, upd.actor_name, upd.note) + (report ? '\n\n' + summarizeDemoReport(report) : '');
+  const report = upd.report_snapshot || reportOf(visit);
+  const retryText = visitNoteText(visit, upd.pct, upd.actor_name, upd.note) + (report ? '\n\n' + summarizeVisitReport(visit.task_type, report) : '');
   const jn = await jnAddNote(visit.jn_id, retryText, await visitNoteContext(visit, upd.actor_id));
   const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
   await Promise.all([
@@ -4153,7 +4267,7 @@ function buildJnTaskBody(v, job, techs, settings, taskType, tz) {
     String(v.notes || '').trim() || null,
     `${blockLine(v, settings)}${crew ? ` · crew of ${crew}` : ''}`,
     unlinked.length ? `Assigned (no JobNimbus user): ${unlinked.join(', ')}` : null,
-    v.demo_report ? demoReportTaskLine(v.demo_report) : null,
+    REPORT_KINDS[v.task_type] && reportOf(v) ? REPORT_KINDS[v.task_type].taskLine(reportOf(v)) : null,
     'Scheduled in DryOps',
   ].filter(Boolean);
   const body = {
@@ -4189,7 +4303,7 @@ function visitFingerprint(v) {
 }
 
 const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,slot_start_min,slot_end_min,block_kind,crew_size,task_type,status,notes,' +
-  'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,demo_report,jobs(name,client_name,location_id,jn_location_id)';
+  'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,demo_report,monitor_report,jobs(name,client_name,location_id,jn_location_id)';
 
 const visitSyncLocks = new Set();
 // The one entry point for routes, completeVisit and the sweep.

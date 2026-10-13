@@ -1,0 +1,46 @@
+{
+  "input": {
+    "v": 1,
+    "kind": "monitor",
+    "session_date": "2026-10-14",
+    "arrival_time": "09:40",
+    "departure_time": "10:05",
+    "outside": { "temp_f": 61, "rh": 35 },
+    "rooms": [
+      {
+        "room_id": "11111111-1111-1111-1111-111111111111",
+        "name": "Kitchen",
+        "reading": { "temp_f": 74, "rh": 48 },
+        "materials": [
+          { "material_id": "m1", "type": "Drywall", "mc": 16, "dry_standard_mc": 12, "prev_mc": 20 },
+          { "material_id": "m2", "type": "LVP/LVT", "mc": 12, "dry_standard_mc": null, "prev_mc": 18 }
+        ],
+        "equipment": [
+          { "equipment_id": "e1", "type": "Air Mover", "qty_before": 4, "qty_present": 4 },
+          { "equipment_id": "e2", "type": "Dehumidifier - Large", "qty_before": 1, "qty_present": 1 }
+        ],
+        "dehu_outlets": [{ "temp_f": 92, "rh": 22 }],
+        "dry": false,
+        "notes": null
+      },
+      {
+        "room_id": "22222222-2222-2222-2222-222222222222",
+        "name": "Living Room",
+        "reading": { "temp_f": 72, "rh": 44 },
+        "materials": [
+          { "material_id": "m3", "type": "Subfloor (wood)", "mc": 11, "dry_standard_mc": 12, "prev_mc": 11 }
+        ],
+        "equipment": [
+          { "equipment_id": "e3", "type": "Air Mover", "qty_before": 4, "qty_present": 2 }
+        ],
+        "dehu_outlets": [],
+        "dry": true,
+        "notes": "pulled two fans, carpet pad gone"
+      }
+    ],
+    "photos_taken": true,
+    "notes": "homeowner wants a call before Friday pickup"
+  },
+  "expected_summary": "MONITOR REPORT · Oct 14\nArrived 9:40 AM · left 10:05 AM\nOutside 61°F/35% (28 GPP)\nRooms (2):\n• Kitchen — 74°F/48% (60 GPP); Drywall 16% (dry 12%) ↓4, LVP/LVT 12% ↓6 ✓; dehu outlet 92°F/22% (49 GPP); equipment: 4 air movers, 1 dehumidifier - large; not dry\n• Living Room — 72°F/44% (51 GPP); Subfloor (wood) 11% (dry 12%) ✓; equipment: 2 air movers; dry; note: pulled two fans, carpet pad gone\nDry rooms: 1 of 2\nEquipment pulled: 2 air movers (Living Room)\nPhotos ✓\nNotes: homeowner wants a call before Friday pickup",
+  "expected_task_line": "Monitor report: 1 of 2 rooms dry · pulled 2 air movers (Living Room)"
+}
