@@ -1,0 +1,73 @@
+{
+  "input": {
+    "v": 1,
+    "kind": "inspection",
+    "arrival_time": "09:40",
+    "departure_time": "11:05",
+    "loss_type": "water",
+    "source": "supply_line",
+    "source_other": null,
+    "date_of_loss": "2026-10-11",
+    "category": 2,
+    "class": 2,
+    "outside": { "temp_f": 68, "rh": 40 },
+    "docusketch": true,
+    "rooms": [
+      {
+        "room_id": null,
+        "name": "Kitchen",
+        "profile": "kitchen",
+        "dims": { "length_ft": 12, "width_ft": 10, "ceiling_ft": 8 },
+        "affected": ["walls", "flooring", "cabinets"],
+        "flooring": { "type": "LVP/LVT", "on_slab": true },
+        "materials": [
+          { "type": "Drywall", "mc": 28 },
+          { "type": "LVP/LVT", "mc": 22 },
+          { "type": "Base cabinets", "mc": 30 }
+        ],
+        "doors": 2,
+        "exterior_walls": "long",
+        "exterior_wall_lf": null,
+        "reading": { "temp_f": 72, "rh": 55 },
+        "equipment": { "Air Mover": 4, "Dehumidifier": 0, "Dehumidifier - Large": 1, "Dehumidifier - XL": 0, "Air Scrubber": 0, "Drying Mats": 0 },
+        "photos_taken": true,
+        "notes": null
+      },
+      {
+        "room_id": null,
+        "name": "Hallway",
+        "profile": "other",
+        "dims": null,
+        "affected": ["flooring"],
+        "flooring": { "type": "Carpet", "on_slab": false },
+        "materials": [
+          { "type": "Carpet", "mc": 45 }
+        ],
+        "doors": 3,
+        "exterior_walls": "none",
+        "exterior_wall_lf": null,
+        "reading": { "temp_f": 71, "rh": 52 },
+        "equipment": { "Air Mover": 2, "Dehumidifier": 0, "Dehumidifier - Large": 0, "Dehumidifier - XL": 0, "Air Scrubber": 0, "Drying Mats": 0 },
+        "photos_taken": true,
+        "notes": "carpet pad saturated, pull at demo"
+      }
+    ],
+    "dry_standards": { "Drywall": 12, "LVP/LVT": 12, "Base cabinets": null, "Carpet": null },
+    "emergency": {
+      "performed": true,
+      "after_hours": true,
+      "extraction": { "floor": "carpet", "whole_room": false, "sf": 120, "pump_hr": null },
+      "content_block_rooms": 2,
+      "content_manipulation": { "techs": 2, "hours": 1.5 },
+      "floor_protection_sf": 60,
+      "protective_plastic_sf": 100,
+      "containment_sf": 40,
+      "ppe": { "techs": 2, "days": 1 }
+    },
+    "moisture_map": true,
+    "photos_taken": true,
+    "notes": "homeowner has a dog, keep gate closed"
+  },
+  "expected_summary": "INSPECTION REPORT\nArrived 9:40 AM · left 11:05 AM\nWater loss · supply line · loss Oct 11\nCat 2 / Class 2\nOutside 68°F/40% (40 GPP)\nDocuSketch ✓ · moisture map ✓ · photos ✓\nRooms (2):\n• Kitchen (12×10, 8 ft ceiling) — 72°F/55% (64 GPP); affected: walls, flooring, cabinets; LVP/LVT on slab; Drywall 28% (dry 12%), LVP/LVT 22% (dry 12%), Base cabinets 30%; 2 doors, exterior walls 12 LF; equipment: 4 air movers, 1 dehumidifier - large\n• Hallway — 71°F/52% (59 GPP); affected: flooring; Carpet; Carpet 45%; 3 doors, no exterior walls; equipment: 2 air movers; note: carpet pad saturated, pull at demo\nDry standards: Drywall 12%, LVP/LVT 12%\nEmergency: extraction 120 sq ft carpet, 2 rooms blocked, content manipulation 2×1.5 h, floor protection 60 sq ft, plastic 100 sq ft, containment 40 sq ft, PPE 2×1 (after hours)\nNotes: homeowner has a dog, keep gate closed",
+  "expected_task_line": "Inspection report: Water loss · supply line · loss Oct 11 · 2 rooms · placed 6 air movers, 1 dehumidifier - large"
+}

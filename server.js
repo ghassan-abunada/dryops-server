@@ -3826,6 +3826,9 @@ async function saveVisitReport({ visitId, kind, report: raw, actor, source }) {
       } else if (kind === 'monitor') {
         const tz = await visitTimezone(visit);
         scope = await scopeWriter.applyMonitorReport({ visit, report: v.report, actor, when: (hhmm) => zonedTimeISO(v.report.session_date, hhmm, tz) });
+      } else if (kind === 'inspection') {
+        const tz = await visitTimezone(visit);
+        scope = await scopeWriter.applyInspectionReport({ visit, report: v.report, actor, when: (hhmm) => zonedTimeISO(visit.scheduled_date, hhmm, tz) });
       }
     } catch (e) {
       console.warn(`[${kind} report] scope write failed`, e.message);
@@ -4303,7 +4306,7 @@ function visitFingerprint(v) {
 }
 
 const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,slot_start_min,slot_end_min,block_kind,crew_size,task_type,status,notes,' +
-  'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,demo_report,monitor_report,jobs(name,client_name,location_id,jn_location_id)';
+  'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,demo_report,monitor_report,inspection_report,jobs(name,client_name,location_id,jn_location_id)';
 
 const visitSyncLocks = new Set();
 // The one entry point for routes, completeVisit and the sweep.

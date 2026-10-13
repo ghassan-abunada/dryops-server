@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 const fs = require('fs');
-const { validateMonitorReport, isMonitorReportComplete, summarizeMonitorReport, monitorTaskLine, createReportKinds } = require('../visitReports');
+const { validateMonitorReport, isMonitorReportComplete, summarizeMonitorReport, monitorTaskLine, createReportKinds, validateInspectionReport, isInspectionReportComplete, summarizeInspectionReport, inspectionTaskLine, exteriorWallLF } = require('../visitReports');
 const { gpp, dewPointF } = require('../psychrometrics');
 
 const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'monitorReport.json'), 'utf8'));
@@ -51,4 +51,30 @@ test('registry wires demo + monitor', () => {
   assert.strictEqual(kinds.monitor.column, 'monitor_report');
   assert.strictEqual(kinds.monitor.requiredFromTechLink, true);
   assert.strictEqual(kinds.demo.summarize(), 3);
+});
+
+const inspection = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'inspectionReport.json'), 'utf8'));
+
+test('inspection summary matches the shared fixture byte for byte', () => {
+  const v = validateInspectionReport(inspection.input);
+  assert.ok(v.ok, JSON.stringify(v.errors));
+  assert.strictEqual(summarizeInspectionReport(v.report), inspection.expected_summary);
+  assert.strictEqual(inspectionTaskLine(v.report), inspection.expected_task_line);
+  assert.strictEqual(isInspectionReportComplete(v.report), true);
+  assert.strictEqual(exteriorWallLF(v.report.rooms[0]), 12);
+  assert.strictEqual(exteriorWallLF(v.report.rooms[1]), 0);
+});
+
+test('inspection validation whitelists and gates', () => {
+  const bad = validateInspectionReport({ ...inspection.input, kind: 'monitor', category: 7, rooms: [{ name: 'X', affected: ['walls', 'nope'], materials: [{ type: 'Drywall', mc: 500 }] }] });
+  assert.strictEqual(bad.ok, false);
+  assert.ok(bad.errors.some((e) => /kind must be inspection/.test(e)));
+  assert.ok(bad.errors.some((e) => /category/.test(e)));
+  assert.ok(bad.errors.some((e) => /Drywall MC/.test(e)));
+  const ok = validateInspectionReport({ ...inspection.input, junk: 1 });
+  assert.ok(ok.ok);
+  assert.strictEqual('junk' in ok.report, false);
+  assert.deepStrictEqual(ok.report.rooms[1].affected, ['flooring']);
+  const kinds = createReportKinds({ validateDemoReport: () => 1, isDemoReportComplete: () => 2, summarizeDemoReport: () => 3, demoReportTaskLine: () => 4 });
+  assert.strictEqual(kinds.inspection.column, 'inspection_report');
 });

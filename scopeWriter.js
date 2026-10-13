@@ -9,7 +9,7 @@
 // supabase/add_visit_reports.sql.
 
 const { gpp } = require('./psychrometrics');
-const { isDehu } = require('./visitReports');
+const { isDehu, exteriorWallLF } = require('./visitReports');
 
 module.exports = function createScopeWriter(deps) {
   const { SUPABASE_URL, SB_JSON_HEADERS, sbGet, sbInsert, sbPatch, sbUpsert } = deps;
@@ -129,5 +129,90 @@ module.exports = function createScopeWriter(deps) {
     return out;
   }
 
-  return { applyMonitorReport, sessionFor, roomIdFor };
+  /**
+   * Apply an inspection report: job loss facts, rooms (dims, flooring, doors,
+   * exterior walls, legacy temp/rh), materials with initial MC + dry standard,
+   * equipment placed, the first session with readings and atmospherics.
+   */
+  async function applyInspectionReport({ visit, report, actor, when }) {
+    const jobId = visit.job_id;
+    if (!jobId) return { skipped: 'no job' };
+    const date = visit.scheduled_date;
+    const out = { rooms: 0, materials: 0, equipment: 0, readings: 0, atmospherics: 0 };
+    const jobPatch = {};
+    if (report.loss_type) jobPatch.loss_type = report.loss_type;
+    if (report.category != null) jobPatch.water_category = report.category;
+    if (report.class != null) jobPatch.water_class = report.class;
+    if (Object.keys(jobPatch).length) await sbPatch('jobs', `id=eq.${enc(jobId)}`, jobPatch).catch((e) => console.warn('[inspection] job patch failed', e.message));
+    if (report.date_of_loss) await sbPatch('jobs', `id=eq.${enc(jobId)}&date_loss=is.null`, { date_loss: report.date_of_loss }).catch(() => {});
+
+    const sessionId = date ? await sessionFor(jobId, date, actor && actor.id) : null;
+    const roomCache = new Map();
+    const readings = [];
+    const atmos = [];
+    if (sessionId && report.outside && report.outside.temp_f != null && report.outside.rh != null) {
+      atmos.push({ job_id: jobId, session_id: sessionId, room_id: null, equipment_id: null, kind: 'outside', temp_f: report.outside.temp_f, rh: report.outside.rh, gpp: gpp(report.outside.temp_f, report.outside.rh) });
+    }
+    const existingRooms = (await sbGet(`rooms?job_id=eq.${enc(jobId)}&select=id,name`)) || [];
+    let order = existingRooms.length;
+    for (const room of report.rooms || []) {
+      const key = String(room.name || '').trim().toLowerCase();
+      let roomId = room.room_id || (existingRooms.find((r) => String(r.name || '').trim().toLowerCase() === key) || {}).id || null;
+      const roomPatch = {
+        length_ft: room.dims ? room.dims.length_ft : null, width_ft: room.dims ? room.dims.width_ft : null, ceiling_ft: room.dims ? room.dims.ceiling_ft : null,
+        water_category: report.category, water_class: report.class,
+        flooring_type: room.flooring ? room.flooring.type : null, on_slab: room.flooring ? room.flooring.on_slab : null,
+        doors: room.doors, exterior_wall_lf: exteriorWallLF(room),
+        temp_f: room.reading ? room.reading.temp_f : null, rh: room.reading ? room.reading.rh : null,
+      };
+      for (const k of Object.keys(roomPatch)) if (roomPatch[k] == null) delete roomPatch[k];
+      if (roomId) {
+        if (Object.keys(roomPatch).length) await sbPatch('rooms', `id=eq.${enc(roomId)}`, roomPatch);
+      } else {
+        const made = await sbInsert('rooms', { job_id: jobId, name: String(room.name).trim(), sort_order: order++, ...roomPatch });
+        roomId = made && made.id;
+        if (roomId) existingRooms.push({ id: roomId, name: room.name });
+      }
+      if (!roomId) continue;
+      roomCache.set(key, roomId);
+      out.rooms += 1;
+      if (room.reading && room.reading.temp_f != null && room.reading.rh != null && sessionId) {
+        atmos.push({ job_id: jobId, session_id: sessionId, room_id: roomId, equipment_id: null, kind: 'room', temp_f: room.reading.temp_f, rh: room.reading.rh, gpp: gpp(room.reading.temp_f, room.reading.rh) });
+      }
+      // Materials: one row per type per room (re-submits patch, never duplicate).
+      const mats = (await sbGet(`materials?room_id=eq.${enc(roomId)}&select=id,type,demoed`)) || [];
+      for (const m of room.materials || []) {
+        const dry = report.dry_standards && report.dry_standards[m.type] != null ? report.dry_standards[m.type] : null;
+        let row = mats.find((x) => x.type === m.type && !x.demoed);
+        if (row) {
+          const patch = {};
+          if (m.mc != null) patch.initial_mc = m.mc;
+          if (dry != null) patch.dry_standard_mc = dry;
+          if (Object.keys(patch).length) await sbPatch('materials', `id=eq.${enc(row.id)}`, patch);
+        } else {
+          row = await sbInsert('materials', { room_id: roomId, type: m.type, initial_mc: m.mc, dry_standard_mc: dry, demoed: false });
+          if (row && row.id) mats.push({ id: row.id, type: m.type, demoed: false });
+        }
+        out.materials += 1;
+        if (row && row.id && m.mc != null && sessionId) readings.push({ session_id: sessionId, material_id: row.id, mc_value: m.mc });
+      }
+      // Equipment placed: one row per type per room still on site.
+      const eqRows = (await sbGet(`equipment?room_id=eq.${enc(roomId)}&removed_on=is.null&select=id,type,qty`)) || [];
+      for (const [type, qty] of Object.entries(room.equipment || {})) {
+        if (!(qty > 0)) continue;
+        const row = eqRows.find((x) => x.type === type);
+        if (row) { if (row.qty !== qty) await sbPatch('equipment', `id=eq.${enc(row.id)}`, { qty }); }
+        else await sbInsert('equipment', { room_id: roomId, type, qty, placed_on: date, placed_at: when(report.departure_time || report.arrival_time) });
+        out.equipment += qty;
+      }
+    }
+    if (sessionId) {
+      if (readings.length) { await sbUpsert('moisture_readings', readings, 'session_id,material_id'); out.readings = readings.length; }
+      await sbDelete('atmospheric_readings', `session_id=eq.${enc(sessionId)}`);
+      await sbInsertMany('atmospheric_readings', atmos); out.atmospherics = atmos.length;
+    }
+    return out;
+  }
+
+  return { applyMonitorReport, applyInspectionReport, sessionFor, roomIdFor };
 };

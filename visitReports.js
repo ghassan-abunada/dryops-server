@@ -230,6 +230,230 @@ function monitorTaskLine(r) {
   return `Monitor report: ${dryRooms} of ${n} room${n === 1 ? '' : 's'} dry${pulled ? ` · pulled ${pulled}` : ''}`;
 }
 
+// ── Inspection report (twin of lib/inspectionReport.ts) ──────────────────────
+
+const SOURCES = ['supply_line', 'drain', 'appliance', 'toilet', 'roof', 'sewer', 'groundwater', 'hvac', 'other'];
+const SOURCE_LABEL = {
+  supply_line: 'Supply line', drain: 'Drain / overflow', appliance: 'Appliance', toilet: 'Toilet', roof: 'Roof / storm',
+  sewer: 'Sewer backup', groundwater: 'Groundwater / flood', hvac: 'HVAC', other: 'Other',
+};
+const AFFECTED = ['walls', 'flooring', 'ceiling', 'cabinets', 'contents'];
+const AFFECTED_LABEL = { walls: 'Walls', flooring: 'Flooring', ceiling: 'Ceiling', cabinets: 'Cabinets', contents: 'Contents' };
+const EXTERIOR_WALLS = ['none', 'long', 'short', 'both', 'custom'];
+const INSPECTION_EQUIPMENT = ['Air Mover', 'Dehumidifier', 'Dehumidifier - Large', 'Dehumidifier - XL', 'Air Scrubber', 'Drying Mats'];
+
+function validateInspectionReport(raw) {
+  const errors = [];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, errors: ['report must be an object'] };
+  if (Number(raw.v) !== 1) errors.push('unsupported report version');
+  if (raw.kind !== 'inspection') errors.push('kind must be inspection');
+  const text = (v, name, max) => {
+    if (v == null || v === '') return null;
+    if (typeof v !== 'string') { errors.push(`${name} must be text`); return null; }
+    const t = v.trim(); if (t.length > max) errors.push(`${name} is longer than ${max} characters`); return t.slice(0, max) || null;
+  };
+  const numIn = (v, name, lo, hi) => {
+    if (v == null || v === '') return null;
+    const n = Number(v); if (!Number.isFinite(n) || n < lo || n > hi) { errors.push(`${name} must be a number ${lo}–${hi}`); return null; } return Math.round(n * 10) / 10;
+  };
+  const intIn = (v, name, lo, hi) => {
+    if (v == null || v === '') return null;
+    const n = Number(v); if (!Number.isInteger(n) || n < lo || n > hi) { errors.push(`${name} must be a whole number ${lo}–${hi}`); return null; } return n;
+  };
+  const boolOrNull = (v) => (typeof v === 'boolean' ? v : null);
+  const id = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 64) : null);
+  const reading = (v, name) => {
+    if (v == null) return null;
+    if (typeof v !== 'object') { errors.push(`${name} is invalid`); return null; }
+    const t = numIn(v.temp_f, `${name} temp`, -40, 150);
+    const rh = numIn(v.rh, `${name} RH`, 0, 100);
+    return t == null && rh == null ? null : { temp_f: t, rh };
+  };
+  const oneOf = (v, list) => (list.includes(v) ? v : null);
+
+  const rooms = Array.isArray(raw.rooms) ? raw.rooms : (errors.push('rooms must be a list'), []);
+  if (rooms.length > 30) errors.push('too many rooms');
+  const outRooms = rooms.slice(0, 30).map((r, i) => {
+    const label = `room ${i + 1}`;
+    if (!r || typeof r !== 'object') { errors.push(`${label} is invalid`); return null; }
+    const name = text(r.name, `${label} name`, 60) || '';
+    if (!name) errors.push(`${label} needs a name`);
+    let dims = null;
+    if (r.dims && typeof r.dims === 'object') {
+      const L = numIn(r.dims.length_ft, `${label} length`, 0, 500), W = numIn(r.dims.width_ft, `${label} width`, 0, 500), H = numIn(r.dims.ceiling_ft, `${label} ceiling`, 0, 40);
+      if (L != null || W != null || H != null) dims = { length_ft: L, width_ft: W, ceiling_ft: H };
+    }
+    const affected = (Array.isArray(r.affected) ? r.affected : []).filter((a) => AFFECTED.includes(a)).slice(0, 5);
+    const equipment = {};
+    for (const t of INSPECTION_EQUIPMENT) equipment[t] = intIn(r.equipment && r.equipment[t], `${label} ${t}`, 0, 99) || 0;
+    return {
+      room_id: id(r.room_id), name, profile: ['kitchen', 'bathroom', 'laundry', 'other'].includes(r.profile) ? r.profile : 'other', dims, affected,
+      flooring: { type: text(r.flooring && r.flooring.type, `${label} flooring`, 40), on_slab: boolOrNull(r.flooring && r.flooring.on_slab) },
+      materials: (Array.isArray(r.materials) ? r.materials : []).slice(0, 40).map((m, k) => (m && typeof m === 'object' && typeof m.type === 'string' && m.type.trim()
+        ? { type: m.type.trim().slice(0, 40), mc: numIn(m.mc, `${label} ${m.type} MC`, 0, 100) } : (errors.push(`${label} material ${k + 1} is invalid`), null))).filter(Boolean),
+      doors: intIn(r.doors, `${label} doors`, 0, 50),
+      exterior_walls: oneOf(r.exterior_walls, EXTERIOR_WALLS),
+      exterior_wall_lf: numIn(r.exterior_wall_lf, `${label} exterior wall LF`, 0, 10000),
+      reading: reading(r.reading, `${label} temp / RH`),
+      equipment,
+      photos_taken: r.photos_taken === true,
+      notes: text(r.notes, `${label} notes`, 500),
+    };
+  }).filter(Boolean);
+
+  const e = raw.emergency && typeof raw.emergency === 'object' ? raw.emergency : {};
+  const ex = e.extraction && typeof e.extraction === 'object' ? e.extraction : null;
+  const cat = intIn(raw.category, 'category', 1, 3), cls = intIn(raw.class, 'class', 1, 4);
+  const dry = {};
+  if (raw.dry_standards && typeof raw.dry_standards === 'object') for (const [k, v] of Object.entries(raw.dry_standards).slice(0, 60)) dry[String(k).slice(0, 40)] = numIn(v, `dry standard ${k}`, 0, 100);
+  const report = {
+    v: 1, kind: 'inspection',
+    arrival_time: typeof raw.arrival_time === 'string' && TIME_RE.test(raw.arrival_time) ? raw.arrival_time : (errors.push('arrival_time must be HH:MM'), ''),
+    departure_time: typeof raw.departure_time === 'string' && TIME_RE.test(raw.departure_time) ? raw.departure_time : null,
+    loss_type: oneOf(raw.loss_type, ['water', 'fire', 'mold']),
+    source: oneOf(raw.source, SOURCES),
+    source_other: text(raw.source_other, 'source_other', 120),
+    date_of_loss: typeof raw.date_of_loss === 'string' && DATE_RE.test(raw.date_of_loss) ? raw.date_of_loss : null,
+    category: cat, class: cls,
+    outside: reading(raw.outside, 'outside'),
+    docusketch: boolOrNull(raw.docusketch),
+    rooms: outRooms,
+    dry_standards: dry,
+    emergency: {
+      performed: boolOrNull(e.performed),
+      after_hours: e.after_hours === true,
+      extraction: ex ? { floor: oneOf(ex.floor, ['carpet', 'hard_surface']), whole_room: boolOrNull(ex.whole_room), sf: numIn(ex.sf, 'extraction sq ft', 0, 100000), pump_hr: numIn(ex.pump_hr, 'pump hours', 0, 100) } : null,
+      content_block_rooms: intIn(e.content_block_rooms, 'rooms blocked', 0, 99),
+      content_manipulation: e.content_manipulation && typeof e.content_manipulation === 'object' ? { techs: intIn(e.content_manipulation.techs, 'content manipulation techs', 0, 99) || 0, hours: numIn(e.content_manipulation.hours, 'content manipulation hours', 0, 100) || 0 } : null,
+      floor_protection_sf: numIn(e.floor_protection_sf, 'floor protection', 0, 100000),
+      protective_plastic_sf: numIn(e.protective_plastic_sf, 'protective plastic', 0, 100000),
+      containment_sf: numIn(e.containment_sf, 'containment', 0, 100000),
+      ppe: e.ppe && typeof e.ppe === 'object' ? { techs: intIn(e.ppe.techs, 'PPE techs', 0, 99) || 0, days: intIn(e.ppe.days, 'PPE days', 0, 99) || 0 } : null,
+    },
+    moisture_map: raw.moisture_map === true,
+    photos_taken: raw.photos_taken === true,
+    notes: text(raw.notes, 'notes', 2000),
+  };
+  if (JSON.stringify(report).length > 64 * 1024) errors.push('report is too large');
+  return errors.length ? { ok: false, errors } : { ok: true, report };
+}
+
+const needsWaterClass = (r) => r.loss_type === 'water' || r.loss_type == null;
+
+function isInspectionRoomComplete(room) {
+  if (!room || !String(room.name || '').trim()) return false;
+  if (!(room.affected || []).length) return false;
+  if ((room.affected || []).includes('flooring') && !(room.flooring && room.flooring.type)) return false;
+  if ((room.materials || []).some((m) => m.mc == null)) return false;
+  if (!readingComplete(room.reading)) return false;
+  if (!room.photos_taken) return false;
+  return true;
+}
+function isInspectionReportComplete(r) {
+  if (!r || Number(r.v) !== 1 || r.kind !== 'inspection') return false;
+  if (!TIME_RE.test(r.arrival_time || '')) return false;
+  if (!r.loss_type || !r.source) return false;
+  if (needsWaterClass(r) && (r.category == null || r.class == null)) return false;
+  if (!readingComplete(r.outside)) return false;
+  if (r.docusketch == null) return false;
+  if (!Array.isArray(r.rooms) || !r.rooms.length || !r.rooms.every(isInspectionRoomComplete)) return false;
+  const e = r.emergency || {};
+  if (e.performed == null) return false;
+  if (e.performed && e.extraction && e.extraction.floor && !e.extraction.whole_room && !(e.extraction.sf > 0)) return false;
+  if (!r.photos_taken) return false;
+  return true;
+}
+
+function exteriorWallLF(room) {
+  if (room.exterior_wall_lf != null) return room.exterior_wall_lf;
+  const d = room.dims;
+  if (!room.exterior_walls || room.exterior_walls === 'custom') return null;
+  if (room.exterior_walls === 'none') return 0;
+  if (!d || !d.length_ft || !d.width_ft) return null;
+  const long = Math.max(d.length_ft, d.width_ft), short = Math.min(d.length_ft, d.width_ft);
+  const r1 = (n) => Math.round(n * 10) / 10;
+  return room.exterior_walls === 'long' ? r1(long) : room.exterior_walls === 'short' ? r1(short) : r1(long + short);
+}
+
+function dimsLabel(d) {
+  if (!d || !d.length_ft || !d.width_ft) return null;
+  return `${fmtQty(d.length_ft)}×${fmtQty(d.width_ft)}${d.ceiling_ft ? `, ${fmtQty(d.ceiling_ft)} ft ceiling` : ''}`;
+}
+
+function lossLine(r) {
+  const parts = [];
+  parts.push(r.loss_type ? `${r.loss_type[0].toUpperCase()}${r.loss_type.slice(1)} loss` : 'Loss');
+  if (r.source) parts.push(r.source === 'other' && r.source_other ? String(r.source_other).trim() : SOURCE_LABEL[r.source].toLowerCase());
+  if (r.date_of_loss) parts.push(`loss ${monthDay(r.date_of_loss)}`);
+  return parts.join(' · ');
+}
+
+function inspectionRoomLine(room, dry) {
+  const seg = [];
+  const dims = dimsLabel(room.dims);
+  const head = dims ? `• ${room.name} (${dims}) — ` : `• ${room.name} — `;
+  seg.push(fmtReading(room.reading));
+  if ((room.affected || []).length) seg.push(`affected: ${room.affected.map((a) => AFFECTED_LABEL[a].toLowerCase()).join(', ')}`);
+  if (room.flooring && room.flooring.type) seg.push(`${room.flooring.type}${room.flooring.on_slab ? ' on slab' : ''}`);
+  if ((room.materials || []).length) {
+    seg.push(room.materials.map((m) => {
+      const std = dry[m.type];
+      return `${m.type} ${m.mc != null ? `${fmtQty(m.mc)}%` : '—'}${std != null ? ` (dry ${fmtQty(std)}%)` : ''}`;
+    }).join(', '));
+  }
+  const open = [];
+  if (room.doors != null) open.push(`${room.doors} door${room.doors === 1 ? '' : 's'}`);
+  const ext = exteriorWallLF(room);
+  if (ext != null) open.push(ext === 0 ? 'no exterior walls' : `exterior walls ${fmtQty(ext)} LF`);
+  if (open.length) seg.push(open.join(', '));
+  const eq = equipmentPhrase(room.equipment || {});
+  seg.push(eq ? `equipment: ${eq}` : 'no equipment placed');
+  if (room.notes && String(room.notes).trim()) seg.push(`note: ${String(room.notes).trim()}`);
+  return head + seg.join('; ');
+}
+
+function emergencyLine(e) {
+  if (!e || e.performed !== true) return 'Emergency services: none';
+  const parts = [];
+  if (e.extraction && e.extraction.floor) {
+    const qty = e.extraction.whole_room ? 'whole room' : e.extraction.sf != null ? `${fmtQty(e.extraction.sf)} sq ft` : '';
+    parts.push(`extraction ${qty ? `${qty} ` : ''}${e.extraction.floor === 'carpet' ? 'carpet' : 'hard surface'}${e.extraction.pump_hr ? ` + pump ${fmtQty(e.extraction.pump_hr)} h` : ''}`);
+  }
+  if (e.content_block_rooms) parts.push(`${e.content_block_rooms} room${e.content_block_rooms === 1 ? '' : 's'} blocked`);
+  if (e.content_manipulation && e.content_manipulation.techs > 0 && e.content_manipulation.hours > 0) parts.push(`content manipulation ${e.content_manipulation.techs}×${fmtQty(e.content_manipulation.hours)} h`);
+  if (e.floor_protection_sf) parts.push(`floor protection ${fmtQty(e.floor_protection_sf)} sq ft`);
+  if (e.protective_plastic_sf) parts.push(`plastic ${fmtQty(e.protective_plastic_sf)} sq ft`);
+  if (e.containment_sf) parts.push(`containment ${fmtQty(e.containment_sf)} sq ft`);
+  if (e.ppe && e.ppe.techs > 0 && e.ppe.days > 0) parts.push(`PPE ${e.ppe.techs}×${e.ppe.days}`);
+  const body = parts.length ? parts.join(', ') : 'yes';
+  return `Emergency: ${body}${e.after_hours ? ' (after hours)' : ''}`;
+}
+
+function summarizeInspectionReport(r) {
+  const lines = [];
+  lines.push('INSPECTION REPORT');
+  lines.push(`Arrived ${fmtClock(r.arrival_time)}${r.departure_time ? ` · left ${fmtClock(r.departure_time)}` : ''}`);
+  lines.push(lossLine(r));
+  if (r.category != null || r.class != null) lines.push(`${r.category != null ? `Cat ${r.category}` : 'Cat —'} / ${r.class != null ? `Class ${r.class}` : 'Class —'}`);
+  if (readingComplete(r.outside)) lines.push(`Outside ${fmtReading(r.outside)}`);
+  lines.push(`DocuSketch ${check(r.docusketch === true)} · moisture map ${check(!!r.moisture_map)} · photos ${check(!!r.photos_taken)}`);
+  lines.push(`Rooms (${(r.rooms || []).length}):`);
+  for (const room of r.rooms || []) lines.push(inspectionRoomLine(room, r.dry_standards || {}));
+  const ds = Object.entries(r.dry_standards || {}).filter(([, v]) => v != null);
+  if (ds.length) lines.push(`Dry standards: ${ds.map(([k, v]) => `${k} ${fmtQty(v)}%`).join(', ')}`);
+  lines.push(emergencyLine(r.emergency));
+  if (r.notes && String(r.notes).trim()) lines.push(`Notes: ${String(r.notes).trim()}`);
+  return lines.join('\n');
+}
+
+function inspectionTaskLine(r) {
+  const n = (r.rooms || []).length;
+  const eq = {};
+  for (const room of r.rooms || []) for (const [t, c] of Object.entries(room.equipment || {})) eq[t] = (eq[t] || 0) + c;
+  const placed = equipmentPhrase(eq);
+  return `Inspection report: ${lossLine(r)} · ${n} room${n === 1 ? '' : 's'}${placed ? ` · placed ${placed}` : ''}`;
+}
+
 // ── Registry ─────────────────────────────────────────────────────────────────
 // The demo functions live in server.js (its test slices them out of the
 // source), so the registry is built there with them injected.
@@ -248,10 +472,17 @@ function createReportKinds(demo) {
       summarize: summarizeMonitorReport, taskLine: monitorTaskLine,
       requiredFromTechLink: true,
     },
+    inspection: {
+      column: 'inspection_report', label: 'inspection report',
+      validate: validateInspectionReport, isComplete: isInspectionReportComplete,
+      summarize: summarizeInspectionReport, taskLine: inspectionTaskLine,
+      requiredFromTechLink: true,
+    },
   };
 }
 
 module.exports = {
+  validateInspectionReport, isInspectionRoomComplete, isInspectionReportComplete, summarizeInspectionReport, inspectionTaskLine, exteriorWallLF,
   validateMonitorReport, isMonitorRoomComplete, isMonitorReportComplete, summarizeMonitorReport, monitorTaskLine,
   monitorRoomLine, fmtReading, equipmentPhrase, pulledPhrase, placedPhrase, monthDay, isDehu,
   createReportKinds,
