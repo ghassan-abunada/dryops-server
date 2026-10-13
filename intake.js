@@ -639,13 +639,20 @@ module.exports = function mountIntake(app, deps) {
       const slot = body.inspection.slot || null;
       const label = windowLabel(slot);
       try {
-        const ins = await sbInsert('inspections', {
+        let ins = await sbInsert('inspections', {
           job_id: jobId, jn_id: jobJnId, scheduled_date: body.inspection.date,
           slot_start_min: slot ? slot.start_min : null, slot_end_min: slot ? slot.end_min : null,
           scheduled_time: label, task_type: 'inspection', status: 'scheduled',
           assigned_to_ids: [rep.id], notes: null, location_id: loc.id, created_by: actor.id,
           block_kind: 'window', crew_size: null, jn_task_dirty: true,
         });
+        if (!ins || !ins.id) {
+          // PostgREST sometimes returns an empty representation even though the
+          // insert succeeded (seen in prod — the visit was on the schedule while
+          // the form said it failed). Read the row back before giving up.
+          const back = await sbGet(`inspections?job_id=eq.${enc(jobId)}&task_type=eq.inspection&status=eq.scheduled&order=created_at.desc&limit=1&select=id`);
+          if (back && back[0] && back[0].id) ins = back[0];
+        }
         if (ins && ins.id) {
           visit = { id: ins.id, date: body.inspection.date, window: label };
           syncVisitJnTask(ins.id).catch((e) => warn(rid, 'task sync', e.message));
@@ -735,17 +742,48 @@ module.exports = function mountIntake(app, deps) {
   });
 
   // ── Notifications (Telegram / Slack) ──────────────────────────────────────
+  // Team chat layout (owner's reference, 2026-10-13):
+  //   🚨 <Lead source> Lead · <Location> 🚨
+  //   👤 Customer / 🗣 Caller / 📞 Phone / 📍 Address (maps link)
+  //   ⚒️ Job Details: type, cause, rooms, extraction, insurance, services/scope, notes
+  //   📅 Inspection: date · window — rep   (or "Not scheduled · Rep: …")
+  //   <i>Created in JobNimbus by <user> · <job name></i>
+  const fmtPhone = (p) => String(p || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '').replace(/^(\d{3})(\d{3})(\d{4})$/, '($1) $2-$3') || String(p || '');
   function buildJobMessage({ loc, body, row, result, rep, leadLabel, actor }) {
     const d = body.details || {};
+    const c = body.contact || {};
+    const isCommercial = body.property_type === 'commercial';
+    const leadName = clean(leadLabel) || 'New';
     const lines = [];
-    lines.push({ b: `New ${body.record_type} job — ${result.job.name}` });
-    lines.push(`📍 ${row.address || 'No address'}`);
-    if (row.client_phone) lines.push(`📞 ${row.client_phone.replace(/(\d{3})(\d{3})(\d{4})/, '($1) $2-$3')}`);
-    if (leadLabel) lines.push(`Lead: ${leadLabel}`);
-    if (d.cause_of_damage) lines.push(`Cause: ${clean(d.cause_of_damage, 140)}`);
-    if (d.type_of_loss) lines.push(`Type: ${clean(d.type_of_loss)}`);
-    if (rep) lines.push(`Rep: ${rep.full_name}${result.visit && result.visit.id ? ` · Inspection ${fmtLongDate(result.visit.date)} ${result.visit.window}` : ''}`);
-    lines.push(`${loc.name} · by ${actor.name}`);
+    lines.push({ b: `🚨 ${leadName} Lead · ${loc.name} 🚨` });
+    lines.push('');
+    if (isCommercial) {
+      lines.push({ label: 'Business', value: result.contact.display_name, prefix: '🏢 ' });
+      lines.push({ label: 'Caller', value: `${clean(c.first_name)} ${clean(c.last_name)}`.trim() + (c.role ? ` (${clean(c.role)})` : ''), prefix: '🗣 ' });
+    } else {
+      lines.push({ label: 'Customer', value: result.contact.display_name, prefix: '👤 ' });
+      if (body.caller) lines.push({ label: 'Caller', value: `${clean(body.caller.first_name)} ${clean(body.caller.last_name)}`.trim() + ` (${clean(body.caller.relationship) || 'not the homeowner'}) · ${fmtPhone(body.caller.phone)}`, prefix: '🗣 ' });
+    }
+    if (row.client_phone) lines.push({ label: 'Phone', value: fmtPhone(row.client_phone), prefix: '📞 ' });
+    if (row.address) lines.push({ label: 'Address', value: row.address, prefix: '📍 ', url: `https://www.google.com/maps/search/?api=1&query=${enc(row.address)}` });
+    lines.push('');
+    lines.push({ b: '⚒️ Job Details' });
+    lines.push({ label: 'Job type', value: body.record_type });
+    if (d.type_of_loss) lines.push({ label: 'Type', value: clean(d.type_of_loss) });
+    if (d.cause_of_damage) lines.push({ label: 'Cause', value: clean(d.cause_of_damage, 200) });
+    if (d.rooms_affected) lines.push({ label: 'Rooms affected', value: clean(d.rooms_affected) });
+    if (typeof d.standing_water === 'boolean') lines.push({ label: 'Extraction needed', value: d.standing_water ? 'Yes' : 'No' });
+    if (d.date_loss) lines.push({ label: 'Date of loss', value: fmtLongDate(d.date_loss) });
+    if (d.insurance_type) lines.push({ label: 'Insurance', value: [clean(d.insurance_type), clean(d.insurer), d.claim_number ? `claim ${clean(d.claim_number)}` : ''].filter(Boolean).join(' · ') });
+    if (Array.isArray(d.services) && d.services.length) lines.push({ label: 'Services', value: d.services.map((s) => clean(s)).join(', ') });
+    if (d.scope_summary) lines.push({ label: 'Scope', value: clean(d.scope_summary, 300) });
+    if (d.areas_affected) lines.push({ label: 'Areas', value: clean(d.areas_affected, 200) });
+    if (d.notes) lines.push({ label: 'Notes', value: clean(d.notes, 600) });
+    lines.push('');
+    if (result.visit && result.visit.id) lines.push({ label: 'Inspection', value: `${fmtLongDate(result.visit.date)} · ${result.visit.window}${rep ? ` — ${rep.full_name}` : ''}`, prefix: '📅 ' });
+    else lines.push({ label: 'Inspection', value: `Not scheduled${rep ? ` · Rep: ${rep.full_name}` : ''}`, prefix: '📅 ' });
+    lines.push('');
+    lines.push({ i: `Created in JobNimbus by ${actor.name} · ${result.job.name}` });
     const buttons = [{ text: 'Open in JobNimbus', url: result.job.jn_url }];
     if (result.job.id) buttons.push({ text: 'Open in DryOps', url: `${APP_URL}/jobs/${result.job.id}` });
     if (row.callrail_call_id) buttons.push({ text: '▶ Listen to call', url: `https://app.callrail.com/calls/${enc(row.callrail_call_id)}` });
@@ -764,7 +802,17 @@ module.exports = function mountIntake(app, deps) {
       if (ch.location_id && !canManageLocation(actor, ch.location_id)) return res.status(403).json({ error: 'Not allowed' });
       if (!ch.location_id && actor.role !== 'admin') return res.status(403).json({ error: 'Not allowed' });
       const msg = {
-        lines: [{ b: 'DryOps test — New Mitigation job — Jane Sample (TST - MIT)' }, '📍 123 Main St, Carrollton, TX 75006', '📞 (214) 555-0100', 'Lead: Google', `Rep: ${actor.name} · Inspection today 10am–12pm`, `${ch.name} · test by ${actor.name}`],
+        lines: [
+          { b: `🚨 Google Lead · ${ch.name} (test) 🚨` }, '',
+          { label: 'Customer', value: 'Jane Sample (TST)', prefix: '👤 ' },
+          { label: 'Phone', value: '(214) 555-0100', prefix: '📞 ' },
+          { label: 'Address', value: '123 Main St, Carrollton, TX 75006', prefix: '📍 ', url: 'https://www.google.com/maps/search/?api=1&query=123+Main+St+Carrollton+TX+75006' }, '',
+          { b: '⚒️ Job Details' },
+          { label: 'Job type', value: 'Mitigation' }, { label: 'Type', value: 'CAT 2' }, { label: 'Cause', value: 'Test message from DryOps' },
+          { label: 'Rooms affected', value: '1' }, { label: 'Extraction needed', value: 'No' }, '',
+          { label: 'Inspection', value: `Today · 10am–12pm — ${actor.name}`, prefix: '📅 ' }, '',
+          { i: `Test sent by ${actor.name} · Jane Sample (TST - MIT)` },
+        ],
         buttons: [{ text: 'Open in JobNimbus', url: 'https://app.jobnimbus.com' }, { text: 'Open in DryOps', url: APP_URL }],
       };
       res.json(await deliver(ch, msg));
