@@ -1,0 +1,42 @@
+{
+  "input": {
+    "v": 1,
+    "kind": "closeout",
+    "removed_on": "2026-10-16",
+    "arrival_time": "09:15",
+    "departure_time": "10:30",
+    "rooms": [
+      {
+        "room_id": "11111111-1111-1111-1111-111111111111",
+        "name": "Kitchen",
+        "materials": [
+          { "material_id": "m1", "type": "Drywall", "mc": 11, "dry_standard_mc": 12, "prev_mc": 16 },
+          { "material_id": "m2", "type": "LVP/LVT", "mc": 10, "dry_standard_mc": null, "prev_mc": 12 }
+        ],
+        "equipment": [
+          { "equipment_id": "e1", "type": "Air Mover", "qty_on_site": 4, "qty_removed": 4 },
+          { "equipment_id": "e2", "type": "Dehumidifier - Large", "qty_on_site": 1, "qty_removed": 1 }
+        ],
+        "final_cleaning": true,
+        "notes": null
+      },
+      {
+        "room_id": "22222222-2222-2222-2222-222222222222",
+        "name": "Living Room",
+        "materials": [
+          { "material_id": "m3", "type": "Subfloor (wood)", "mc": 14, "dry_standard_mc": 12, "prev_mc": 11 }
+        ],
+        "equipment": [
+          { "equipment_id": "e3", "type": "Air Mover", "qty_on_site": 2, "qty_removed": 1 }
+        ],
+        "final_cleaning": false,
+        "notes": "one fan left on the subfloor seam"
+      }
+    ],
+    "decontamination_count": 6,
+    "photos_post": true,
+    "notes": "homeowner signed the completion form"
+  },
+  "expected_summary": "CLOSEOUT REPORT · Oct 16\nArrived 9:15 AM · left 10:30 AM\nRooms (2):\n• Kitchen — Drywall 11% (dry 12%) ↓5 ✓, LVP/LVT 10% ↓2 ✓; pulled: 4 air movers, 1 dehumidifier - large; final cleaning ✓\n• Living Room — Subfloor (wood) 14% (dry 12%) ↑3; pulled: 1 air mover; left running: 1 air mover; final cleaning ✗; note: one fan left on the subfloor seam\nDry: 1 of 3 materials still above the dry standard\nEquipment removed: 5 air movers, 1 dehumidifier - large · 6 pieces decontaminated\nEquipment left on site: 1 air mover (Living Room)\nPost photos ✓\nNotes: homeowner signed the completion form",
+  "expected_task_line": "Closeout report: 6 pieces pulled · 1 material above dry standard · left 1 air mover (Living Room)"
+}

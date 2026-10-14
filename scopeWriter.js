@@ -214,5 +214,62 @@ module.exports = function createScopeWriter(deps) {
     return out;
   }
 
-  return { applyMonitorReport, applyInspectionReport, sessionFor, roomIdFor };
+
+  /**
+   * Apply a closeout report: final MC per material (+ the day's session and
+   * readings), equipment pulled (whole rows get removed_on/at; partial pulls
+   * split the row), equipment_checks with what is still running, rooms.dry_on
+   * when every material reads at or below its dry standard.
+   */
+  async function applyCloseoutReport({ visit, report, actor, when }) {
+    const jobId = visit.job_id;
+    if (!jobId) return { skipped: 'no job' };
+    const date = report.removed_on;
+    const sessionId = await sessionFor(jobId, date, actor && actor.id);
+    if (!sessionId) throw new Error('could not create the moisture session');
+    const roomCache = new Map();
+    const out = { session_id: sessionId, readings: 0, checks: 0, pulled: 0, rooms_dry: 0, final_mc: 0 };
+    const readings = [];
+    const checks = [];
+    const removedAt = when(report.arrival_time);
+    for (const room of report.rooms || []) {
+      const roomId = await roomIdFor(jobId, room, roomCache);
+      if (!roomId) continue;
+      let allDry = (room.materials || []).length > 0;
+      for (const m of room.materials || []) {
+        if (m.mc == null) { allDry = false; continue; }
+        if (m.material_id) {
+          readings.push({ session_id: sessionId, material_id: m.material_id, mc_value: m.mc });
+          await sbPatch('materials', `id=eq.${enc(m.material_id)}`, { final_mc: m.mc }).catch(() => {});
+          out.final_mc += 1;
+        }
+        const std = m.dry_standard_mc != null ? m.dry_standard_mc : 16;
+        if (m.mc > std) allDry = false;
+      }
+      for (const e of room.equipment || []) {
+        if (!e.equipment_id) continue;
+        const left = e.qty_on_site - e.qty_removed;
+        checks.push({ session_id: sessionId, equipment_id: e.equipment_id, qty_present: Math.max(0, left) });
+        if (e.qty_removed <= 0) continue;
+        out.pulled += e.qty_removed;
+        if (left <= 0) {
+          await sbPatch('equipment', `id=eq.${enc(e.equipment_id)}`, { removed_on: date, removed_at: removedAt });
+        } else {
+          const cur = (await sbGet(`equipment?id=eq.${enc(e.equipment_id)}&select=room_id,type,label,placed_on,placed_at`)) || [];
+          const row = cur[0] || {};
+          await sbPatch('equipment', `id=eq.${enc(e.equipment_id)}`, { qty: left });
+          await sbInsert('equipment', { room_id: row.room_id || roomId, type: row.type || e.type, label: row.label || null, qty: e.qty_removed, placed_on: row.placed_on || null, placed_at: row.placed_at || null, removed_on: date, removed_at: removedAt });
+        }
+      }
+      if (allDry) {
+        out.rooms_dry += 1;
+        await sbPatch('rooms', `id=eq.${enc(roomId)}&dry_on=is.null`, { dry_on: date }).catch(() => {});
+      }
+    }
+    if (readings.length) { await sbUpsert('moisture_readings', readings, 'session_id,material_id'); out.readings = readings.length; }
+    if (checks.length) { await sbUpsert('equipment_checks', checks, 'session_id,equipment_id'); out.checks = checks.length; }
+    return out;
+  }
+
+  return { applyMonitorReport, applyInspectionReport, applyCloseoutReport, sessionFor, roomIdFor };
 };

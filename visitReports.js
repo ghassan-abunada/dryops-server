@@ -1,5 +1,5 @@
 'use strict';
-// ── Visit reports (monitor today; inspection / closeout next) ────────────────
+// ── Visit reports (monitor / inspection / closeout) ─────────────────────────
 // Twin of the DryOps app's lib/monitorReport.ts: validation (whitelist
 // rebuild, like validateDemoReport), completeness, and the JobNimbus note
 // text, which must match the app byte for byte — both repos test the same
@@ -454,6 +454,159 @@ function inspectionTaskLine(r) {
   return `Inspection report: ${lossLine(r)} · ${n} room${n === 1 ? '' : 's'}${placed ? ` · placed ${placed}` : ''}`;
 }
 
+// ── Closeout report (twin of lib/closeoutReport.ts) ──────────────────────────
+
+function validateCloseoutReport(raw) {
+  const errors = [];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, errors: ['report must be an object'] };
+  if (Number(raw.v) !== 1) errors.push('unsupported report version');
+  if (raw.kind !== 'closeout') errors.push('kind must be closeout');
+  const text = (v, name, max) => {
+    if (v == null || v === '') return null;
+    if (typeof v !== 'string') { errors.push(`${name} must be text`); return null; }
+    const t = v.trim(); if (t.length > max) errors.push(`${name} is longer than ${max} characters`); return t.slice(0, max) || null;
+  };
+  const numIn = (v, name, lo, hi, allowNull) => {
+    if (v == null || v === '') { if (allowNull) return null; errors.push(`${name} is required`); return null; }
+    const n = Number(v); if (!Number.isFinite(n) || n < lo || n > hi) { errors.push(`${name} must be a number ${lo}–${hi}`); return null; } return Math.round(n * 10) / 10;
+  };
+  const intIn = (v, name, lo, hi, d) => {
+    if (v == null || v === '') return d;
+    const n = Number(v); if (!Number.isInteger(n) || n < lo || n > hi) { errors.push(`${name} must be a whole number ${lo}–${hi}`); return d; } return n;
+  };
+  const id = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 64) : null);
+
+  const rooms = Array.isArray(raw.rooms) ? raw.rooms : (errors.push('rooms must be a list'), []);
+  if (rooms.length > 30) errors.push('too many rooms');
+  const outRooms = rooms.slice(0, 30).map((r, i) => {
+    const label = `room ${i + 1}`;
+    if (!r || typeof r !== 'object') { errors.push(`${label} is invalid`); return null; }
+    const name = text(r.name, `${label} name`, 60) || '';
+    if (!name) errors.push(`${label} needs a name`);
+    const materials = (Array.isArray(r.materials) ? r.materials : []).slice(0, 40).map((m, k) => {
+      if (!m || typeof m !== 'object') { errors.push(`${label} material ${k + 1} is invalid`); return null; }
+      return {
+        material_id: id(m.material_id), type: text(m.type, `${label} material ${k + 1} type`, 40) || 'Material',
+        mc: numIn(m.mc, `${label} ${m.type || 'material'} MC`, 0, 100, true),
+        dry_standard_mc: numIn(m.dry_standard_mc, `${label} dry standard`, 0, 100, true),
+        prev_mc: numIn(m.prev_mc, `${label} previous MC`, 0, 100, true),
+      };
+    }).filter(Boolean);
+    const equipment = (Array.isArray(r.equipment) ? r.equipment : []).slice(0, 20).map((e, k) => {
+      if (!e || typeof e !== 'object') { errors.push(`${label} equipment ${k + 1} is invalid`); return null; }
+      const onSite = intIn(e.qty_on_site, `${label} equipment ${k + 1} on site`, 0, 99, 0);
+      return {
+        equipment_id: id(e.equipment_id), type: text(e.type, `${label} equipment ${k + 1} type`, 40) || 'Equipment',
+        qty_on_site: onSite,
+        qty_removed: Math.min(onSite, intIn(e.qty_removed, `${label} equipment ${k + 1} removed`, 0, 99, 0)),
+      };
+    }).filter(Boolean);
+    return {
+      room_id: id(r.room_id), name, materials, equipment,
+      final_cleaning: typeof r.final_cleaning === 'boolean' ? r.final_cleaning : null,
+      notes: text(r.notes, `${label} notes`, 500),
+    };
+  }).filter(Boolean);
+
+  const report = {
+    v: 1, kind: 'closeout',
+    removed_on: typeof raw.removed_on === 'string' && DATE_RE.test(raw.removed_on) ? raw.removed_on : (errors.push('removed_on must be YYYY-MM-DD'), ''),
+    arrival_time: typeof raw.arrival_time === 'string' && TIME_RE.test(raw.arrival_time) ? raw.arrival_time : (errors.push('arrival_time must be HH:MM'), ''),
+    departure_time: typeof raw.departure_time === 'string' && TIME_RE.test(raw.departure_time) ? raw.departure_time : null,
+    rooms: outRooms,
+    decontamination_count: raw.decontamination_count == null ? null : intIn(raw.decontamination_count, 'decontamination_count', 0, 999, null),
+    photos_post: raw.photos_post === true,
+    notes: text(raw.notes, 'notes', 2000),
+  };
+  if (JSON.stringify(report).length > 64 * 1024) errors.push('report is too large');
+  return errors.length ? { ok: false, errors } : { ok: true, report };
+}
+
+function isCloseoutRoomComplete(room) {
+  if (!room || !String(room.name || '').trim()) return false;
+  if ((room.materials || []).some((m) => m.mc == null)) return false;
+  if (room.final_cleaning == null) return false;
+  return true;
+}
+function isCloseoutReportComplete(r) {
+  if (!r || r.v !== 1 || r.kind !== 'closeout') return false;
+  if (!DATE_RE.test(r.removed_on || '')) return false;
+  if (!TIME_RE.test(r.arrival_time || '')) return false;
+  if (!Array.isArray(r.rooms) || r.rooms.length === 0 || !r.rooms.every(isCloseoutRoomComplete)) return false;
+  if (!r.photos_post) return false;
+  return true;
+}
+
+function closeoutDryness(r) {
+  const mats = (r.rooms || []).flatMap((x) => x.materials || []);
+  return { dry: mats.filter((m) => isDry(m.mc, dryStandard(m))).length, total: mats.length };
+}
+function removedCounts(r) {
+  const out = {};
+  for (const room of r.rooms || []) for (const e of room.equipment || []) if (e.qty_removed > 0) out[e.type] = (out[e.type] || 0) + e.qty_removed;
+  return out;
+}
+const removedPieces = (r) => Object.values(removedCounts(r)).reduce((a, b) => a + b, 0);
+function leftPhrase(r) {
+  const parts = [];
+  for (const room of r.rooms || []) {
+    const left = {};
+    for (const e of room.equipment || []) { const n = e.qty_on_site - e.qty_removed; if (n > 0) left[e.type] = (left[e.type] || 0) + n; }
+    const p = equipmentPhrase(left);
+    if (p) parts.push(`${p} (${room.name})`);
+  }
+  return parts.join(', ');
+}
+function closeoutRoomLine(room) {
+  const seg = [];
+  if ((room.materials || []).length) seg.push(room.materials.map(materialPhrase).join(', '));
+  const pulled = {};
+  const left = {};
+  for (const e of room.equipment || []) {
+    if (e.qty_removed > 0) pulled[e.type] = (pulled[e.type] || 0) + e.qty_removed;
+    const n = e.qty_on_site - e.qty_removed;
+    if (n > 0) left[e.type] = (left[e.type] || 0) + n;
+  }
+  const p = equipmentPhrase(pulled);
+  const l = equipmentPhrase(left);
+  if (p) seg.push(`pulled: ${p}`);
+  if (l) seg.push(`left running: ${l}`);
+  if (!p && !l) seg.push('no equipment');
+  seg.push(`final cleaning ${room.final_cleaning == null ? '—' : check(room.final_cleaning)}`);
+  if (room.notes && room.notes.trim()) seg.push(`note: ${room.notes.trim()}`);
+  return `• ${room.name} — ${seg.join('; ')}`;
+}
+function drynessLine(r) {
+  const d = closeoutDryness(r);
+  if (d.total === 0) return 'Dry: no materials on record';
+  if (d.dry === d.total) return `Dry: all ${d.total} material${d.total === 1 ? '' : 's'} at or below the dry standard`;
+  return `Dry: ${d.total - d.dry} of ${d.total} material${d.total === 1 ? '' : 's'} still above the dry standard`;
+}
+function summarizeCloseoutReport(r) {
+  const lines = [];
+  lines.push(`CLOSEOUT REPORT · ${monthDay(r.removed_on)}`);
+  lines.push(`Arrived ${fmtClock(r.arrival_time)}${r.departure_time ? ` · left ${fmtClock(r.departure_time)}` : ''}`);
+  lines.push(`Rooms (${r.rooms.length}):`);
+  for (const room of r.rooms) lines.push(closeoutRoomLine(room));
+  lines.push(drynessLine(r));
+  const removed = equipmentPhrase(removedCounts(r));
+  const pieces = removedPieces(r);
+  const decon = r.decontamination_count != null ? r.decontamination_count : pieces;
+  lines.push(`Equipment removed: ${removed || 'none'}${decon > 0 ? ` · ${decon} piece${decon === 1 ? '' : 's'} decontaminated` : ''}`);
+  const left = leftPhrase(r);
+  if (left) lines.push(`Equipment left on site: ${left}`);
+  lines.push(`Post photos ${check(r.photos_post)}`);
+  if (r.notes && r.notes.trim()) lines.push(`Notes: ${r.notes.trim()}`);
+  return lines.join('\n');
+}
+function closeoutTaskLine(r) {
+  const pieces = removedPieces(r);
+  const d = closeoutDryness(r);
+  const dry = d.total === 0 ? 'no readings' : d.dry === d.total ? 'all dry' : `${d.total - d.dry} material${d.total - d.dry === 1 ? '' : 's'} above dry standard`;
+  const left = leftPhrase(r);
+  return `Closeout report: ${pieces} piece${pieces === 1 ? '' : 's'} pulled · ${dry}${left ? ` · left ${left}` : ''}`;
+}
+
 // ── Registry ─────────────────────────────────────────────────────────────────
 // The demo functions live in server.js (its test slices them out of the
 // source), so the registry is built there with them injected.
@@ -478,6 +631,13 @@ function createReportKinds(demo) {
       summarize: summarizeInspectionReport, taskLine: inspectionTaskLine,
       requiredFromTechLink: true,
     },
+    // Optional on the tech link: a closeout can be marked complete without it.
+    closeout: {
+      column: 'closeout_report', label: 'closeout report',
+      validate: validateCloseoutReport, isComplete: isCloseoutReportComplete,
+      summarize: summarizeCloseoutReport, taskLine: closeoutTaskLine,
+      requiredFromTechLink: false,
+    },
   };
 }
 
@@ -485,5 +645,6 @@ module.exports = {
   validateInspectionReport, isInspectionRoomComplete, isInspectionReportComplete, summarizeInspectionReport, inspectionTaskLine, exteriorWallLF,
   validateMonitorReport, isMonitorRoomComplete, isMonitorReportComplete, summarizeMonitorReport, monitorTaskLine,
   monitorRoomLine, fmtReading, equipmentPhrase, pulledPhrase, placedPhrase, monthDay, isDehu,
+  validateCloseoutReport, isCloseoutRoomComplete, isCloseoutReportComplete, summarizeCloseoutReport, closeoutTaskLine, removedPieces,
   createReportKinds,
 };

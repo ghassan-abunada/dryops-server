@@ -3914,6 +3914,9 @@ async function saveVisitReport({ visitId, kind, report: raw, actor, source }) {
       } else if (kind === 'inspection') {
         const tz = await visitTimezone(visit);
         scope = await scopeWriter.applyInspectionReport({ visit, report: v.report, actor, when: (hhmm) => zonedTimeISO(visit.scheduled_date, hhmm, tz) });
+      } else if (kind === 'closeout') {
+        const tz = await visitTimezone(visit);
+        scope = await scopeWriter.applyCloseoutReport({ visit, report: v.report, actor, when: (hhmm) => zonedTimeISO(v.report.removed_on, hhmm, tz) });
       }
     } catch (e) {
       console.warn(`[${kind} report] scope write failed`, e.message);

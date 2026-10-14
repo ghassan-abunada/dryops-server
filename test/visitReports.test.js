@@ -78,3 +78,30 @@ test('inspection validation whitelists and gates', () => {
   const kinds = createReportKinds({ validateDemoReport: () => 1, isDemoReportComplete: () => 2, summarizeDemoReport: () => 3, demoReportTaskLine: () => 4 });
   assert.strictEqual(kinds.inspection.column, 'inspection_report');
 });
+
+// Closeout report: shared fixture with the app (lib/__tests__/fixtures/closeoutReport.json).
+const { validateCloseoutReport, isCloseoutReportComplete, summarizeCloseoutReport, closeoutTaskLine } = require('../visitReports');
+const closeout = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'closeoutReport.json'), 'utf8'));
+
+test('closeout summary matches the shared fixture byte for byte', () => {
+  const v = validateCloseoutReport(closeout.input);
+  assert.ok(v.ok, JSON.stringify(v.errors));
+  assert.strictEqual(summarizeCloseoutReport(v.report), closeout.expected_summary);
+  assert.strictEqual(closeoutTaskLine(v.report), closeout.expected_task_line);
+  assert.strictEqual(isCloseoutReportComplete(v.report), true);
+});
+
+test('closeout validation clamps removed to on-site, whitelists, and is optional on the tech link', () => {
+  const v = validateCloseoutReport({ ...closeout.input, evil: 1, rooms: [{ ...closeout.input.rooms[0], junk: 2, equipment: [{ equipment_id: 'e1', type: 'Air Mover', qty_on_site: 2, qty_removed: 9 }] }] });
+  assert.ok(v.ok, JSON.stringify(v.errors));
+  assert.strictEqual(v.report.rooms[0].equipment[0].qty_removed, 2);
+  assert.strictEqual('evil' in v.report, false);
+  assert.strictEqual('junk' in v.report.rooms[0], false);
+  const bad = validateCloseoutReport({ ...closeout.input, kind: 'monitor', removed_on: '10/16' });
+  assert.strictEqual(bad.ok, false);
+  assert.ok(bad.errors.some((e) => /kind must be closeout/.test(e)));
+  assert.ok(bad.errors.some((e) => /removed_on/.test(e)));
+  const kinds = createReportKinds({ validateDemoReport: () => 1, isDemoReportComplete: () => 2, summarizeDemoReport: () => 3, demoReportTaskLine: () => 4 });
+  assert.strictEqual(kinds.closeout.column, 'closeout_report');
+  assert.strictEqual(kinds.closeout.requiredFromTechLink, false);
+});
