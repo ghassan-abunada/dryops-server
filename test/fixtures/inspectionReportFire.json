@@ -1,0 +1,160 @@
+{
+  "input": {
+    "v": 1,
+    "kind": "inspection",
+    "arrival_time": "13:10",
+    "departure_time": "15:00",
+    "loss_type": "fire",
+    "source": "other",
+    "source_other": "kitchen grease fire",
+    "date_of_loss": "2026-10-12",
+    "category": null,
+    "class": null,
+    "outside": null,
+    "docusketch": true,
+    "rooms": [
+      {
+        "room_id": null,
+        "name": "Kitchen",
+        "profile": "kitchen",
+        "dims": {
+          "length_ft": 12,
+          "width_ft": 10,
+          "ceiling_ft": 8
+        },
+        "affected": [
+          "walls",
+          "ceiling",
+          "cabinets"
+        ],
+        "flooring": {
+          "type": null,
+          "on_slab": null
+        },
+        "materials": [],
+        "doors": 2,
+        "exterior_walls": "none",
+        "exterior_wall_lf": null,
+        "reading": null,
+        "equipment": {
+          "Air Mover": 0,
+          "Dehumidifier": 0,
+          "Dehumidifier - Large": 0,
+          "Dehumidifier - XL": 0,
+          "Air Scrubber": 1,
+          "Drying Mats": 0
+        },
+        "photos_taken": true,
+        "notes": null,
+        "fire": {
+          "soot": "heavy",
+          "cleaning": [
+            "walls_ceiling",
+            "floor",
+            "baseboard",
+            "doors",
+            "cabinets",
+            "countertop",
+            "appliances"
+          ],
+          "detach": {
+            "outlets": 3,
+            "light_fixtures": 1,
+            "registers": 1,
+            "blinds": 0
+          },
+          "cabinets_lf": {
+            "lower": 10,
+            "upper": 8
+          },
+          "countertop_sf": 30,
+          "appliances": [
+            "Refrigerator",
+            "Range / Oven"
+          ],
+          "seal_framing": null
+        }
+      },
+      {
+        "room_id": null,
+        "name": "Living Room",
+        "profile": "other",
+        "dims": null,
+        "affected": [
+          "walls",
+          "ceiling",
+          "contents"
+        ],
+        "flooring": {
+          "type": null,
+          "on_slab": null
+        },
+        "materials": [],
+        "doors": 1,
+        "exterior_walls": null,
+        "exterior_wall_lf": null,
+        "reading": null,
+        "equipment": {
+          "Air Mover": 0,
+          "Dehumidifier": 0,
+          "Dehumidifier - Large": 0,
+          "Dehumidifier - XL": 0,
+          "Air Scrubber": 1,
+          "Drying Mats": 0
+        },
+        "photos_taken": true,
+        "notes": "ceiling drywall scorched over the sofa",
+        "fire": {
+          "soot": "light",
+          "cleaning": [
+            "walls_ceiling",
+            "framing"
+          ],
+          "detach": {
+            "outlets": 4,
+            "light_fixtures": 2,
+            "registers": 2,
+            "blinds": 2
+          },
+          "cabinets_lf": {
+            "lower": null,
+            "upper": null
+          },
+          "countertop_sf": null,
+          "appliances": [],
+          "seal_framing": true
+        }
+      }
+    ],
+    "dry_standards": {},
+    "emergency": {
+      "performed": true,
+      "after_hours": false,
+      "extraction": null,
+      "content_block_rooms": 2,
+      "content_manipulation": {
+        "techs": 2,
+        "hours": 1.5
+      },
+      "floor_protection_sf": null,
+      "protective_plastic_sf": 200,
+      "containment_sf": 60,
+      "ppe": {
+        "techs": 2,
+        "days": 1
+      }
+    },
+    "fire": {
+      "hepa_filters": 4,
+      "supervisory_hours": 3,
+      "dumpster_loads": 1,
+      "ozone": true,
+      "ozone_cf": null
+    },
+    "moisture_map": false,
+    "photos_taken": true,
+    "notes": "insured staying with family; key under the mat"
+  },
+  "expected_summary": "INSPECTION REPORT\nArrived 1:10 PM · left 3:00 PM\nFire loss · kitchen grease fire · loss Oct 12\nDocuSketch ✓ · moisture map ✗ · photos ✓\nRooms (2):\n• Kitchen (12×10, 8 ft ceiling) — affected: walls, ceiling, cabinets; soot: heavy; detach: 3 outlets, 1 light fixture, 1 register; clean: walls & ceiling, floor, baseboard, doors, cabinets (lower 10 LF, upper 8 LF), countertop 30 sq ft, appliances (refrigerator, range / oven); 2 doors, no exterior walls; equipment: 1 air scrubber\n• Living Room — affected: walls, ceiling, contents; soot: light; detach: 4 outlets, 2 light fixtures, 2 registers, 2 blinds; clean: walls & ceiling, framing (seal); 1 door; equipment: 1 air scrubber; note: ceiling drywall scorched over the sofa\nFire: 4 HEPA filters · supervisory 3 h · 1 dumpster load · ozone\nEmergency: 2 rooms blocked, content manipulation 2×1.5 h, plastic 200 sq ft, containment 60 sq ft, PPE 2×1\nNotes: insured staying with family; key under the mat",
+  "expected_task_line": "Inspection report: Fire loss · kitchen grease fire · loss Oct 12 · 2 rooms · placed 2 air scrubbers"
+}

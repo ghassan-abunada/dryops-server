@@ -1,0 +1,51 @@
+{
+  "input": {
+    "v": 1,
+    "kind": "monitor",
+    "fire": true,
+    "session_date": "2026-10-14",
+    "arrival_time": "10:20",
+    "departure_time": null,
+    "outside": null,
+    "rooms": [
+      {
+        "room_id": "11111111-1111-1111-1111-111111111111",
+        "name": "Kitchen",
+        "reading": null,
+        "materials": [],
+        "equipment": [
+          {
+            "equipment_id": "e1",
+            "type": "Air Scrubber",
+            "qty_before": 1,
+            "qty_present": 1
+          }
+        ],
+        "dehu_outlets": [],
+        "dry": null,
+        "notes": null
+      },
+      {
+        "room_id": "22222222-2222-2222-2222-222222222222",
+        "name": "Living Room",
+        "reading": null,
+        "materials": [],
+        "equipment": [
+          {
+            "equipment_id": "e2",
+            "type": "Air Scrubber",
+            "qty_before": 1,
+            "qty_present": 0
+          }
+        ],
+        "dehu_outlets": [],
+        "dry": null,
+        "notes": "filter swapped"
+      }
+    ],
+    "photos_taken": true,
+    "notes": null
+  },
+  "expected_summary": "MONITOR REPORT · Oct 14 · fire\nArrived 10:20 AM\nRooms (2):\n• Kitchen — equipment: 1 air scrubber\n• Living Room — no equipment running; note: filter swapped\nEquipment pulled: 1 air scrubber (Living Room)\nPhotos ✓",
+  "expected_task_line": "Monitor report (fire): 1 air scrubber running · pulled 1 air scrubber (Living Room)"
+}

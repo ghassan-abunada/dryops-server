@@ -3562,6 +3562,83 @@ function demoFlooringSF(room) {
   return demoFloorSF(room.dims);
 }
 
+// Extras (DryOps phase d): per-room quantities and report-level site
+// protection / cleaning the scope sheet needs. All optional; absent in older
+// reports, and the summary only mentions them when present.
+const DEMO_ROOM_EXTRA_KEYS = ['doors', 'doors_removed', 'drill_holes', 'door_jamb_lf', 'trim_lf', 'toe_kick_lf', 'countertop_sf', 'tack_strip_lf', 'shelves_lf', 'insulation_lf', 'dehu_large', 'dehu_xl'];
+const DEMO_COVERAGE = ['floor', 'part_floor', 'surface', 'more_than_floor', 'more_than_floor_perimeter', 'walls_ceiling'];
+const DEMO_FLOOR_PROTECTION = ['neoprene_runners', 'cardboard_tape', 'plastic_tape', 'none'];
+const DEMO_COVERAGE_LABEL = { floor: 'floor', part_floor: 'part of the floor', surface: 'surface area', more_than_floor: 'more than the floor', more_than_floor_perimeter: 'more than the floor perimeter', walls_ceiling: 'walls and ceiling' };
+const DEMO_FLOOR_PROTECTION_LABEL = { neoprene_runners: 'neoprene runners', cardboard_tape: 'cardboard & tape', plastic_tape: 'plastic & tape', none: 'none' };
+function demoRoomExtrasFrom(raw, numIn, intIn, label) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  let any = false;
+  for (const k of DEMO_ROOM_EXTRA_KEYS) {
+    const v = /_(lf|sf)$/.test(k) ? numIn(raw[k], `${label} ${k}`, 0, 100000, true) : intIn(raw[k], `${label} ${k}`, 0, 999, true);
+    out[k] = v; if (v != null) any = true;
+  }
+  out.tile_on_slab = typeof raw.tile_on_slab === 'boolean' ? raw.tile_on_slab : null;
+  if (out.tile_on_slab != null) any = true;
+  return any ? out : null;
+}
+function demoExtrasFrom(raw, numIn, intIn) {
+  if (!raw || typeof raw !== 'object') return null;
+  const c = (raw.protection && raw.protection.containment) || {};
+  const f = (raw.protection && raw.protection.floor_protection) || {};
+  const out = {
+    arrival_time: typeof raw.arrival_time === 'string' && DEMO_TIME_RE.test(raw.arrival_time) ? raw.arrival_time : null,
+    after_hours: raw.after_hours === true,
+    haul_debris_loads: intIn(raw.haul_debris_loads, 'haul_debris_loads', 0, 99, true),
+    cleaning: { kind: raw.cleaning && (raw.cleaning.kind === 'light' || raw.cleaning.kind === 'heavy') ? raw.cleaning.kind : null, sf: numIn(raw.cleaning && raw.cleaning.sf, 'cleaning sq ft', 0, 100000, true) },
+    antimicrobial: { coverage: raw.antimicrobial && DEMO_COVERAGE.includes(raw.antimicrobial.coverage) ? raw.antimicrobial.coverage : null, sf: numIn(raw.antimicrobial && raw.antimicrobial.sf, 'antimicrobial sq ft', 0, 100000, true) },
+    protection: {
+      containment: { setup: typeof c.setup === 'boolean' ? c.setup : null, sf: numIn(c.sf, 'containment sq ft', 0, 100000, true), zippers: intIn(c.zippers, 'zippers', 0, 99, true), tension_posts: intIn(c.tension_posts, 'tension posts', 0, 99, true) },
+      floor_protection: { type: DEMO_FLOOR_PROTECTION.includes(f.type) ? f.type : null, sf: numIn(f.sf, 'floor protection sq ft', 0, 100000, true), runners: intIn(f.runners, 'runners', 0, 99, true) },
+      protective_plastic_sf: numIn(raw.protection && raw.protection.protective_plastic_sf, 'protective plastic sq ft', 0, 100000, true),
+    },
+  };
+  const empty = { arrival_time: null, after_hours: false, haul_debris_loads: null, cleaning: { kind: null, sf: null }, antimicrobial: { coverage: null, sf: null }, protection: { containment: { setup: null, sf: null, zippers: null, tension_posts: null }, floor_protection: { type: null, sf: null, runners: null }, protective_plastic_sf: null } };
+  return JSON.stringify(out) === JSON.stringify(empty) ? null : out;
+}
+function demoRoomExtrasPhrase(x) {
+  if (!x) return '';
+  const p = [];
+  if (x.doors != null) p.push(`${x.doors} door${x.doors === 1 ? '' : 's'}`);
+  if (x.doors_removed) p.push(`${x.doors_removed} door${x.doors_removed === 1 ? '' : 's'} removed`);
+  if (x.drill_holes) p.push(`${x.drill_holes} drill holes`);
+  if (x.door_jamb_lf) p.push(`door jamb ${demoQty(x.door_jamb_lf)} LF`);
+  if (x.trim_lf) p.push(`trim ${demoQty(x.trim_lf)} LF`);
+  if (x.toe_kick_lf) p.push(`toe kick ${demoQty(x.toe_kick_lf)} LF`);
+  if (x.countertop_sf) p.push(`countertop ${demoQty(x.countertop_sf)} sq ft`);
+  if (x.tack_strip_lf) p.push(`tack strip ${demoQty(x.tack_strip_lf)} LF`);
+  if (x.shelves_lf) p.push(`shelves ${demoQty(x.shelves_lf)} LF`);
+  if (x.insulation_lf) p.push(`insulation ${demoQty(x.insulation_lf)} LF`);
+  if (x.dehu_large || x.dehu_xl) p.push(`dehu ${[x.dehu_large ? `${x.dehu_large} large` : null, x.dehu_xl ? `${x.dehu_xl} XL` : null].filter(Boolean).join(', ')}`);
+  if (x.tile_on_slab) p.push('tile on slab');
+  return p.join(', ');
+}
+function demoProtectionLine(x) {
+  if (!x) return '';
+  const p = [];
+  const c = x.protection.containment;
+  if (c.setup === true) p.push(`containment${c.sf ? ` ${demoQty(c.sf)} sq ft` : ''}${c.zippers ? `, ${c.zippers} zipper${c.zippers === 1 ? '' : 's'}` : ''}${c.tension_posts ? `, ${c.tension_posts} tension post${c.tension_posts === 1 ? '' : 's'}` : ''}`);
+  else if (c.setup === false) p.push('no containment');
+  const f = x.protection.floor_protection;
+  if (f.type && f.type !== 'none') p.push(`floor protection ${DEMO_FLOOR_PROTECTION_LABEL[f.type]}${f.type === 'neoprene_runners' && f.runners ? ` ×${f.runners}` : f.sf ? ` ${demoQty(f.sf)} sq ft` : ''}`);
+  else if (f.type === 'none') p.push('no floor protection');
+  if (x.protection.protective_plastic_sf) p.push(`plastic ${demoQty(x.protection.protective_plastic_sf)} sq ft`);
+  return p.length ? `Protection: ${p.join(' · ')}` : '';
+}
+function demoCleaningLine(x) {
+  if (!x) return '';
+  const p = [];
+  if (x.cleaning.kind) p.push(`${x.cleaning.kind}${x.cleaning.sf ? ` ${demoQty(x.cleaning.sf)} sq ft` : ''}`);
+  if (x.antimicrobial.coverage || x.antimicrobial.sf) p.push(`antimicrobial${x.antimicrobial.coverage ? ` ${DEMO_COVERAGE_LABEL[x.antimicrobial.coverage]}` : ''}${x.antimicrobial.sf ? ` ${demoQty(x.antimicrobial.sf)} sq ft` : ''}`);
+  if (x.haul_debris_loads) p.push(`${x.haul_debris_loads} debris load${x.haul_debris_loads === 1 ? '' : 's'}`);
+  return p.length ? `Cleaning: ${p.join(' · ')}` : '';
+}
+
 // Whitelist rebuild: unknown keys dropped, types coerced/validated. Returns
 // { ok: true, report } or { ok: false, errors }.
 function validateDemoReport(raw) {
@@ -3626,6 +3703,7 @@ function validateDemoReport(raw) {
       appliances_detached: appliances.length > 0 || (r.appliances_detached === true && !Array.isArray(r.appliances)),
       special_work: text(r.special_work, `${label} special work`, 500),
       equipment_left: eq,
+      ...(demoRoomExtrasFrom(r.extras, numIn, intIn, label) ? { extras: demoRoomExtrasFrom(r.extras, numIn, intIn, label) } : {}),
     };
   }).filter(Boolean);
   const staged = raw.equipment_staged == null ? null
@@ -3646,6 +3724,7 @@ function validateDemoReport(raw) {
     post_docusketch: bool(raw.post_docusketch, 'post_docusketch'),
     completed_time: completedTime,
     notes: text(raw.notes, 'notes', 2000),
+    ...(demoExtrasFrom(raw.extras, numIn, intIn) ? { extras: demoExtrasFrom(raw.extras, numIn, intIn) } : {}),
   };
   if (JSON.stringify(report).length > 64 * 1024) errors.push('report is too large');
   return errors.length ? { ok: false, errors } : { ok: true, report };
@@ -3735,14 +3814,20 @@ function demoRoomLine(room) {
   if (room.special_work && String(room.special_work).trim()) seg.push(`special: ${String(room.special_work).trim()}`);
   const left = demoEquipmentPhrase(room.equipment_left);
   seg.push(left ? `left: ${left}` : 'no equipment left');
+  const extras = demoRoomExtrasPhrase(room.extras);
+  if (extras) seg.push(`extras: ${extras}`);
   return head + seg.join('; ');
 }
 function summarizeDemoReport(r) {
   const lines = ['POST-DEMO REPORT', `DocuSketch: pre ${demoCheck(r.pre_docusketch)} · post ${demoCheck(r.post_docusketch)}`];
   if (r.equipment_staged) lines.push(`Equipment on arrival: ${DEMO_STAGED_LABEL[r.equipment_staged]}`);
+  const protection = demoProtectionLine(r.extras);
+  if (protection) lines.push(protection);
   lines.push(`Rooms (${(r.rooms || []).length}):`);
   for (const room of r.rooms || []) lines.push(demoRoomLine(room));
   lines.push(`After demo: antimicrobial ${demoCheck(r.antimicrobial)} · floors & cavities cleaned ${demoCheck(r.cleaned_floors_cavities)} · equipment reset ${demoCheck(r.equipment_reset)}`);
+  const cleaning = demoCleaningLine(r.extras);
+  if (cleaning) lines.push(cleaning);
   const total = demoEquipmentPhrase(demoTotalEquipment(r));
   lines.push(`Equipment left on site: ${total || 'none'}`);
   const count = r.photo_count && r.photo_count > 0 ? ` (${r.photo_count})` : '';
@@ -3758,32 +3843,88 @@ function demoReportTaskLine(r) {
 }
 
 // Shared by the token route and the signed-in route.
-async function saveDemoReport({ visitId, report: raw, actor, source }) {
-  const visit = await loadVisit(visitId, 'id,jn_id,job_id,task_type,status');
+async function saveDemoReport(args) { return saveVisitReport({ ...args, kind: 'demo' }); }
+
+// ── Visit reports (any kind) ─────────────────────────────────────────────────
+// One save path for every per-visit report: validate by kind (visitReports.js;
+// the demo functions above), store it on its own inspections column, then let
+// scopeWriter.js turn it into drying-log rows. A seeding failure never fails
+// the save — the report is the record; the rows are a projection of it.
+const visitReports = require('./visitReports');
+const REPORT_KINDS = visitReports.createReportKinds({ validateDemoReport, isDemoReportComplete, summarizeDemoReport, demoReportTaskLine });
+const REPORT_COLUMNS = Object.values(REPORT_KINDS).map((k) => k.column);
+const scopeWriter = require('./scopeWriter')({ SUPABASE_URL, SB_JSON_HEADERS, sbGet, sbInsert, sbPatch, sbUpsert });
+
+function reportOf(visit) {
+  const spec = REPORT_KINDS[visit && visit.task_type];
+  return spec ? visit[spec.column] || null : null;
+}
+function summarizeVisitReport(taskType, report) {
+  const spec = REPORT_KINDS[taskType];
+  return spec && report ? spec.summarize(report) : '';
+}
+async function visitTimezone(visit) {
+  try {
+    if (visit && visit.location_id) {
+      const loc = await sbGet(`locations?id=eq.${encodeURIComponent(visit.location_id)}&select=timezone`);
+      if (loc && loc[0] && loc[0].timezone) return loc[0].timezone;
+    }
+    const settings = await loadScheduleSettings();
+    if (settings && settings.default_timezone) return settings.default_timezone;
+  } catch { /* fall through */ }
+  return 'America/Denver';
+}
+/** ISO timestamp for 'HH:MM' on `dateISO` in `tz`; null when the time is unknown. */
+function zonedTimeISO(dateISO, hhmm, tz) {
+  const m = /^(\d{2}):(\d{2})$/.exec(hhmm || '');
+  if (!m || !dateISO) return null;
+  try { return new Date(zonedToUnix(dateISO, Number(m[1]) * 60 + Number(m[2]), tz) * 1000).toISOString(); } catch { return null; }
+}
+
+async function saveVisitReport({ visitId, kind, report: raw, actor, source }) {
+  const spec = REPORT_KINDS[kind];
+  if (!spec) return { status: 400, body: { error: `Unknown report kind: ${kind}`, code: 'KIND_UNKNOWN' } };
+  const visit = await loadVisit(visitId, 'id,jn_id,job_id,task_type,status,scheduled_date,location_id');
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
-  if (visit.task_type !== 'demo') return { status: 409, body: { error: 'Only demo visits have a post-demo report' } };
+  if (visit.task_type !== kind) return { status: 409, body: { error: `This is a ${VISIT_TYPE_LABEL[visit.task_type] || 'different'} visit, not a ${kind}`, code: 'KIND_MISMATCH' } };
   if (visit.status === 'cancelled') return { status: 409, body: { error: 'This visit was cancelled' } };
-  const v = validateDemoReport(raw);
+  const v = spec.validate(raw);
   if (!v.ok) return { status: 400, body: { error: 'Report is incomplete or malformed', code: 'INVALID_REPORT', errors: v.errors } };
   const now = new Date().toISOString();
-  const patched = await sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, {
-    demo_report: v.report, demo_report_submitted_at: now,
-    demo_report_by: actor.id || null, demo_report_by_name: actor.name, jn_task_dirty: true,
-  });
-  // Seed Scope rooms from the report when the job has none yet (names only).
+  const patch = kind === 'demo'
+    ? { demo_report: v.report, demo_report_submitted_at: now, demo_report_by: actor.id || null, demo_report_by_name: actor.name, jn_task_dirty: true }
+    : { [spec.column]: v.report, report_submitted_at: now, report_by: actor.id || null, report_by_name: actor.name, jn_task_dirty: true };
+  const patched = await sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, patch);
+  let scope = null;
+  let scopeWarning = null;
   if (visit.job_id) {
     try {
-      const existing = await sbGet(`rooms?job_id=eq.${encodeURIComponent(visit.job_id)}&select=id&limit=1`);
-      if (Array.isArray(existing) && existing.length === 0 && v.report.rooms.length) {
-        await fetch(`${SUPABASE_URL}/rest/v1/rooms`, {
-          method: 'POST', headers: { ...SB_JSON_HEADERS, Prefer: 'return=minimal' },
-          body: JSON.stringify(v.report.rooms.map((r, i) => ({ job_id: visit.job_id, name: r.name, sort_order: i }))),
-        });
+      if (kind === 'demo') {
+        // Seed Scope rooms from the report when the job has none yet (names only).
+        const existing = await sbGet(`rooms?job_id=eq.${encodeURIComponent(visit.job_id)}&select=id&limit=1`);
+        if (Array.isArray(existing) && existing.length === 0 && v.report.rooms.length) {
+          await fetch(`${SUPABASE_URL}/rest/v1/rooms`, {
+            method: 'POST', headers: { ...SB_JSON_HEADERS, Prefer: 'return=minimal' },
+            body: JSON.stringify(v.report.rooms.map((r, i) => ({ job_id: visit.job_id, name: r.name, sort_order: i }))),
+          });
+        }
+      } else if (kind === 'monitor') {
+        const tz = await visitTimezone(visit);
+        scope = await scopeWriter.applyMonitorReport({ visit, report: v.report, actor, when: (hhmm) => zonedTimeISO(v.report.session_date, hhmm, tz) });
+      } else if (kind === 'inspection') {
+        const tz = await visitTimezone(visit);
+        scope = await scopeWriter.applyInspectionReport({ visit, report: v.report, actor, when: (hhmm) => zonedTimeISO(visit.scheduled_date, hhmm, tz) });
+      } else if (kind === 'closeout') {
+        const tz = await visitTimezone(visit);
+        scope = await scopeWriter.applyCloseoutReport({ visit, report: v.report, actor, when: (hhmm) => zonedTimeISO(v.report.removed_on, hhmm, tz) });
       }
-    } catch (e) { console.warn('[demo report] room seeding failed', e.message); }
+    } catch (e) {
+      console.warn(`[${kind} report] scope write failed`, e.message);
+      scopeWarning = 'Report saved, but the drying-log rows could not be written. They will be rebuilt on the next save.';
+    }
   }
   syncVisitJnTask(visitId).catch(() => {});
-  return { status: 200, body: { ok: true, visit: patched && patched[0], complete: isDemoReportComplete(v.report), summary: summarizeDemoReport(v.report) } };
+  return { status: 200, body: { ok: true, visit: patched && patched[0], complete: spec.isComplete(v.report), summary: spec.summarize(v.report), scope, scope_warning: scopeWarning } };
 }
 
 app.post('/tech/visits/:id/demo-report', async (req, res) => {
@@ -3812,6 +3953,118 @@ app.post('/visits/:id/demo-report', requireAuth, async (req, res) => {
   }
 });
 
+// Any visit report, by kind ({ kind, report }). Same guards as the demo routes.
+app.post('/tech/visits/:id/report', async (req, res) => {
+  try {
+    const tech = await techGuard(req, res);
+    if (!tech) return;
+    const out = await saveVisitReport({ visitId: String(req.params.id), kind: String((req.body && req.body.kind) || ''), report: req.body && req.body.report, actor: { id: tech.profileId, name: tech.name }, source: 'tech_link' });
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    console.error('[tech report error]', err.message);
+    res.status(502).json({ error: 'Could not save the report right now. Please try again.' });
+  }
+});
+app.post('/visits/:id/report', requireAuth, async (req, res) => {
+  try {
+    const actor = await appActor(req);
+    if (!actor) return res.status(403).json({ error: 'Profile not found' });
+    const visit = await loadVisit(String(req.params.id), 'id,assigned_to_ids');
+    if (!visit) return res.status(404).json({ error: 'Visit not found' });
+    if (!['admin', 'owner'].includes(actor.role) && !isAssigned(visit, actor.id)) return res.status(403).json({ error: 'Not allowed' });
+    const out = await saveVisitReport({ visitId: String(req.params.id), kind: String((req.body && req.body.kind) || ''), report: req.body && req.body.report, actor: { id: actor.id, name: actor.name }, source: 'app' });
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    console.error('[report error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// The estimating bot can fetch the reviewed sheet by its share token (same
+// anon-safe RPC the public page uses).
+app.get('/scope/:token.json', async (req, res) => {
+  try {
+    const token = String(req.params.token || '');
+    if (token.length < 16 || token.length > 64) return res.status(404).json({ error: 'Not found' });
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_scope_sheet`, { method: 'POST', headers: SB_JSON_HEADERS, body: JSON.stringify({ p_token: token }) });
+    const body = await r.json().catch(() => null);
+    if (!r.ok || !body) return res.status(404).json({ error: 'Not found' });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ scope_sheet: body.sheet, drying_log: body.drying_log, version: body.version, status: body.status, job: body.job, location: body.location, catalog_version: body.sheet && body.sheet.catalog_version });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Send a reviewed scope sheet to the job's Files in JobNimbus (JSON + CSV +
+// text the app rendered) and post a note with the share link.
+app.post('/scope-sheets/:id/jn', requireAuth, async (req, res) => {
+  try {
+    const actor = await appActor(req);
+    if (!actor) return res.status(403).json({ error: 'Profile not found' });
+    if (!['admin', 'owner'].includes(actor.role)) return res.status(403).json({ error: 'Not allowed' });
+    const rows = await sbGet(`scope_sheets?id=eq.${encodeURIComponent(String(req.params.id))}&select=id,job_id,version,sheet,status`);
+    const sheet = rows && rows[0];
+    if (!sheet) return res.status(404).json({ error: 'Scope sheet not found' });
+    const jobs = await sbGet(`jobs?id=eq.${encodeURIComponent(sheet.job_id)}&select=id,jn_id,name,location_id`);
+    const job = jobs && jobs[0];
+    if (!job || !job.jn_id) return res.status(409).json({ error: 'Job has no JobNimbus id' });
+    const b = req.body || {};
+    const cap = (v, max) => (typeof v === 'string' && v.length <= max ? v : null);
+    const text = cap(b.text, 2 * 1024 * 1024), csv = cap(b.csv, 2 * 1024 * 1024);
+    const json = JSON.stringify({ scope_sheet: sheet.sheet, version: sheet.version, catalog_version: sheet.sheet && sheet.sheet.catalog_version }, null, 2);
+    const stem = `Scope Sheet v${sheet.version} - ${String(job.name || job.jn_id).replace(/[^A-Za-z0-9 _-]+/g, '').trim() || job.jn_id}`;
+    const files = [];
+    const up = async (name, body, desc) => { try { files.push({ name, jnid: await jnUploadFile(job.jn_id, name, Buffer.from(body, 'utf8'), desc) }); } catch (e) { files.push({ name, jnid: null, error: e.message }); } };
+    await up(`${stem}.json`, json, 'DryOps scope sheet (bot input)');
+    if (csv) await up(`${stem}.csv`, csv, 'DryOps scope sheet (spreadsheet)');
+    if (text) await up(`${stem}.txt`, text, 'DryOps scope sheet (Xactimate order)');
+    const link = typeof b.link === 'string' && /^https?:\/\//.test(b.link) ? b.link.slice(0, 300) : null;
+    const noteText = `Scope sheet v${sheet.version} generated in DryOps${link ? `\n${link}` : ''}\nFiles: ${files.filter((f) => f.jnid).map((f) => f.name).join(', ') || 'upload failed'}`;
+    const note = await jnAddNote(job.jn_id, noteText, await visitNoteContext({ location_id: job.location_id, jn_id: job.jn_id }, actor.id));
+    await sbPatch('scope_sheets', `id=eq.${encodeURIComponent(sheet.id)}`, { status: 'sent' }).catch(() => {});
+    res.json({ ok: true, files, note });
+  } catch (err) {
+    console.error('[scope-sheet jn error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Scope tab "Log a visit now": a visit for today, assigned to the signed-in
+// user, so an unscheduled monitor / inspection still has a visit row for its
+// report (and the drying log stays date-keyed). Service role bypasses the
+// assignee-eligibility guard on purpose; the report submit completes it.
+app.post('/jobs/:id/visits/adhoc', requireAuth, async (req, res) => {
+  try {
+    const actor = await appActor(req);
+    if (!actor) return res.status(403).json({ error: 'Profile not found' });
+    const kind = String((req.body && req.body.kind) || '');
+    if (!VISIT_TYPE_LABEL[kind]) return res.status(400).json({ error: 'kind must be inspection, monitor, demo or closeout' });
+    const jobs = await sbGet(`jobs?id=eq.${encodeURIComponent(String(req.params.id))}&select=id,jn_id,location_id`);
+    const job = jobs && jobs[0];
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const tz = await visitTimezone({ location_id: job.location_id });
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    const row = {
+      jn_id: job.jn_id, job_id: job.id, location_id: job.location_id || null,
+      scheduled_date: today, scheduled_time: null, slot_start_min: null, slot_end_min: null,
+      task_type: kind, status: 'in_progress', notes: 'Logged from the Scope tab',
+      assigned_to_ids: [actor.id], block_kind: kind === 'demo' ? 'half_day' : 'window', crew_size: null,
+      jn_task_dirty: true,
+    };
+    if (kind === 'demo') { row.slot_start_min = 480; row.slot_end_min = 720; }
+    const made = await sbInsert('inspections', row);
+    const id = made && made.id;
+    if (!id) return res.status(502).json({ error: 'Could not create the visit' });
+    const full = await sbGet(`inspections?id=eq.${encodeURIComponent(id)}&select=*,jobs(id,name,client_name,address,status,lat,lng,location_id)`);
+    syncVisitJnTask(id).catch(() => {});
+    res.json({ ok: true, visit: (full && full[0]) || made });
+  } catch (err) {
+    console.error('[adhoc visit error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // Author + location tag for a visit's JobNimbus note.
 async function visitNoteContext(visit, actorId) {
   const out = { createdBy: null, tag: null, jnLocationId: null };
@@ -3836,16 +4089,18 @@ async function visitNoteContext(visit, actorId) {
 
 // Shared by the token route and the signed-in route.
 async function completeVisit({ visitId, pct, note, actor, source }) {
-  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,assigned_to_ids,completion_pct,location_id,demo_report');
+  const visit = await loadVisit(visitId, `id,jn_id,task_type,status,assigned_to_ids,completion_pct,location_id,${REPORT_COLUMNS.join(',')}`);
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
   if (visit.status === 'cancelled') return { status: 409, body: { error: 'This visit was cancelled' } };
   let p = Number(pct);
   if (visit.task_type !== 'demo') p = 100;
   if (![25, 50, 75, 100].includes(p)) return { status: 400, body: { error: 'pct must be 25, 50, 75 or 100' } };
-  // Techs must finish the post-demo report before leaving (dispatchers in the
+  // Techs must finish the visit's report before leaving (dispatchers in the
   // app may override — the UI shows an explicit warning).
-  if (visit.task_type === 'demo' && p === 100 && source === 'tech_link' && !isDemoReportComplete(visit.demo_report)) {
-    return { status: 409, body: { error: 'Finish the post-demo report first', code: 'REPORT_REQUIRED' } };
+  const spec = REPORT_KINDS[visit.task_type];
+  const report = reportOf(visit);
+  if (spec && spec.requiredFromTechLink && p === 100 && source === 'tech_link' && !spec.isComplete(report)) {
+    return { status: 409, body: { error: `Finish the ${spec.label} first`, code: 'REPORT_REQUIRED' } };
   }
   const cleanNote = String(note || '').trim().slice(0, 2000) || null;
 
@@ -3865,14 +4120,14 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
   });
   let update = await sbInsert('visit_updates', {
     visit_id: visitId, actor_id: actor.id || null, actor_name: actor.name, source, pct: p, note: cleanNote,
-    report_snapshot: visit.demo_report || null,
+    report_snapshot: report || null,
   });
   if (!update) {
     const latest = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
     update = (latest && latest[0]) || { id: null };
   }
   const noteText = visitNoteText(visit, p, actor.name, cleanNote)
-    + (visit.demo_report ? '\n\n' + summarizeDemoReport(visit.demo_report) : '');
+    + (report ? '\n\n' + summarizeVisitReport(visit.task_type, report) : '');
   const jn = await jnAddNote(visit.jn_id, noteText, await visitNoteContext(visit, actor.id));
   const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
   await Promise.all([
@@ -3887,14 +4142,14 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
 
 // Re-post the JN note for the latest failed update.
 async function retryVisitJn(visitId) {
-  const visit = await loadVisit(visitId, 'id,jn_id,task_type,status,location_id,demo_report');
+  const visit = await loadVisit(visitId, `id,jn_id,task_type,status,location_id,${REPORT_COLUMNS.join(',')}`);
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
   const rows = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
   const upd = rows && rows[0];
   if (!upd) return { status: 404, body: { error: 'Nothing to retry' } };
   if (!upd.jn_note_error) return { status: 200, body: { ok: true, jn: { ok: true, id: upd.jn_note_id } } };
-  const report = upd.report_snapshot || visit.demo_report;
-  const retryText = visitNoteText(visit, upd.pct, upd.actor_name, upd.note) + (report ? '\n\n' + summarizeDemoReport(report) : '');
+  const report = upd.report_snapshot || reportOf(visit);
+  const retryText = visitNoteText(visit, upd.pct, upd.actor_name, upd.note) + (report ? '\n\n' + summarizeVisitReport(visit.task_type, report) : '');
   const jn = await jnAddNote(visit.jn_id, retryText, await visitNoteContext(visit, upd.actor_id));
   const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
   await Promise.all([
@@ -4153,7 +4408,7 @@ function buildJnTaskBody(v, job, techs, settings, taskType, tz) {
     String(v.notes || '').trim() || null,
     `${blockLine(v, settings)}${crew ? ` · crew of ${crew}` : ''}`,
     unlinked.length ? `Assigned (no JobNimbus user): ${unlinked.join(', ')}` : null,
-    v.demo_report ? demoReportTaskLine(v.demo_report) : null,
+    REPORT_KINDS[v.task_type] && reportOf(v) ? REPORT_KINDS[v.task_type].taskLine(reportOf(v)) : null,
     'Scheduled in DryOps',
   ].filter(Boolean);
   const body = {
@@ -4189,7 +4444,7 @@ function visitFingerprint(v) {
 }
 
 const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,slot_start_min,slot_end_min,block_kind,crew_size,task_type,status,notes,' +
-  'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,demo_report,jobs(name,client_name,location_id,jn_location_id)';
+  'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,demo_report,monitor_report,inspection_report,jobs(name,client_name,location_id,jn_location_id)';
 
 const visitSyncLocks = new Set();
 // The one entry point for routes, completeVisit and the sweep.
@@ -5507,6 +5762,23 @@ async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
   return { photos: photos.length, failed, parts: groups.length, rung: `${rung.px}px q${rung.quality}`, uploaded };
 }
 
+// Work Complete → the owner reviews the scope sheet before it goes to the
+// estimator: flag the job (Dashboard "Scope sheet to review") and alert the
+// location's Telegram / Slack channels subscribed to `scope_review`.
+async function flagScopeReview(jobJnId) {
+  const rows = await sbGet(`jobs?jn_id=eq.${encodeURIComponent(jobJnId)}&select=id,name,client_name,address,location_id,record_type`);
+  const job = rows && rows[0];
+  if (!job || job.record_type !== 'Mitigation') return;
+  await sbPatch('jobs', `id=eq.${encodeURIComponent(job.id)}`, { scope_review_requested_at: new Date().toISOString() });
+  const { notifyChannels } = require('./notify');
+  const appUrl = (process.env.WEB_APP_URL || 'https://dryops.app').replace(/\/$/, '');
+  await notifyChannels({
+    sbGet, events: ['scope_review'], locationId: job.location_id,
+    msg: { lines: [{ b: `📐 Scope sheet to review · ${job.name || job.client_name || jobJnId}` }, job.address ? { label: 'Address', value: job.address, prefix: '📍 ' } : '', 'Work Complete — generate and review the Xactimate scope sheet before it goes to the estimator.'].filter((l) => l !== ''), buttons: [{ text: 'Open in DryOps', url: `${appUrl}/jobs/${job.id}` }, { text: 'Open in JobNimbus', url: `https://app.jobnimbus.com/job/${encodeURIComponent(jobJnId)}` }] },
+    log: (...a) => console.warn('[scope-review notify]', ...a),
+  });
+}
+
 // The URL for the JobNimbus automation (status = Work Complete → webhook):
 //   https://dryops-server-production.up.railway.app/webhooks/jobnimbus/photo-report?token=<JN_WEBHOOK_TOKEN>
 // Extras for manual runs: &force=1 skips the status guard, &dryrun=1 writes
@@ -5526,6 +5798,7 @@ app.post('/webhooks/jobnimbus/photo-report', async (req, res) => {
     return res.json({ ok: true, skipped: `status ${status || '(none)'}` });
   }
   console.log('[photo-report] queued for', jnid, 'status=', status || '(forced)');
+  flagScopeReview(String(jnid)).catch((e) => console.warn('[scope-review] flag failed', e.message));
   if (req.query.dryrun === '1') {
     try { return res.json({ ok: true, dryrun: true, ...(await generatePhotoReport(String(jnid), { dryrun: true })) }); }
     catch (err) { console.error('[photo-report] dryrun failed:', err.message); return res.status(500).json({ error: err.message }); }

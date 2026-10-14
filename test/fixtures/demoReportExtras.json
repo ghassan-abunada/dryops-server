@@ -1,0 +1,150 @@
+{
+  "input": {
+    "v": 1,
+    "pre_docusketch": true,
+    "equipment_staged": "moved",
+    "rooms": [
+      {
+        "name": "Kitchen",
+        "profile": "kitchen",
+        "dims": {
+          "length_ft": 12,
+          "width_ft": 10,
+          "ceiling_ft": 8
+        },
+        "flooring": {
+          "removed": true,
+          "types": [
+            "LVP/LVT",
+            "Subfloor (wood)"
+          ],
+          "sqft": null
+        },
+        "baseboard": {
+          "kind": "full_perimeter",
+          "lf": null
+        },
+        "drywall": {
+          "kind": "flood_cut_2ft",
+          "perimeter": true,
+          "lf": null,
+          "sqft": null,
+          "insulation_removed": true
+        },
+        "cabinets": {
+          "removed": [
+            "Base cabinets",
+            "Upper cabinets"
+          ],
+          "lf": {
+            "Base cabinets": 10,
+            "Upper cabinets": 8
+          }
+        },
+        "appliances": [
+          "Refrigerator",
+          "Dishwasher"
+        ],
+        "cabinets_removed": true,
+        "appliances_detached": true,
+        "special_work": "island plumbing capped",
+        "equipment_left": {
+          "Air Mover": 4,
+          "Dehumidifier": 1,
+          "Air Scrubber": 0,
+          "Drying Mats": 0
+        },
+        "extras": {
+          "doors": 2,
+          "doors_removed": 1,
+          "drill_holes": 12,
+          "door_jamb_lf": null,
+          "trim_lf": null,
+          "toe_kick_lf": 6.5,
+          "countertop_sf": null,
+          "tack_strip_lf": null,
+          "shelves_lf": null,
+          "insulation_lf": 12,
+          "dehu_large": 1,
+          "dehu_xl": null,
+          "tile_on_slab": null
+        }
+      },
+      {
+        "name": "Hallway",
+        "profile": "other",
+        "dims": null,
+        "flooring": {
+          "removed": true,
+          "types": [
+            "Carpet",
+            "Carpet pad"
+          ],
+          "sqft": 220
+        },
+        "baseboard": {
+          "kind": "partial",
+          "lf": 20
+        },
+        "drywall": {
+          "kind": "full_walls",
+          "perimeter": null,
+          "lf": null,
+          "sqft": 220,
+          "insulation_removed": false
+        },
+        "cabinets": {
+          "removed": [],
+          "lf": {}
+        },
+        "appliances": [],
+        "cabinets_removed": false,
+        "appliances_detached": false,
+        "special_work": null,
+        "equipment_left": {
+          "Air Mover": 2,
+          "Dehumidifier": 0,
+          "Air Scrubber": 0,
+          "Drying Mats": 0
+        }
+      }
+    ],
+    "antimicrobial": true,
+    "cleaned_floors_cavities": true,
+    "equipment_reset": true,
+    "photos_detailed": true,
+    "photos_wide": true,
+    "photo_count": 24,
+    "post_docusketch": true,
+    "completed_time": "15:45",
+    "notes": "homeowner asked to keep the hallway runner",
+    "extras": {
+      "arrival_time": "08:30",
+      "after_hours": false,
+      "haul_debris_loads": 2,
+      "cleaning": {
+        "kind": "light",
+        "sf": null
+      },
+      "antimicrobial": {
+        "coverage": "more_than_floor",
+        "sf": null
+      },
+      "protection": {
+        "containment": {
+          "setup": true,
+          "sf": 120,
+          "zippers": 2,
+          "tension_posts": 4
+        },
+        "floor_protection": {
+          "type": "neoprene_runners",
+          "sf": null,
+          "runners": 2
+        },
+        "protective_plastic_sf": 100
+      }
+    }
+  },
+  "expected_summary": "POST-DEMO REPORT\nDocuSketch: pre ✓ · post ✓\nEquipment on arrival: moved to a non-demo room\nProtection: containment 120 sq ft, 2 zippers, 4 tension posts · floor protection neoprene runners ×2 · plastic 100 sq ft\nRooms (2):\n• Kitchen (12×10, 8 ft ceiling) — floor removed: LVP/LVT, Subfloor (wood) (120 sq ft); baseboard removed: full perimeter (44 LF); walls: 2 ft flood cut, full perimeter (44 LF, ~88 sq ft), insulation removed; cabinets removed: base cabinets (10 LF), upper cabinets (8 LF); detached: refrigerator, dishwasher; special: island plumbing capped; left: 4 air movers, 1 dehumidifier; extras: 2 doors, 1 door removed, 12 drill holes, toe kick 6.5 LF, insulation 12 LF, dehu 1 large\n• Hallway — floor removed: Carpet, Carpet pad (220 sq ft); baseboard removed: partial (20 LF); walls: full walls (~220 sq ft); left: 2 air movers\nAfter demo: antimicrobial ✓ · floors & cavities cleaned ✓ · equipment reset ✓\nCleaning: light · antimicrobial more than the floor · 2 debris loads\nEquipment left on site: 6 air movers, 1 dehumidifier\nPhotos: detailed ✓ · wide ✓ (24)\nCompleted 3:45 PM\nNotes: homeowner asked to keep the hallway runner"
+}
