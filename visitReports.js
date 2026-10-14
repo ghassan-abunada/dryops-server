@@ -65,7 +65,7 @@ function validateMonitorReport(raw) {
         qty_present: intIn(e.qty_present, `${label} equipment ${k + 1} present`, 0, 99, 0),
       };
     }).filter(Boolean);
-    const want = equipment.filter((e) => isDehu(e.type)).reduce((n, e) => n + e.qty_present, 0);
+    const want = raw.fire === true ? 0 : equipment.filter((e) => isDehu(e.type)).reduce((n, e) => n + e.qty_present, 0);
     const outlets = (Array.isArray(r.dehu_outlets) ? r.dehu_outlets : []).slice(0, want).map((o, k) => reading(o, `${label} dehumidifier ${k + 1} outlet`, true) || { temp_f: null, rh: null });
     while (outlets.length < want) outlets.push({ temp_f: null, rh: null });
     return {
@@ -86,6 +86,7 @@ function validateMonitorReport(raw) {
     rooms: outRooms,
     photos_taken: raw.photos_taken === true,
     notes: text(raw.notes, 'notes', 2000),
+    ...(raw.fire === true ? { fire: true } : {}),
   };
   if (JSON.stringify(report).length > 64 * 1024) errors.push('report is too large');
   return errors.length ? { ok: false, errors } : { ok: true, report };
@@ -97,8 +98,9 @@ const readingComplete = (r) => !!r && r.temp_f != null && r.rh != null;
 const dryStandard = (m) => (m.dry_standard_mc != null ? m.dry_standard_mc : DRY_STANDARD_DEFAULT);
 const isDry = (mc, standard) => mc != null && mc <= standard;
 
-function isMonitorRoomComplete(room) {
+function isMonitorRoomComplete(room, fire = false) {
   if (!room || !String(room.name || '').trim()) return false;
+  if (fire) return true;   // scrubber counts only
   if (!readingComplete(room.reading)) return false;
   if ((room.materials || []).some((m) => m.mc == null)) return false;
   if ((room.dehu_outlets || []).some((o) => !readingComplete(o))) return false;
@@ -110,8 +112,8 @@ function isMonitorReportComplete(r) {
   if (!r || Number(r.v) !== 1 || r.kind !== 'monitor') return false;
   if (!DATE_RE.test(r.session_date || '')) return false;
   if (!TIME_RE.test(r.arrival_time || '')) return false;
-  if (!readingComplete(r.outside)) return false;
-  if (!Array.isArray(r.rooms) || !r.rooms.length || !r.rooms.every(isMonitorRoomComplete)) return false;
+  if (!r.fire && !readingComplete(r.outside)) return false;
+  if (!Array.isArray(r.rooms) || !r.rooms.length || !r.rooms.every((x) => isMonitorRoomComplete(x, !!r.fire))) return false;
   if (!r.photos_taken) return false;
   return true;
 }
@@ -175,15 +177,15 @@ function materialPhrase(m) {
   return s;
 }
 
-function monitorRoomLine(room) {
+function monitorRoomLine(room, fire = false) {
   const seg = [];
-  seg.push(fmtReading(room.reading));
+  if (!fire) seg.push(fmtReading(room.reading));
   if ((room.materials || []).length) seg.push(room.materials.map(materialPhrase).join(', '));
   const outlets = room.dehu_outlets || [];
   if (outlets.length) seg.push(outlets.map((o, i) => `dehu${outlets.length > 1 ? ` ${i + 1}` : ''} outlet ${fmtReading(o)}`).join(', '));
   const running = equipmentPhrase(countBy(room.equipment, (e) => e.qty_present));
   seg.push(running ? `equipment: ${running}` : 'no equipment running');
-  seg.push(room.dry == null ? 'dry: —' : room.dry ? 'dry' : 'not dry');
+  if (!fire) seg.push(room.dry == null ? 'dry: —' : room.dry ? 'dry' : 'not dry');
   if (room.notes && String(room.notes).trim()) seg.push(`note: ${String(room.notes).trim()}`);
   return `• ${room.name} — ${seg.join('; ')}`;
 }
@@ -207,13 +209,13 @@ function placedPhrase(r) {
 
 function summarizeMonitorReport(r) {
   const lines = [];
-  lines.push(`MONITOR REPORT · ${monthDay(r.session_date)}`);
+  lines.push(`MONITOR REPORT · ${monthDay(r.session_date)}${r.fire ? ' · fire' : ''}`);
   lines.push(`Arrived ${fmtClock(r.arrival_time)}${r.departure_time ? ` · left ${fmtClock(r.departure_time)}` : ''}`);
   if (readingComplete(r.outside)) lines.push(`Outside ${fmtReading(r.outside)}`);
   lines.push(`Rooms (${(r.rooms || []).length}):`);
-  for (const room of r.rooms || []) lines.push(monitorRoomLine(room));
+  for (const room of r.rooms || []) lines.push(monitorRoomLine(room, !!r.fire));
   const dryRooms = (r.rooms || []).filter((x) => x.dry === true).length;
-  lines.push(`Dry rooms: ${dryRooms} of ${(r.rooms || []).length}`);
+  if (!r.fire) lines.push(`Dry rooms: ${dryRooms} of ${(r.rooms || []).length}`);
   const pulled = pulledPhrase(r);
   if (pulled) lines.push(`Equipment pulled: ${pulled}`);
   const placed = placedPhrase(r);
@@ -227,6 +229,12 @@ function monitorTaskLine(r) {
   const n = (r.rooms || []).length;
   const dryRooms = (r.rooms || []).filter((x) => x.dry === true).length;
   const pulled = pulledPhrase(r);
+  if (r.fire) {
+    const running = {};
+    for (const room of r.rooms) for (const e of room.equipment || []) if (e.qty_present > 0) running[e.type] = (running[e.type] || 0) + e.qty_present;
+    const run = equipmentPhrase(running);
+    return `Monitor report (fire): ${run ? `${run} running` : 'no equipment running'}${pulled ? ` · pulled ${pulled}` : ''}`;
+  }
   return `Monitor report: ${dryRooms} of ${n} room${n === 1 ? '' : 's'} dry${pulled ? ` · pulled ${pulled}` : ''}`;
 }
 
@@ -241,6 +249,9 @@ const AFFECTED = ['walls', 'flooring', 'ceiling', 'cabinets', 'contents'];
 const AFFECTED_LABEL = { walls: 'Walls', flooring: 'Flooring', ceiling: 'Ceiling', cabinets: 'Cabinets', contents: 'Contents' };
 const EXTERIOR_WALLS = ['none', 'long', 'short', 'both', 'custom'];
 const INSPECTION_EQUIPMENT = ['Air Mover', 'Dehumidifier', 'Dehumidifier - Large', 'Dehumidifier - XL', 'Air Scrubber', 'Drying Mats'];
+const FIRE_CLEANING = ['walls_ceiling', 'floor', 'baseboard', 'doors', 'cabinets', 'countertop', 'appliances', 'framing'];
+const FIRE_CLEANING_LABEL = { walls_ceiling: 'Walls & ceiling', floor: 'Floor', baseboard: 'Baseboard', doors: 'Doors', cabinets: 'Cabinets', countertop: 'Countertop', appliances: 'Appliances', framing: 'Exposed framing' };
+const isFire = (r) => !!r && r.loss_type === 'fire';
 
 function validateInspectionReport(raw) {
   const errors = [];
@@ -286,6 +297,19 @@ function validateInspectionReport(raw) {
     const affected = (Array.isArray(r.affected) ? r.affected : []).filter((a) => AFFECTED.includes(a)).slice(0, 5);
     const equipment = {};
     for (const t of INSPECTION_EQUIPMENT) equipment[t] = intIn(r.equipment && r.equipment[t], `${label} ${t}`, 0, 99) || 0;
+    let fire;
+    if (r.fire && typeof r.fire === 'object') {
+      const f = r.fire; const d = f.detach && typeof f.detach === 'object' ? f.detach : {};
+      fire = {
+        soot: oneOf(f.soot, ['light', 'heavy']),
+        cleaning: (Array.isArray(f.cleaning) ? f.cleaning : []).filter((c) => FIRE_CLEANING.includes(c)).slice(0, 8),
+        detach: { outlets: intIn(d.outlets, `${label} outlets`, 0, 99) || 0, light_fixtures: intIn(d.light_fixtures, `${label} light fixtures`, 0, 99) || 0, registers: intIn(d.registers, `${label} registers`, 0, 99) || 0, blinds: intIn(d.blinds, `${label} blinds`, 0, 99) || 0 },
+        cabinets_lf: { lower: numIn(f.cabinets_lf && f.cabinets_lf.lower, `${label} lower cabinets`, 0, 1000), upper: numIn(f.cabinets_lf && f.cabinets_lf.upper, `${label} upper cabinets`, 0, 1000) },
+        countertop_sf: numIn(f.countertop_sf, `${label} countertop`, 0, 10000),
+        appliances: (Array.isArray(f.appliances) ? f.appliances : []).filter((a) => typeof a === 'string' && a.trim()).map((a) => a.trim().slice(0, 40)).slice(0, 12),
+        seal_framing: boolOrNull(f.seal_framing),
+      };
+    }
     return {
       room_id: id(r.room_id), name, profile: ['kitchen', 'bathroom', 'laundry', 'other'].includes(r.profile) ? r.profile : 'other', dims, affected,
       flooring: { type: text(r.flooring && r.flooring.type, `${label} flooring`, 40), on_slab: boolOrNull(r.flooring && r.flooring.on_slab) },
@@ -298,6 +322,7 @@ function validateInspectionReport(raw) {
       equipment,
       photos_taken: r.photos_taken === true,
       notes: text(r.notes, `${label} notes`, 500),
+      ...(fire ? { fire } : {}),
     };
   }).filter(Boolean);
 
@@ -330,6 +355,10 @@ function validateInspectionReport(raw) {
       containment_sf: numIn(e.containment_sf, 'containment', 0, 100000),
       ppe: e.ppe && typeof e.ppe === 'object' ? { techs: intIn(e.ppe.techs, 'PPE techs', 0, 99) || 0, days: intIn(e.ppe.days, 'PPE days', 0, 99) || 0 } : null,
     },
+    ...(raw.fire && typeof raw.fire === 'object' ? { fire: {
+      hepa_filters: intIn(raw.fire.hepa_filters, 'HEPA filters', 0, 999), supervisory_hours: numIn(raw.fire.supervisory_hours, 'supervisory hours', 0, 1000),
+      dumpster_loads: intIn(raw.fire.dumpster_loads, 'dumpster loads', 0, 99), ozone: boolOrNull(raw.fire.ozone), ozone_cf: numIn(raw.fire.ozone_cf, 'ozone CF', 0, 10000000),
+    } } : {}),
     moisture_map: raw.moisture_map === true,
     photos_taken: raw.photos_taken === true,
     notes: text(raw.notes, 'notes', 2000),
@@ -340,12 +369,16 @@ function validateInspectionReport(raw) {
 
 const needsWaterClass = (r) => r.loss_type === 'water' || r.loss_type == null;
 
-function isInspectionRoomComplete(room) {
+function isInspectionRoomComplete(room, fire = false) {
   if (!room || !String(room.name || '').trim()) return false;
   if (!(room.affected || []).length) return false;
   if ((room.affected || []).includes('flooring') && !(room.flooring && room.flooring.type)) return false;
-  if ((room.materials || []).some((m) => m.mc == null)) return false;
-  if (!readingComplete(room.reading)) return false;
+  if (fire) {
+    if (!room.fire || !room.fire.soot) return false;
+  } else {
+    if ((room.materials || []).some((m) => m.mc == null)) return false;
+    if (!readingComplete(room.reading)) return false;
+  }
   if (!room.photos_taken) return false;
   return true;
 }
@@ -354,9 +387,10 @@ function isInspectionReportComplete(r) {
   if (!TIME_RE.test(r.arrival_time || '')) return false;
   if (!r.loss_type || !r.source) return false;
   if (needsWaterClass(r) && (r.category == null || r.class == null)) return false;
-  if (!readingComplete(r.outside)) return false;
+  const fire = isFire(r);
+  if (!fire && !readingComplete(r.outside)) return false;
   if (r.docusketch == null) return false;
-  if (!Array.isArray(r.rooms) || !r.rooms.length || !r.rooms.every(isInspectionRoomComplete)) return false;
+  if (!Array.isArray(r.rooms) || !r.rooms.length || !r.rooms.every((x) => isInspectionRoomComplete(x, fire))) return false;
   const e = r.emergency || {};
   if (e.performed == null) return false;
   if (e.performed && e.extraction && e.extraction.floor && !e.extraction.whole_room && !(e.extraction.sf > 0)) return false;
@@ -388,11 +422,43 @@ function lossLine(r) {
   return parts.join(' · ');
 }
 
+function fireRoomSegments(f) {
+  const seg = [];
+  if (f.soot) seg.push(`soot: ${f.soot}`);
+  const det = [];
+  const d = f.detach || {};
+  if (d.outlets) det.push(`${d.outlets} outlet${d.outlets === 1 ? '' : 's'}`);
+  if (d.light_fixtures) det.push(`${d.light_fixtures} light fixture${d.light_fixtures === 1 ? '' : 's'}`);
+  if (d.registers) det.push(`${d.registers} register${d.registers === 1 ? '' : 's'}`);
+  if (d.blinds) det.push(`${d.blinds} blind${d.blinds === 1 ? '' : 's'}`);
+  if (det.length) seg.push(`detach: ${det.join(', ')}`);
+  const cl = f.cleaning || [];
+  if (cl.length) {
+    seg.push(`clean: ${cl.map((c) => {
+      if (c === 'cabinets') { const lf = f.cabinets_lf || {}; const p = [lf.lower != null ? `lower ${fmtQty(lf.lower)} LF` : null, lf.upper != null ? `upper ${fmtQty(lf.upper)} LF` : null].filter(Boolean); return `cabinets${p.length ? ` (${p.join(', ')})` : ''}`; }
+      if (c === 'countertop') return `countertop${f.countertop_sf != null ? ` ${fmtQty(f.countertop_sf)} sq ft` : ''}`;
+      if (c === 'appliances') return `appliances${(f.appliances || []).length ? ` (${f.appliances.map((a) => a.toLowerCase()).join(', ')})` : ''}`;
+      if (c === 'framing') return `framing${f.seal_framing ? ' (seal)' : ''}`;
+      return FIRE_CLEANING_LABEL[c].toLowerCase();
+    }).join(', ')}`);
+  }
+  return seg;
+}
+function fireLine(f) {
+  if (!f) return '';
+  const parts = [];
+  if (f.hepa_filters) parts.push(`${f.hepa_filters} HEPA filter${f.hepa_filters === 1 ? '' : 's'}`);
+  if (f.supervisory_hours) parts.push(`supervisory ${fmtQty(f.supervisory_hours)} h`);
+  if (f.dumpster_loads) parts.push(`${f.dumpster_loads} dumpster load${f.dumpster_loads === 1 ? '' : 's'}`);
+  if (f.ozone) parts.push(`ozone${f.ozone_cf ? ` ${fmtQty(f.ozone_cf)} CF` : ''}`);
+  return parts.length ? `Fire: ${parts.join(' · ')}` : '';
+}
+
 function inspectionRoomLine(room, dry) {
   const seg = [];
   const dims = dimsLabel(room.dims);
   const head = dims ? `• ${room.name} (${dims}) — ` : `• ${room.name} — `;
-  seg.push(fmtReading(room.reading));
+  if (!room.fire || readingComplete(room.reading)) seg.push(fmtReading(room.reading));
   if ((room.affected || []).length) seg.push(`affected: ${room.affected.map((a) => AFFECTED_LABEL[a].toLowerCase()).join(', ')}`);
   if (room.flooring && room.flooring.type) seg.push(`${room.flooring.type}${room.flooring.on_slab ? ' on slab' : ''}`);
   if ((room.materials || []).length) {
@@ -401,6 +467,7 @@ function inspectionRoomLine(room, dry) {
       return `${m.type} ${m.mc != null ? `${fmtQty(m.mc)}%` : '—'}${std != null ? ` (dry ${fmtQty(std)}%)` : ''}`;
     }).join(', '));
   }
+  if (room.fire) seg.push(...fireRoomSegments(room.fire));
   const open = [];
   if (room.doors != null) open.push(`${room.doors} door${room.doors === 1 ? '' : 's'}`);
   const ext = exteriorWallLF(room);
@@ -441,6 +508,8 @@ function summarizeInspectionReport(r) {
   for (const room of r.rooms || []) lines.push(inspectionRoomLine(room, r.dry_standards || {}));
   const ds = Object.entries(r.dry_standards || {}).filter(([, v]) => v != null);
   if (ds.length) lines.push(`Dry standards: ${ds.map(([k, v]) => `${k} ${fmtQty(v)}%`).join(', ')}`);
+  const fl = fireLine(r.fire);
+  if (fl) lines.push(fl);
   lines.push(emergencyLine(r.emergency));
   if (r.notes && String(r.notes).trim()) lines.push(`Notes: ${String(r.notes).trim()}`);
   return lines.join('\n');

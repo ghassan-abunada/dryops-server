@@ -105,3 +105,31 @@ test('closeout validation clamps removed to on-site, whitelists, and is optional
   assert.strictEqual(kinds.closeout.column, 'closeout_report');
   assert.strictEqual(kinds.closeout.requiredFromTechLink, false);
 });
+
+// Fire branch (phase f): shared fixtures with the app.
+const fireInsp = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'inspectionReportFire.json'), 'utf8'));
+const fireMon = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'monitorReportFire.json'), 'utf8'));
+
+test('fire inspection summary matches the shared fixture byte for byte', () => {
+  const v = validateInspectionReport(fireInsp.input);
+  assert.ok(v.ok, JSON.stringify(v.errors));
+  assert.strictEqual(summarizeInspectionReport(v.report), fireInsp.expected_summary);
+  assert.strictEqual(inspectionTaskLine(v.report), fireInsp.expected_task_line);
+  assert.strictEqual(isInspectionReportComplete(v.report), true);
+  assert.deepStrictEqual(v.report.rooms[0].fire.cabinets_lf, { lower: 10, upper: 8 });
+  assert.strictEqual(v.report.fire.hepa_filters, 4);
+  // water reports never gain fire keys
+  const w = validateInspectionReport(inspection.input);
+  assert.strictEqual('fire' in w.report, false);
+  assert.strictEqual(w.report.rooms.some((r) => 'fire' in r), false);
+});
+
+test('fire monitor summary matches the shared fixture byte for byte', () => {
+  const v = validateMonitorReport(fireMon.input);
+  assert.ok(v.ok, JSON.stringify(v.errors));
+  assert.strictEqual(v.report.fire, true);
+  assert.strictEqual(summarizeMonitorReport(v.report), fireMon.expected_summary);
+  assert.strictEqual(monitorTaskLine(v.report), fireMon.expected_task_line);
+  assert.strictEqual(isMonitorReportComplete(v.report), true);
+  assert.strictEqual('fire' in validateMonitorReport(fixture.input).report, false);
+});
