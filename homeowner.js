@@ -35,7 +35,7 @@ const STAGE_BY_STATUS = {
   'Pending Approval': 'inspection', 'Customer Requested Hold': 'inspection', 'Revision Requested': 'inspection',
   'Scheduled': 'demo', 'Pending Results': 'demo', 'Pending Abatement': 'demo',
   'In Progress': 'drying',
-  'Work Complete': 'pickup',
+  'Work Complete': 'complete',   // already closed out (equipment pulled)
   'Invoice Created': 'complete', 'Invoiced': 'complete', 'Pending Payment': 'complete', 'Payment Plan': 'complete',
   'Paid & Closed': 'complete', 'Attorney': 'complete', 'Public Adjuster': 'complete',
 };
