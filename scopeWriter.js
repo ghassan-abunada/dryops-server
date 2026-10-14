@@ -25,6 +25,18 @@ module.exports = function createScopeWriter(deps) {
     if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 300)}`);
   }
 
+  /**
+   * Insert a row and return it. On this project POST sometimes answers with an
+   * empty body even though the row was written (sbInsert then returns null), so
+   * fall back to re-selecting it by `findQuery` (newest first).
+   */
+  async function insertAndFind(table, row, findQuery) {
+    const made = await sbInsert(table, row);
+    if (made && made.id) return made;
+    const rows = await sbGet(`${table}?${findQuery}&order=created_at.desc&limit=1`);
+    return rows && rows[0] ? rows[0] : null;
+  }
+
   /** The job's session for `date`, created when missing. */
   async function sessionFor(jobId, date, actorId) {
     const rows = await sbGet(`moisture_sessions?job_id=eq.${enc(jobId)}&session_date=eq.${enc(date)}&select=id&order=created_at&limit=1`);
@@ -45,7 +57,7 @@ module.exports = function createScopeWriter(deps) {
     const hit = (rows || []).find((r) => String(r.name || '').trim().toLowerCase() === key);
     let id = hit ? hit.id : null;
     if (!id) {
-      const made = await sbInsert('rooms', { job_id: jobId, name: String(room.name).trim(), sort_order: (rows || []).length });
+      const made = await insertAndFind('rooms', { job_id: jobId, name: String(room.name).trim(), sort_order: (rows || []).length }, `job_id=eq.${enc(jobId)}&name=eq.${enc(String(room.name).trim())}&select=id`);
       id = made && made.id ? made.id : null;
     }
     cache.set(key, id);
@@ -105,7 +117,7 @@ module.exports = function createScopeWriter(deps) {
           }
         } else if (e.qty_present > 0) {
           out.placed += e.qty_present;
-          const made = await sbInsert('equipment', { room_id: roomId, type: e.type, qty: e.qty_present, placed_on: date, placed_at: when(report.departure_time || report.arrival_time) });
+          const made = await insertAndFind('equipment', { room_id: roomId, type: e.type, qty: e.qty_present, placed_on: date, placed_at: when(report.departure_time || report.arrival_time) }, `room_id=eq.${enc(roomId)}&type=eq.${enc(e.type)}&placed_on=eq.${enc(date)}&select=id`);
           if (made && made.id) {
             checks.push({ session_id: sessionId, equipment_id: made.id, qty_present: e.qty_present });
             if (isDehu(e.type)) for (let i = 0; i < e.qty_present; i++) dehuIds.push(made.id);
@@ -169,7 +181,7 @@ module.exports = function createScopeWriter(deps) {
       if (roomId) {
         if (Object.keys(roomPatch).length) await sbPatch('rooms', `id=eq.${enc(roomId)}`, roomPatch);
       } else {
-        const made = await sbInsert('rooms', { job_id: jobId, name: String(room.name).trim(), sort_order: order++, ...roomPatch });
+        const made = await insertAndFind('rooms', { job_id: jobId, name: String(room.name).trim(), sort_order: order++, ...roomPatch }, `job_id=eq.${enc(jobId)}&name=eq.${enc(String(room.name).trim())}&select=id`);
         roomId = made && made.id;
         if (roomId) existingRooms.push({ id: roomId, name: room.name });
       }
@@ -190,7 +202,7 @@ module.exports = function createScopeWriter(deps) {
           if (dry != null) patch.dry_standard_mc = dry;
           if (Object.keys(patch).length) await sbPatch('materials', `id=eq.${enc(row.id)}`, patch);
         } else {
-          row = await sbInsert('materials', { room_id: roomId, type: m.type, initial_mc: m.mc, dry_standard_mc: dry, demoed: false });
+          row = await insertAndFind('materials', { room_id: roomId, type: m.type, initial_mc: m.mc, dry_standard_mc: dry, demoed: false }, `room_id=eq.${enc(roomId)}&type=eq.${enc(m.type)}&select=id`);
           if (row && row.id) mats.push({ id: row.id, type: m.type, demoed: false });
         }
         out.materials += 1;
