@@ -6533,6 +6533,13 @@ require('./intake')(app, {
   syncVisitJnTask, loadScheduleSettings, fmtMin,
 });
 
+// Testing job from a testing work order (JN automation webhook → Testing job
+// on the ATS location with the standing owners; see testingJobs.js).
+require('./testingJobs')(app, {
+  webhookTokenOk, unwrapRecord, sbGet,
+  jnSendJson, jnGetJson, jnAddNote, jnFetchAccountUsers,
+});
+
 // Homeowner portal API (dryops.app/h/<token>; see homeowner.js) — links,
 // window choice, prefs, claim info, photo uploads, requests → staff; stage
 // texts via hooks.jobStatusChanged. Then the window-offer flow (hoWindows.js):

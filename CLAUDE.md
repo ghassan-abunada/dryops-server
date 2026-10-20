@@ -120,6 +120,57 @@ server.js for eligibility rules and dedupe logic.
   suppResolveRecipients as 5th arg; env SUPP_NOTIFY_OVERRIDES is fallback only).
   Live JN pool cached 5 min (?refresh=1). Schema: supabase_supp_admin.sql.
 
+## Testing job from a testing work order (testingJobs.js)
+
+A JobNimbus automation on **work order created** (record types Asbestos /
+Soot / Mold Testing — the ones sent to Abatement Testing Services) POSTs the
+work order to `POST /webhooks/jobnimbus/testing-workorder?token=<JN_WEBHOOK_TOKEN>`.
+The server creates the Testing job the ATS office used to make by hand:
+
+- record type `Testing`, status `Lead`, primary/related = the source job's
+  primary contact, `external_id` = `testing-wo:<wo jnid>`
+- JN location: **Abatement Testing Services (198)** — except source jobs in
+  **Arizona or Hawaii**, which go to **White Tail Environmental (30)** like
+  the 1,400 AZ + 360 HI Testing jobs already there. State = the source job's
+  `state_text` (code or full name), else its JN location's state. Env
+  `TESTING_JOB_LOCATION_ID`, `TESTING_JOB_WHITE_TAIL_LOCATION_ID`,
+  `TESTING_JOB_WHITE_TAIL_STATES` (default `AZ,HI`).
+- name = source job name minus its `(…)` suffix + ` (CTY - TST)`; CTY is the
+  city code inside the source job's suffix (`(AFF - DAL - MIT)` → DAL,
+  `(POR-MIT)` → POR, `(SAN MIT)` → SAN). A job with no suffix borrows the
+  most common code among its JN location's 20 newest jobs (`Johnathan
+  Bolton` at Right-Now Restoration of Hawaii → OAH), else
+  `locations.city_abbr`, else the JN location city, else the job's city.
+  Taken names get ` 2`, ` 3`…
+- owners (`DEFAULT_OWNER_RULES`, matched on the source job's city code, its
+  state, or words in its JN location name): Saleah Crawford + Jalisa Hill
+  (ATS) always; Dallas (DAL/TWM) + Dominick Garcia; San Antonio
+  (SA/SAN/SAT/AWD, "American Water Damage") + Will LeBrun; Colorado (DEN/COS,
+  CO) + Robert Martinez & Hershal Johnson; Arizona (AZ) + Derek Lewis WTE;
+  Detroit (DET, MI) + Jack Repokis; Oregon (POR/SLE/PDX, OR) + Ian Nelson;
+  Hawaii (HI) + Marwinjay Villegas. **Never Joe Brooks** (owner rule; he was
+  on ~85% of hand-made jobs until Oct 2026). Ids in `USERS`; env
+  `TESTING_JOB_OWNERS` / `TESTING_JOB_OWNERS_<RULE KEY>` (comma-separated JN
+  user ids, empty = nobody) replace one rule's owners.
+- lead source = JN source named like the source job's location company
+  (`American Fire and Flood of Dallas` → `American Fire and Flood`; active
+  sources preferred); Lead Type `cf_string_6` = `Internal Referral`;
+  `cf_string_7` (insurance) from the WO, address/geo/claim/insurer/adjuster/
+  date of loss/CAT copied from the source job
+- notes: on the new job (tags the owners at the bottom, one per line) and on
+  the source job ("Testing job created: … (link)", with the location's
+  `jn_note_tag`)
+- idempotent: a redelivery finds the job by `external_id`; a contact with an
+  active Testing job from the last `TESTING_JOB_DEDUPE_DAYS` (90) days gets no
+  second one (asbestos + mold WOs on one loss = one job); concurrent
+  deliveries share one in-flight run. Non-testing WOs are skipped (`?any=1`
+  overrides). The jobs webhook mirrors the new job into Supabase on its own.
+- test without writing: `?dryrun=1` (or `TESTING_JOB_DRYRUN=1`), and a body of
+  just `{"jnid":"<work order jnid>"}` is loaded from JobNimbus — so
+  `curl -X POST '…/webhooks/jobnimbus/testing-workorder?token=…&dryrun=1' -H 'Content-Type: application/json' -d '{"jnid":"<wo>"}'`
+  returns the full payload it would send. `test/testingJobs.test.js` covers
+  the parser, owner rules, source match and a full fake-deps run.
+
 ## Collections classifier (owner Collections tab)
 
 `collections.js` reads each **Open AR** job's JobNimbus notes with a cheap LLM
