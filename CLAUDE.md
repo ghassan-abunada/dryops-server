@@ -120,6 +120,44 @@ server.js for eligibility rules and dedupe logic.
   suppResolveRecipients as 5th arg; env SUPP_NOTIFY_OVERRIDES is fallback only).
   Live JN pool cached 5 min (?refresh=1). Schema: supabase_supp_admin.sql.
 
+## Testing job from a testing work order (testingJobs.js)
+
+A JobNimbus automation on **work order created** (record types Asbestos /
+Soot / Mold Testing — the ones sent to Abatement Testing Services) POSTs the
+work order to `POST /webhooks/jobnimbus/testing-workorder?token=<JN_WEBHOOK_TOKEN>`.
+The server creates the Testing job the ATS office used to make by hand:
+
+- record type `Testing`, status `Lead`, JN location 198 (Abatement Testing
+  Services — every existing Testing job lives there), primary/related =
+  the source job's primary contact, `external_id` = `testing-wo:<wo jnid>`
+- name = source job name minus its `(…)` suffix + ` (CTY - TST)`; CTY is the
+  city code inside the source job's suffix (`(AFF - DAL - MIT)` → DAL,
+  `(POR-MIT)` → POR, `(SAN MIT)` → SAN), else `locations.city_abbr`, else
+  the JN location city. Taken names get ` 2`, ` 3`…
+- owners: Saleah Crawford + Jalisa Hill (ATS) always; + Dominick Garcia when
+  the city code is DAL or the source location name says Dallas; + Will LeBrun
+  for SA/SAN/SAT or "San Antonio". Ids in `USERS` in testingJobs.js; env
+  `TESTING_JOB_OWNERS`, `_DALLAS`, `_SAN_ANTONIO` (comma-separated JN user
+  ids) replace a rule set.
+- lead source = JN source named like the source job's location company
+  (`American Fire and Flood of Dallas` → `American Fire and Flood`; active
+  sources preferred); Lead Type `cf_string_6` = `Internal Referral`;
+  `cf_string_7` (insurance) from the WO, address/geo/claim/insurer/adjuster/
+  date of loss/CAT copied from the source job
+- notes: on the new job (tags the owners at the bottom, one per line) and on
+  the source job ("Testing job created: … (link)", with the location's
+  `jn_note_tag`)
+- idempotent: a redelivery finds the job by `external_id`; a contact with an
+  active Testing job from the last `TESTING_JOB_DEDUPE_DAYS` (90) days gets no
+  second one (asbestos + mold WOs on one loss = one job); concurrent
+  deliveries share one in-flight run. Non-testing WOs are skipped (`?any=1`
+  overrides). The jobs webhook mirrors the new job into Supabase on its own.
+- test without writing: `?dryrun=1` (or `TESTING_JOB_DRYRUN=1`), and a body of
+  just `{"jnid":"<work order jnid>"}` is loaded from JobNimbus — so
+  `curl -X POST '…/webhooks/jobnimbus/testing-workorder?token=…&dryrun=1' -H 'Content-Type: application/json' -d '{"jnid":"<wo>"}'`
+  returns the full payload it would send. `test/testingJobs.test.js` covers
+  the parser, owner rules, source match and a full fake-deps run.
+
 ## Collections classifier (owner Collections tab)
 
 `collections.js` reads each **Open AR** job's JobNimbus notes with a cheap LLM
