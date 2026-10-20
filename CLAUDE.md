@@ -127,13 +127,21 @@ Soot / Mold Testing — the ones sent to Abatement Testing Services) POSTs the
 work order to `POST /webhooks/jobnimbus/testing-workorder?token=<JN_WEBHOOK_TOKEN>`.
 The server creates the Testing job the ATS office used to make by hand:
 
-- record type `Testing`, status `Lead`, JN location 198 (Abatement Testing
-  Services — every existing Testing job lives there), primary/related =
-  the source job's primary contact, `external_id` = `testing-wo:<wo jnid>`
+- record type `Testing`, status `Lead`, primary/related = the source job's
+  primary contact, `external_id` = `testing-wo:<wo jnid>`
+- JN location: **Abatement Testing Services (198)** — except source jobs in
+  **Arizona or Hawaii**, which go to **White Tail Environmental (30)** like
+  the 1,400 AZ + 360 HI Testing jobs already there. State = the source job's
+  `state_text` (code or full name), else its JN location's state. Env
+  `TESTING_JOB_LOCATION_ID`, `TESTING_JOB_WHITE_TAIL_LOCATION_ID`,
+  `TESTING_JOB_WHITE_TAIL_STATES` (default `AZ,HI`).
 - name = source job name minus its `(…)` suffix + ` (CTY - TST)`; CTY is the
   city code inside the source job's suffix (`(AFF - DAL - MIT)` → DAL,
-  `(POR-MIT)` → POR, `(SAN MIT)` → SAN), else `locations.city_abbr`, else
-  the JN location city. Taken names get ` 2`, ` 3`…
+  `(POR-MIT)` → POR, `(SAN MIT)` → SAN). A job with no suffix borrows the
+  most common code among its JN location's 20 newest jobs (`Johnathan
+  Bolton` at Right-Now Restoration of Hawaii → OAH), else
+  `locations.city_abbr`, else the JN location city, else the job's city.
+  Taken names get ` 2`, ` 3`…
 - owners: Saleah Crawford + Jalisa Hill (ATS) always; + Dominick Garcia when
   the city code is DAL or the source location name says Dallas; + Will LeBrun
   for SA/SAN/SAT or "San Antonio". Ids in `USERS` in testingJobs.js; env

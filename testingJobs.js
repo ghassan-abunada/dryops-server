@@ -7,13 +7,17 @@
 // "Jeremy Eihausen (AFF - DAL - MIT)", 2026-10-20):
 //
 //   * record type Testing, status Lead, JobNimbus location "Abatement Testing
-//     Services" (198) like every existing Testing job
+//     Services" (198) like every existing Testing job — except Arizona and
+//     Hawaii losses, which go to "White Tail Environmental" (30) the way the
+//     office files them (state from the source job's address, else its
+//     JN location)
 //   * primary + related contact = the source job's primary contact
 //   * name = source job's name minus its "(…)" suffix + " (CTY - TST)", where
 //     CTY is the city code in the source job's own suffix: "(AFF - DAL - MIT)"
 //     → DAL, "(POR-MIT)" → POR, "(24 - DAL - MIT)" → DAL, "(SAN MIT)" → SAN.
-//     Falls back to the
-//     DryOps location's city_abbr, then the JN location's city.
+//     A job with no suffix borrows the code its location's other jobs use
+//     ("Johnathan Bolton" at Right-Now Restoration of Hawaii → OAH), then
+//     the DryOps location's city_abbr, the JN location's city, the job's city.
 //   * owners: Saleah Crawford + Jalisa Hill (ATS) on every job, plus Dominick
 //     Garcia for Dallas and Will LeBrun for San Antonio (by city code or the
 //     source location's name). Override with TESTING_JOB_OWNERS* env vars.
@@ -34,7 +38,8 @@
 //   test is one curl. ?dryrun=1 computes everything and writes nothing;
 //   ?any=1 skips the "is this a testing work order" gate.
 // Env: TESTING_JOB_DRYRUN=1 (log instead of writing; JN_INTAKE_DRYRUN=1 also
-//   counts), TESTING_JOB_LOCATION_ID (198), TESTING_JOB_OWNERS,
+//   counts), TESTING_JOB_LOCATION_ID (198), TESTING_JOB_WHITE_TAIL_LOCATION_ID
+//   (30), TESTING_JOB_WHITE_TAIL_STATES ("AZ,HI"), TESTING_JOB_OWNERS,
 //   TESTING_JOB_OWNERS_DALLAS, TESTING_JOB_OWNERS_SAN_ANTONIO (comma-separated
 //   JN user ids), TESTING_JOB_DEDUPE_DAYS (90).
 
@@ -49,6 +54,27 @@ const DEFAULT_OWNER_RULES = {
   always: [USERS.saleahCrawford, USERS.jalisaHillATS],
   dallas: [USERS.dominickGarcia],
   sanAntonio: [USERS.willLeBrun],
+};
+// JobNimbus locations the Testing jobs are filed under (account/settings →
+// locations, verified 2026-10-20: 6,844 Testing jobs on 198; 1,405 AZ + 361 HI
+// on 30, none of those on 198).
+const LOCATIONS = {
+  abatementTestingServices: 198,
+  whiteTailEnvironmental: 30,
+};
+const DEFAULT_LOCATION_RULES = {
+  default: LOCATIONS.abatementTestingServices,
+  whiteTail: LOCATIONS.whiteTailEnvironmental,
+  whiteTailStates: ['AZ', 'HI'],
+};
+const STATE_CODES = {
+  alabama: 'AL', alaska: 'AK', arizona: 'AZ', arkansas: 'AR', california: 'CA', colorado: 'CO', connecticut: 'CT', delaware: 'DE',
+  florida: 'FL', georgia: 'GA', hawaii: 'HI', idaho: 'ID', illinois: 'IL', indiana: 'IN', iowa: 'IA', kansas: 'KS', kentucky: 'KY',
+  louisiana: 'LA', maine: 'ME', maryland: 'MD', massachusetts: 'MA', michigan: 'MI', minnesota: 'MN', mississippi: 'MS', missouri: 'MO',
+  montana: 'MT', nebraska: 'NE', nevada: 'NV', 'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY',
+  'north carolina': 'NC', 'north dakota': 'ND', ohio: 'OH', oklahoma: 'OK', oregon: 'OR', pennsylvania: 'PA', 'rhode island': 'RI',
+  'south carolina': 'SC', 'south dakota': 'SD', tennessee: 'TN', texas: 'TX', utah: 'UT', vermont: 'VT', virginia: 'VA', washington: 'WA',
+  'west virginia': 'WV', wisconsin: 'WI', wyoming: 'WY', 'district of columbia': 'DC',
 };
 const DALLAS_CODES = new Set(['DAL']);
 const SAN_ANTONIO_CODES = new Set(['SA', 'SAN', 'SAT']);
@@ -92,6 +118,15 @@ function cityAbbrForCity(city) {
 function baseNameOf(jobName) {
   return clean(String(jobName || '').replace(TRAILING_PAREN_RE, ''));
 }
+// Most common non-null city code in a list (sibling jobs at the same JN
+// location: "Joe Walker (OAH-MIT) | Dane Hina (OAH-MIT) | Curtis Martin" → OAH).
+function mostCommonAbbr(codes) {
+  const counts = new Map();
+  for (const c of codes || []) if (c) counts.set(c, (counts.get(c) || 0) + 1);
+  let best = null, n = 0;
+  for (const [k, v] of counts) if (v > n) { best = k; n = v; }
+  return best;
+}
 function testingJobName(base, abbr, n = 1) {
   return `${base} (${abbr} - TST)${n > 1 ? ` ${n}` : ''}`;
 }
@@ -106,6 +141,20 @@ function testingOwnersFor({ abbr, locationName }, rules = DEFAULT_OWNER_RULES) {
   if (isDallas(abbr, locationName)) out.push(...(rules.dallas || []));
   if (isSanAntonio(abbr, locationName)) out.push(...(rules.sanAntonio || []));
   return uniq(out);
+}
+// "TX" / "Texas" / " tx " → "TX"; anything else → null.
+function stateCode(stateText) {
+  const s = clean(stateText).toLowerCase().replace(/\./g, '');
+  if (!s) return null;
+  if (/^[a-z]{2}$/.test(s)) return s.toUpperCase();
+  return STATE_CODES[s] || null;
+}
+// Arizona and Hawaii testing is filed under White Tail Environmental; the rest
+// under Abatement Testing Services.
+function testingLocationFor({ state }, rules = DEFAULT_LOCATION_RULES) {
+  const code = stateCode(state);
+  const wt = (rules.whiteTailStates || []).map((x) => String(x).toUpperCase());
+  return code && wt.includes(code) ? Number(rules.whiteTail) : Number(rules.default);
 }
 // Work orders that go to Abatement Testing Services: record type "Asbestos
 // Testing" / "Soot Testing" / "Mold Testing" (or the ATS subcontractor).
@@ -153,6 +202,14 @@ function ownerRulesFromEnv() {
     sanAntonio: process.env.TESTING_JOB_OWNERS_SAN_ANTONIO !== undefined ? sanAntonio : DEFAULT_OWNER_RULES.sanAntonio,
   };
 }
+function locationRulesFromEnv() {
+  const states = envList('TESTING_JOB_WHITE_TAIL_STATES');
+  return {
+    default: Number(process.env.TESTING_JOB_LOCATION_ID || DEFAULT_LOCATION_RULES.default),
+    whiteTail: Number(process.env.TESTING_JOB_WHITE_TAIL_LOCATION_ID || DEFAULT_LOCATION_RULES.whiteTail),
+    whiteTailStates: states.length ? states : DEFAULT_LOCATION_RULES.whiteTailStates,
+  };
+}
 
 function mountTestingJobs(app, deps) {
   const {
@@ -162,9 +219,9 @@ function mountTestingJobs(app, deps) {
     now = () => Date.now(),
   } = deps;
   const DRYRUN_ENV = process.env.TESTING_JOB_DRYRUN === '1' || process.env.JN_INTAKE_DRYRUN === '1';
-  const TESTING_LOCATION_ID = Number(process.env.TESTING_JOB_LOCATION_ID || 198);
   const DEDUPE_DAYS = Number(process.env.TESTING_JOB_DEDUPE_DAYS || 90);
   const OWNER_RULES = deps.ownerRules || ownerRulesFromEnv();
+  const LOCATION_RULES = deps.locationRules || locationRulesFromEnv();
   const enc = encodeURIComponent;
   const jnUrl = (id) => `https://app.jobnimbus.com/job/${id}`;
   const jnErr = (r) => (r && r.body && (r.body.message || r.body.error || r.body.Message)) || (r && r.text) || `HTTP ${r && r.status}`;
@@ -175,7 +232,7 @@ function mountTestingJobs(app, deps) {
     const j = await jnGetJson('account/settings');
     const data = {
       sources: (Array.isArray(j && j.sources) ? j.sources : []).map((s) => ({ id: Number(s.JobSourceId), name: String(s.SourceName || '').trim(), active: s.IsActive !== false })).filter((s) => s.id && s.name),
-      locations: (Array.isArray(j && j.locations) ? j.locations : []).map((l) => ({ id: Number(l.id), name: String(l.name || '').trim(), city: String(l.city || '').trim() })),
+      locations: (Array.isArray(j && j.locations) ? j.locations : []).map((l) => ({ id: Number(l.id), name: String(l.name || '').trim(), city: String(l.city || '').trim(), state: String(l.state_text || '').trim() })),
       testingWorkflowId: (() => { const w = (Array.isArray(j && j.workflows) ? j.workflows : []).find((x) => x.object_type === 'job' && String(x.name || '').trim().toLowerCase() === 'testing' && x.is_active !== false); return w ? Number(w.id) : null; })(),
     };
     settingsCache = { at: now(), data };
@@ -236,14 +293,25 @@ function mountTestingJobs(app, deps) {
     let abbr = cityAbbrFromJobName(src.name);
     let abbrFrom = 'job name';
     if (!abbr && srcLoc) {
-      const rows = await sbGet(`locations?jn_location_id=eq.${srcLoc.id}&select=city_abbr&limit=1`).catch(() => null);
-      abbr = rows && rows[0] && clean(rows[0].city_abbr).toUpperCase() || null;
-      abbrFrom = 'dryops location';
+      // no suffix on this job → the code its location's other jobs use
+      const sibs = await jnSearch('jobs', [{ term: { 'location.id': srcLoc.id } }], 'name', 20).catch(() => []);
+      abbr = mostCommonAbbr(sibs.map((j) => cityAbbrFromJobName(j.name)));
+      abbrFrom = 'sibling jobs';
+      if (!abbr) {
+        const rows = await sbGet(`locations?jn_location_id=eq.${srcLoc.id}&select=city_abbr&limit=1`).catch(() => null);
+        abbr = rows && rows[0] && clean(rows[0].city_abbr).toUpperCase() || null;
+        abbrFrom = 'dryops location';
+      }
       if (!abbr) { abbr = cityAbbrForCity(srcLoc.city); abbrFrom = 'jn location city'; }
     }
-    if (!abbr) throw Object.assign(new Error(`cannot work out a city code for "${src.name}" (no "(CTY - MIT)" suffix, no location city)`), { status: 422 });
+    if (!abbr) { abbr = cityAbbrForCity(src.city); abbrFrom = 'job city'; }
+    if (!abbr) throw Object.assign(new Error(`cannot work out a city code for "${src.name}" (no "(CTY - MIT)" suffix, no sibling jobs with one, no location or job city)`), { status: 422 });
     if (abbrFrom !== 'job name') warnings.push(`CITY_FROM_${abbrFrom.replace(/\s+/g, '_').toUpperCase()}`);
     const owners = testingOwnersFor({ abbr, locationName: srcLoc && srcLoc.name }, OWNER_RULES);
+    const state = stateCode(src.state_text) || (srcLoc && stateCode(srcLoc.state)) || null;
+    if (!stateCode(src.state_text) && state) warnings.push('STATE_FROM_JN_LOCATION');
+    if (!state) warnings.push('NO_STATE');
+    const locationId = testingLocationFor({ state }, LOCATION_RULES);
     const users = await usersById().catch((e) => { warn('user lookup failed', e.message); return new Map(); });
     for (const id of owners) { const u = users.get(id); if (users.size && (!u || u.active === false)) warnings.push(`OWNER_${!u ? 'UNKNOWN' : 'INACTIVE'}:${id}`); }
     const source = pickLeadSource(settings.sources, srcLoc && srcLoc.name);
@@ -275,7 +343,7 @@ function mountTestingJobs(app, deps) {
       name: jobName, external_id: externalId,
       primary: { id: contactId, type: 'contact' },
       related: [{ id: contactId, type: 'contact' }],
-      location: { id: TESTING_LOCATION_ID },
+      location: { id: locationId },
       owners: owners.map((id) => ({ id })),
       source: source ? source.id : undefined,
       description: `${woType} — work order #${clean(wo.number) || woId} on ${clean(src.name)}`,
@@ -304,7 +372,7 @@ function mountTestingJobs(app, deps) {
       }
       if (!jobJnId) throw Object.assign(new Error('JobNimbus did not return a job id'), { status: 502 });
     }
-    log(woId, dryrun ? 'dryrun' : 'created', jobJnId, jobName, `owners=${owners.join(',')}`, `source=${source ? source.name : '-'}`);
+    log(woId, dryrun ? 'dryrun' : 'created', jobJnId, jobName, `location=${locationId}`, `state=${state || '-'}`, `owners=${owners.join(',')}`, `source=${source ? source.name : '-'}`);
 
     // 6. notes (owners tagged at the bottom, one per line — JN note rule)
     const extra = [];
@@ -316,7 +384,7 @@ function mountTestingJobs(app, deps) {
     const srcNote = { ok: true, dryrun };
     if (dryrun) log('dryrun notes', JSON.stringify({ newNote, mentions }));
     else {
-      const n1 = await jnAddNote(jobJnId, newNote, { jnLocationId: TESTING_LOCATION_ID, mentions });
+      const n1 = await jnAddNote(jobJnId, newNote, { jnLocationId: locationId, mentions });
       Object.assign(note, n1); if (!n1.ok) warnings.push('NOTE_FAILED');
       let tag;
       if (srcLoc) { const rows = await sbGet(`locations?jn_location_id=eq.${srcLoc.id}&select=jn_note_tag&limit=1`).catch(() => null); tag = rows && rows[0] && rows[0].jn_note_tag || undefined; }
@@ -326,9 +394,9 @@ function mountTestingJobs(app, deps) {
     return {
       ok: true, dryrun, work_order: woId, work_order_type: woType,
       source_job: { jn_id: src.jnid || jobRef.id, name: src.name, location: srcLoc },
-      job: { jn_id: jobJnId, name: jobName, jn_url: dryrun ? null : jnUrl(jobJnId), location_id: TESTING_LOCATION_ID },
+      job: { jn_id: jobJnId, name: jobName, jn_url: dryrun ? null : jnUrl(jobJnId), location_id: locationId },
       contact: { jn_id: contactId, name: src.primary && src.primary.name },
-      city_abbr: abbr, owners, source, payload, note, source_note: srcNote, warnings,
+      city_abbr: abbr, state, owners, source, payload, note, source_note: srcNote, warnings,
     };
   }
 
@@ -361,9 +429,14 @@ function mountTestingJobs(app, deps) {
 module.exports = mountTestingJobs;
 module.exports.USERS = USERS;
 module.exports.DEFAULT_OWNER_RULES = DEFAULT_OWNER_RULES;
+module.exports.LOCATIONS = LOCATIONS;
+module.exports.DEFAULT_LOCATION_RULES = DEFAULT_LOCATION_RULES;
+module.exports.stateCode = stateCode;
+module.exports.testingLocationFor = testingLocationFor;
 module.exports.cityAbbrFromJobName = cityAbbrFromJobName;
 module.exports.cityAbbrForCity = cityAbbrForCity;
 module.exports.baseNameOf = baseNameOf;
+module.exports.mostCommonAbbr = mostCommonAbbr;
 module.exports.testingJobName = testingJobName;
 module.exports.testingOwnersFor = testingOwnersFor;
 module.exports.isTestingWorkOrder = isTestingWorkOrder;

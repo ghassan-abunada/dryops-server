@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const mount = require('../testingJobs');
-const { USERS, cityAbbrFromJobName, baseNameOf, testingJobName, testingOwnersFor, isTestingWorkOrder, pickLeadSource } = mount;
+const { USERS, LOCATIONS, cityAbbrFromJobName, baseNameOf, testingJobName, testingOwnersFor, isTestingWorkOrder, pickLeadSource, stateCode, testingLocationFor, mostCommonAbbr } = mount;
 
 test('cityAbbrFromJobName reads the city code out of the job suffix', () => {
   assert.strictEqual(cityAbbrFromJobName('Jeremy Eihausen (AFF - DAL - MIT)'), 'DAL');
@@ -22,6 +22,12 @@ test('cityAbbrFromJobName reads the city code out of the job suffix', () => {
   assert.strictEqual(cityAbbrFromJobName('Weird (SunRun)'), null);
   assert.strictEqual(cityAbbrFromJobName(''), null);
   assert.strictEqual(cityAbbrFromJobName(null), null);
+});
+
+test('mostCommonAbbr picks the majority code, ignoring nulls', () => {
+  assert.strictEqual(mostCommonAbbr(['OAH', null, 'OAH', 'HON', null]), 'OAH');
+  assert.strictEqual(mostCommonAbbr([null, null]), null);
+  assert.strictEqual(mostCommonAbbr([]), null);
 });
 
 test('baseNameOf + testingJobName build "(CTY - TST)" names', () => {
@@ -70,6 +76,30 @@ test('pickLeadSource matches the referring company name', () => {
   assert.strictEqual(pickLeadSource(sources, ''), null);
 });
 
+test('stateCode normalizes codes and full names', () => {
+  assert.strictEqual(stateCode('TX'), 'TX');
+  assert.strictEqual(stateCode(' tx '), 'TX');
+  assert.strictEqual(stateCode('Texas'), 'TX');
+  assert.strictEqual(stateCode('Arizona'), 'AZ');
+  assert.strictEqual(stateCode('hawaii'), 'HI');
+  assert.strictEqual(stateCode('New Mexico'), 'NM');
+  assert.strictEqual(stateCode('Nowhere'), null);
+  assert.strictEqual(stateCode(''), null);
+  assert.strictEqual(stateCode(null), null);
+});
+
+test('testingLocationFor: AZ and HI go to White Tail Environmental, the rest to ATS', () => {
+  assert.strictEqual(testingLocationFor({ state: 'AZ' }), LOCATIONS.whiteTailEnvironmental);
+  assert.strictEqual(testingLocationFor({ state: 'Arizona' }), 30);
+  assert.strictEqual(testingLocationFor({ state: 'HI' }), 30);
+  assert.strictEqual(testingLocationFor({ state: 'Hawaii' }), 30);
+  assert.strictEqual(testingLocationFor({ state: 'TX' }), LOCATIONS.abatementTestingServices);
+  assert.strictEqual(testingLocationFor({ state: 'MI' }), 198);
+  assert.strictEqual(testingLocationFor({ state: null }), 198);
+  // env-style override
+  assert.strictEqual(testingLocationFor({ state: 'NV' }, { default: 1, whiteTail: 2, whiteTailStates: ['nv'] }), 2);
+});
+
 // ── full run with fake deps ─────────────────────────────────────────────────
 const T0 = Date.UTC(2026, 9, 20, 12) / 1000;
 const SRC_JOB = {
@@ -87,7 +117,7 @@ const WO = {
 };
 const SETTINGS = {
   sources: [{ JobSourceId: 554, SourceName: 'American Fire and Flood', IsActive: true }],
-  locations: [{ id: 322, name: 'American Fire and Flood of Dallas', city: 'Carrollton' }, { id: 198, name: 'Abatement Testing Services', city: 'Novi' }],
+  locations: [{ id: 322, name: 'American Fire and Flood of Dallas', city: 'Carrollton', state_text: 'TX' }, { id: 198, name: 'Abatement Testing Services', city: 'Novi', state_text: 'MI' }, { id: 91, name: 'Rhino Water and Damage of Arizona', city: 'Phoenix', state_text: 'AZ' }],
   workflows: [{ id: 124, name: 'Testing', object_type: 'job', is_active: true }],
 };
 function fakeDeps(over = {}) {
@@ -103,7 +133,7 @@ function fakeDeps(over = {}) {
       [USERS.dominickGarcia, { name: 'Dominick Garcia', active: true }], [USERS.willLeBrun, { name: 'Will LeBrun', active: true }],
     ]),
     jnSendJson: async (method, path, body) => {
-      if (method === 'GET' && path.startsWith('jobs/' + SRC_JOB.jnid)) return { ok: true, status: 200, body: SRC_JOB };
+      if (method === 'GET' && path.startsWith('jobs/' + SRC_JOB.jnid)) return { ok: true, status: 200, body: over.source || SRC_JOB };
       if (method === 'GET' && path.startsWith('workorders/')) return { ok: true, status: 200, body: WO };
       if (method === 'GET' && path.startsWith('jobs?')) {
         const filter = JSON.parse(decodeURIComponent(path.split('filter=')[1]));
@@ -112,6 +142,7 @@ function fakeDeps(over = {}) {
         if (term.external_id) return { ok: true, status: 200, body: { results: existingJobs.filter((j) => j.external_id === term.external_id) } };
         if (term.name) return { ok: true, status: 200, body: { results: existingJobs.filter((j) => j.name === term.name) } };
         if (term['primary.id']) return { ok: true, status: 200, body: { results: existingJobs.filter((j) => j.primary_id === term['primary.id']) } };
+        if (term['location.id']) return { ok: true, status: 200, body: { results: (over.siblings || []).map((name) => ({ name })) } };
         return { ok: true, status: 200, body: { results: [] } };
       }
       if (method === 'POST' && path === 'jobs') { calls.posts.push(body); return { ok: true, status: 200, body: { jnid: 'newjob123' } }; }
@@ -143,7 +174,9 @@ test('createTestingJob builds the Testing job the way the office does by hand', 
   assert.strictEqual(p.external_id, 'testing-wo:' + WO.jnid);
   assert.deepStrictEqual(p.primary, { id: 'mvg0w1j2lioe7den99ab9ha', type: 'contact' });
   assert.deepStrictEqual(p.related, [{ id: 'mvg0w1j2lioe7den99ab9ha', type: 'contact' }]);
-  assert.deepStrictEqual(p.location, { id: 198 });
+  assert.deepStrictEqual(p.location, { id: 198 }, 'Texas → Abatement Testing Services');
+  assert.strictEqual(out.state, 'TX');
+  assert.strictEqual(out.job.location_id, 198);
   assert.deepStrictEqual(p.owners, [{ id: USERS.saleahCrawford }, { id: USERS.jalisaHillATS }, { id: USERS.dominickGarcia }]);
   assert.strictEqual(p.source, 554);
   assert.strictEqual(p.cf_string_6, 'Internal Referral');
@@ -243,6 +276,60 @@ test('San Antonio source job adds Will LeBrun; no suffix falls back to the DryOp
   const out2 = await api2.createTestingJob(WO);
   assert.strictEqual(out2.job.name, 'Plain Name (DAL - TST)');
   assert.ok(out2.warnings.includes('CITY_FROM_DRYOPS_LOCATION'));
+});
+
+test('no suffix: sibling jobs at the same location decide the code, then the job city', async () => {
+  const noSuffix = { ...SRC_JOB, name: 'Johnathan Bolton', state_text: 'HI', city: 'Ewa', location: { id: 314 } };
+  const hawaii = { id: 314, name: 'Right-Now Restoration of Hawaii', city: '', state_text: '' };
+  const mk = (siblings, source) => fakeDeps({ siblings, source, deps: {
+    jnGetJson: async () => ({ ...SETTINGS, locations: [hawaii] }),
+    sbGet: async () => [],
+  } }).api;
+  const out = await mk(['Curtis Martin', 'Joe Walker (OAH-MIT)', 'Dane Hina (OAH-MIT)', 'May Andresen (OAH MIT)'], noSuffix).createTestingJob(WO);
+  assert.strictEqual(out.job.name, 'Johnathan Bolton (OAH - TST)');
+  assert.strictEqual(out.job.location_id, 30, 'state on the job → White Tail');
+  assert.ok(out.warnings.includes('CITY_FROM_SIBLING_JOBS'));
+  assert.ok(out.warnings.includes('NO_LEAD_SOURCE'), 'Right-Now Restoration has no JN source in the fake settings');
+
+  const out2 = await mk(['Curtis Martin'], noSuffix).createTestingJob(WO);
+  assert.strictEqual(out2.job.name, 'Johnathan Bolton (EWA - TST)');
+  assert.ok(out2.warnings.includes('CITY_FROM_JOB_CITY'));
+
+  await assert.rejects(() => mk([], { ...noSuffix, city: '' }).createTestingJob(WO), /cannot work out a city code/);
+});
+
+test('Arizona and Hawaii source jobs land on White Tail Environmental (30)', async () => {
+  const run = async (srcOver, woOver = {}) => {
+    const src = { ...SRC_JOB, ...srcOver };
+    const { api, calls } = fakeDeps({ deps: {
+      jnSendJson: async (method, path) => {
+        if (method === 'GET' && path.startsWith('jobs/')) return { ok: true, status: 200, body: src };
+        if (method === 'GET') return { ok: true, status: 200, body: { results: [] } };
+        calls.posts.push(path); return { ok: true, status: 200, body: { jnid: 'wt1' } };
+      },
+    } });
+    const out = await api.createTestingJob({ ...WO, ...woOver });
+    return { out, calls };
+  };
+  const az = await run({ name: 'Vince LoCascio (RWD-MIT)', state_text: 'AZ', city: 'Queen Creek', location: { id: 91 } });
+  assert.strictEqual(az.out.job.name, 'Vince LoCascio (RWD - TST)');
+  assert.strictEqual(az.out.state, 'AZ');
+  assert.strictEqual(az.out.job.location_id, 30);
+  assert.deepStrictEqual(az.out.payload.location, { id: 30 });
+  assert.strictEqual(az.calls.notes[0].opts.jnLocationId, 30, 'note on the new job uses the same location');
+  assert.deepStrictEqual(az.out.owners, [USERS.saleahCrawford, USERS.jalisaHillATS], 'no Dallas / San Antonio extras');
+
+  const hi = await run({ name: 'Koren Ihara (OAH-MIT)', state_text: 'Hawaii', city: 'Honolulu' });
+  assert.strictEqual(hi.out.job.location_id, 30);
+
+  // no state on the job → the JN location's state decides
+  const fb = await run({ name: 'Vince LoCascio (RWD-MIT)', state_text: '', location: { id: 91 } });
+  assert.strictEqual(fb.out.job.location_id, 30);
+  assert.ok(fb.out.warnings.includes('STATE_FROM_JN_LOCATION'));
+
+  // Dallas still goes to ATS with Dominick
+  const tx = await run({});
+  assert.strictEqual(tx.out.job.location_id, 198);
 });
 
 test('webhook route: token gate, skip reasons, and error status', async () => {
