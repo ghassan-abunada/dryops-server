@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const mount = require('../testingJobs');
-const { USERS, LOCATIONS, cityAbbrFromJobName, baseNameOf, testingJobName, testingOwnersFor, isTestingWorkOrder, pickLeadSource, stateCode, testingLocationFor, mostCommonAbbr } = mount;
+const { USERS, LOCATIONS, cityAbbrFromJobName, baseNameOf, testingJobName, testingOwnersFor, isTestingWorkOrder, pickLeadSource, stateCode, testingLocationFor, mostCommonAbbr, matchedOwnerRules } = mount;
 
 test('cityAbbrFromJobName reads the city code out of the job suffix', () => {
   assert.strictEqual(cityAbbrFromJobName('Jeremy Eihausen (AFF - DAL - MIT)'), 'DAL');
@@ -37,16 +37,45 @@ test('baseNameOf + testingJobName build "(CTY - TST)" names', () => {
   assert.strictEqual(testingJobName('Jeremy Eihausen', 'DAL', 2), 'Jeremy Eihausen (DAL - TST) 2');
 });
 
-test('owners: Saleah + Jalisa everywhere, Dominick for Dallas, Will for San Antonio', () => {
+test('owners: Saleah + Jalisa everywhere, plus each market\'s regulars — never Joe Brooks', () => {
   const base = [USERS.saleahCrawford, USERS.jalisaHillATS];
-  assert.deepStrictEqual(testingOwnersFor({ abbr: 'POR', locationName: '24 Hour Flood Pros of Portland' }), base);
-  assert.deepStrictEqual(testingOwnersFor({ abbr: 'DAL', locationName: 'American Fire and Flood of Dallas' }), [...base, USERS.dominickGarcia]);
-  assert.deepStrictEqual(testingOwnersFor({ abbr: 'XYZ', locationName: 'Texas Water and Fire of Dallas' }), [...base, USERS.dominickGarcia]);
-  assert.deepStrictEqual(testingOwnersFor({ abbr: 'SAN', locationName: null }), [...base, USERS.willLeBrun]);
-  assert.deepStrictEqual(testingOwnersFor({ abbr: 'SA', locationName: 'American Fire and Flood of San Antonio' }), [...base, USERS.willLeBrun]);
-  assert.deepStrictEqual(testingOwnersFor({ abbr: 'FTW', locationName: 'Gurr Brothers Construction of Texas (Dallas)' }), [...base, USERS.dominickGarcia]);
-  // env-style override replaces the rule sets
-  assert.deepStrictEqual(testingOwnersFor({ abbr: 'DAL' }, { always: ['a'], dallas: [], sanAntonio: ['b'] }), ['a']);
+  const JOE_BROOKS = 'lpy3vv8z8mnftpa63t1k0j';
+  const cases = [
+    [{ abbr: 'HOU', state: 'TX', locationName: 'Texas Water and Fire of Houston' }, base, []],
+    [{ abbr: 'DAL', state: 'TX', locationName: 'American Fire and Flood of Dallas' }, [...base, USERS.dominickGarcia], ['dallas']],
+    [{ abbr: 'XYZ', state: 'TX', locationName: 'Texas Water and Fire of Dallas' }, [...base, USERS.dominickGarcia], ['dallas']],
+    [{ abbr: 'TWM', state: 'TX', locationName: 'TWM Restoration' }, [...base, USERS.dominickGarcia], ['dallas']],
+    [{ abbr: 'SAN', state: 'TX' }, [...base, USERS.willLeBrun], ['san_antonio']],
+    [{ abbr: 'SAT', state: 'TX' }, [...base, USERS.willLeBrun], ['san_antonio']],
+    [{ abbr: 'SA', state: 'TX', locationName: 'American Fire and Flood of San Antonio' }, [...base, USERS.willLeBrun], ['san_antonio']],
+    [{ abbr: 'AWD', state: 'TX', locationName: 'American Water Damage' }, [...base, USERS.willLeBrun], ['san_antonio']],
+    [{ abbr: 'DEN', state: 'CO', locationName: 'Colorado Water and Fire' }, [...base, USERS.robertMartinez, USERS.hershalJohnson], ['colorado']],
+    [{ abbr: 'COS', state: 'CO' }, [...base, USERS.robertMartinez, USERS.hershalJohnson], ['colorado']],
+    [{ abbr: null, state: 'Colorado' }, [...base, USERS.robertMartinez, USERS.hershalJohnson], ['colorado']],
+    [{ abbr: 'RWD', state: 'AZ', locationName: 'Rhino Water & Damage of Arizona' }, [...base, USERS.derekLewisWTE], ['arizona']],
+    [{ abbr: 'PHX', state: 'Arizona' }, [...base, USERS.derekLewisWTE], ['arizona']],
+    [{ abbr: 'DET', state: 'MI', locationName: 'Doan Restoration' }, [...base, USERS.jackRepokis], ['detroit']],
+    [{ abbr: null, state: 'MI' }, [...base, USERS.jackRepokis], ['detroit']],
+    [{ abbr: 'POR', state: 'OR', locationName: '24 Hour Flood Pros of Portland' }, [...base, USERS.ianNelson], ['oregon']],
+    [{ abbr: 'SLE', state: 'OR' }, [...base, USERS.ianNelson], ['oregon']],
+    [{ abbr: 'POR', state: 'WA', locationName: 'Any Hour Water and Fire' }, [...base, USERS.ianNelson], ['oregon']],
+    [{ abbr: 'OAH', state: 'HI', locationName: '24 Hour Flood Pros of Oahu' }, [...base, USERS.marwinjayVillegas], ['hawaii']],
+    [{ abbr: 'MAU', state: 'Hawaii' }, [...base, USERS.marwinjayVillegas], ['hawaii']],
+    [{ abbr: null, state: null, locationName: 'Right-Now Restoration of Hawaii' }, [...base, USERS.marwinjayVillegas], ['hawaii']],
+    [{ abbr: 'UWF', state: 'UT', locationName: 'Utah Water & Fire' }, base, []],
+    [{ abbr: 'CA', state: 'CA', locationName: 'A1 Restoration' }, base, []],
+    [{ abbr: 'FTW', state: 'TX', locationName: 'Gurr Brothers Construction of Texas (Dallas)' }, [...base, USERS.dominickGarcia], ['dallas']],
+  ];
+  for (const [ctx, want, rules] of cases) {
+    assert.deepStrictEqual(testingOwnersFor(ctx), want, JSON.stringify(ctx));
+    assert.deepStrictEqual(matchedOwnerRules(ctx), rules, JSON.stringify(ctx));
+    assert.ok(!testingOwnersFor(ctx).includes(JOE_BROOKS), 'Joe Brooks must never be assigned');
+  }
+  assert.ok(!Object.values(USERS).includes(JOE_BROOKS), 'Joe Brooks is not in the user table at all');
+  // env-style override replaces one rule's owners (empty = nobody)
+  const rules = [{ key: 'always', owners: ['a'], match: () => true }, { key: 'dallas', owners: [], codes: ['DAL'] }, { key: 'x', owners: ['b'], states: ['NV'] }];
+  assert.deepStrictEqual(testingOwnersFor({ abbr: 'DAL', state: 'TX' }, rules), ['a']);
+  assert.deepStrictEqual(testingOwnersFor({ abbr: 'LAS', state: 'nv' }, rules), ['a', 'b']);
 });
 
 test('isTestingWorkOrder gates on the record type or the ATS subcontractor', () => {
@@ -131,6 +160,9 @@ function fakeDeps(over = {}) {
     jnFetchAccountUsers: async () => new Map([
       [USERS.saleahCrawford, { name: 'Saleah Crawford', active: true }], [USERS.jalisaHillATS, { name: 'Jalisa Hill ATS', active: true }],
       [USERS.dominickGarcia, { name: 'Dominick Garcia', active: true }], [USERS.willLeBrun, { name: 'Will LeBrun', active: true }],
+      [USERS.derekLewisWTE, { name: 'Derek Lewis WTE', active: true }], [USERS.marwinjayVillegas, { name: 'Marwinjay Villegas', active: true }],
+      [USERS.robertMartinez, { name: 'Robert Martinez', active: true }], [USERS.hershalJohnson, { name: 'Hershal Johnson', active: true }],
+      [USERS.jackRepokis, { name: 'Jack Repokis', active: true }], [USERS.ianNelson, { name: 'Ian Nelson', active: true }],
     ]),
     jnSendJson: async (method, path, body) => {
       if (method === 'GET' && path.startsWith('jobs/' + SRC_JOB.jnid)) return { ok: true, status: 200, body: over.source || SRC_JOB };
@@ -166,6 +198,7 @@ test('createTestingJob builds the Testing job the way the office does by hand', 
   assert.strictEqual(out.job.jn_id, 'newjob123');
   assert.strictEqual(out.city_abbr, 'DAL');
   assert.deepStrictEqual(out.owners, [USERS.saleahCrawford, USERS.jalisaHillATS, USERS.dominickGarcia]);
+  assert.deepStrictEqual(out.owner_rules, ['dallas']);
   assert.deepStrictEqual(out.warnings, []);
   assert.strictEqual(calls.posts.length, 1);
   const p = calls.posts[0];
@@ -289,6 +322,7 @@ test('no suffix: sibling jobs at the same location decide the code, then the job
   assert.strictEqual(out.job.name, 'Johnathan Bolton (OAH - TST)');
   assert.strictEqual(out.job.location_id, 30, 'state on the job → White Tail');
   assert.ok(out.warnings.includes('CITY_FROM_SIBLING_JOBS'));
+  assert.deepStrictEqual(out.owner_rules, ['hawaii']);
   assert.ok(out.warnings.includes('NO_LEAD_SOURCE'), 'Right-Now Restoration has no JN source in the fake settings');
 
   const out2 = await mk(['Curtis Martin'], noSuffix).createTestingJob(WO);
@@ -317,10 +351,12 @@ test('Arizona and Hawaii source jobs land on White Tail Environmental (30)', asy
   assert.strictEqual(az.out.job.location_id, 30);
   assert.deepStrictEqual(az.out.payload.location, { id: 30 });
   assert.strictEqual(az.calls.notes[0].opts.jnLocationId, 30, 'note on the new job uses the same location');
-  assert.deepStrictEqual(az.out.owners, [USERS.saleahCrawford, USERS.jalisaHillATS], 'no Dallas / San Antonio extras');
+  assert.deepStrictEqual(az.out.owners, [USERS.saleahCrawford, USERS.jalisaHillATS, USERS.derekLewisWTE], 'Arizona adds Derek Lewis');
+  assert.deepStrictEqual(az.calls.notes[0].opts.mentions, ['@SaleahCrawford', '@JalisaHillATS', '@DerekLewisWTE']);
 
-  const hi = await run({ name: 'Koren Ihara (OAH-MIT)', state_text: 'Hawaii', city: 'Honolulu' });
+  const hi = await run({ name: 'Koren Ihara (OAH-MIT)', state_text: 'Hawaii', city: 'Honolulu', location: { id: 34 } });
   assert.strictEqual(hi.out.job.location_id, 30);
+  assert.deepStrictEqual(hi.out.owners, [USERS.saleahCrawford, USERS.jalisaHillATS, USERS.marwinjayVillegas], 'Hawaii adds Marwinjay Villegas');
 
   // no state on the job → the JN location's state decides
   const fb = await run({ name: 'Vince LoCascio (RWD-MIT)', state_text: '', location: { id: 91 } });

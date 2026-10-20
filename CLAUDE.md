@@ -142,11 +142,16 @@ The server creates the Testing job the ATS office used to make by hand:
   Bolton` at Right-Now Restoration of Hawaii → OAH), else
   `locations.city_abbr`, else the JN location city, else the job's city.
   Taken names get ` 2`, ` 3`…
-- owners: Saleah Crawford + Jalisa Hill (ATS) always; + Dominick Garcia when
-  the city code is DAL or the source location name says Dallas; + Will LeBrun
-  for SA/SAN/SAT or "San Antonio". Ids in `USERS` in testingJobs.js; env
-  `TESTING_JOB_OWNERS`, `_DALLAS`, `_SAN_ANTONIO` (comma-separated JN user
-  ids) replace a rule set.
+- owners (`DEFAULT_OWNER_RULES`, matched on the source job's city code, its
+  state, or words in its JN location name): Saleah Crawford + Jalisa Hill
+  (ATS) always; Dallas (DAL/TWM) + Dominick Garcia; San Antonio
+  (SA/SAN/SAT/AWD, "American Water Damage") + Will LeBrun; Colorado (DEN/COS,
+  CO) + Robert Martinez & Hershal Johnson; Arizona (AZ) + Derek Lewis WTE;
+  Detroit (DET, MI) + Jack Repokis; Oregon (POR/SLE/PDX, OR) + Ian Nelson;
+  Hawaii (HI) + Marwinjay Villegas. **Never Joe Brooks** (owner rule; he was
+  on ~85% of hand-made jobs until Oct 2026). Ids in `USERS`; env
+  `TESTING_JOB_OWNERS` / `TESTING_JOB_OWNERS_<RULE KEY>` (comma-separated JN
+  user ids, empty = nobody) replace one rule's owners.
 - lead source = JN source named like the source job's location company
   (`American Fire and Flood of Dallas` → `American Fire and Flood`; active
   sources preferred); Lead Type `cf_string_6` = `Internal Referral`;

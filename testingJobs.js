@@ -18,9 +18,13 @@
 //     A job with no suffix borrows the code its location's other jobs use
 //     ("Johnathan Bolton" at Right-Now Restoration of Hawaii → OAH), then
 //     the DryOps location's city_abbr, the JN location's city, the job's city.
-//   * owners: Saleah Crawford + Jalisa Hill (ATS) on every job, plus Dominick
-//     Garcia for Dallas and Will LeBrun for San Antonio (by city code or the
-//     source location's name). Override with TESTING_JOB_OWNERS* env vars.
+//   * owners: Saleah Crawford + Jalisa Hill (ATS) on every job, plus the
+//     market's regulars (DEFAULT_OWNER_RULES): Dominick Garcia for Dallas, Will
+//     LeBrun for San Antonio / American Water Damage, Robert Martinez + Hershal
+//     Johnson for Colorado, Derek Lewis for Arizona, Jack Repokis for Detroit,
+//     Ian Nelson for Oregon, Marwinjay Villegas for Hawaii — matched on the
+//     city code, the source job's state, or the source location's name. Never
+//     Joe Brooks. Override with TESTING_JOB_OWNERS* env vars.
 //   * lead source = the JN source named after the referring company (the
 //     source job's location name, "American Fire and Flood of Dallas" →
 //     "American Fire and Flood"); Lead Type "Internal Referral"; insurance
@@ -39,22 +43,41 @@
 //   ?any=1 skips the "is this a testing work order" gate.
 // Env: TESTING_JOB_DRYRUN=1 (log instead of writing; JN_INTAKE_DRYRUN=1 also
 //   counts), TESTING_JOB_LOCATION_ID (198), TESTING_JOB_WHITE_TAIL_LOCATION_ID
-//   (30), TESTING_JOB_WHITE_TAIL_STATES ("AZ,HI"), TESTING_JOB_OWNERS,
-//   TESTING_JOB_OWNERS_DALLAS, TESTING_JOB_OWNERS_SAN_ANTONIO (comma-separated
-//   JN user ids), TESTING_JOB_DEDUPE_DAYS (90).
+//   (30), TESTING_JOB_WHITE_TAIL_STATES ("AZ,HI"), TESTING_JOB_OWNERS and
+//   TESTING_JOB_OWNERS_<RULE KEY> (comma-separated JN user ids),
+//   TESTING_JOB_DEDUPE_DAYS (90).
 
-// JobNimbus user ids (account/users, verified 2026-10-20).
+// JobNimbus user ids (account/users, verified 2026-10-20). All @abatetest.com.
 const USERS = {
-  saleahCrawford: 'lw56hok1xagmfidjgbula5w', // saleah@abatetest.com
-  jalisaHillATS: 'lpy3x55zdptwpx82v8nsyxh',  // jalisa@abatetest.com ("Jalisa Hill ATS")
-  dominickGarcia: 'lpz7pf67igy8wybljouzpxl', // dominick@abatetest.com
-  willLeBrun: 'mf40yph2ezmrleajp1pqeyu',     // william@abatetest.com
+  saleahCrawford: 'lw56hok1xagmfidjgbula5w',
+  jalisaHillATS: 'lpy3x55zdptwpx82v8nsyxh',  // "Jalisa Hill ATS"
+  dominickGarcia: 'lpz7pf67igy8wybljouzpxl',
+  willLeBrun: 'mf40yph2ezmrleajp1pqeyu',     // william@ — not the unrelated "Bill LeBrun"
+  robertMartinez: 'maeh13fm79d2nsu4hupneqt',
+  hershalJohnson: 'f5faccedf22e4903b9de84a8d98263a3',
+  derekLewisWTE: 'lq45buwweh7l9crge4cy83w',  // "Derek Lewis WTE" (derek@abatetest.com)
+  jackRepokis: 'bf0681a1912e433b82633d65713ba761',
+  ianNelson: 'mdoskyboq36n1tgki57ci2j',
+  marwinjayVillegas: 'mdoslzhmf2qjyr7m6oyx9qx',
 };
-const DEFAULT_OWNER_RULES = {
-  always: [USERS.saleahCrawford, USERS.jalisaHillATS],
-  dallas: [USERS.dominickGarcia],
-  sanAntonio: [USERS.willLeBrun],
-};
+// Who gets added where. Owner's rules (2026-10-20), checked against the last
+// six months of hand-made Testing jobs: a market's regulars are on 60–100% of
+// its jobs. Joe Brooks is deliberately on none of them. A rule matches on the
+// city code in the source job's suffix, the source job's state, or words in
+// the source JN location's name. Env TESTING_JOB_OWNERS_<KEY> (comma-separated
+// JN user ids; empty = nobody) replaces one rule's owners; TESTING_JOB_OWNERS
+// replaces "always".
+const rx = (re) => (loc) => re.test(String(loc || ''));
+const DEFAULT_OWNER_RULES = [
+  { key: 'always', owners: [USERS.saleahCrawford, USERS.jalisaHillATS], match: () => true },
+  { key: 'dallas', owners: [USERS.dominickGarcia], codes: ['DAL', 'TWM'], location: rx(/\bdallas\b/i) },
+  { key: 'san_antonio', owners: [USERS.willLeBrun], codes: ['SA', 'SAN', 'SAT', 'AWD'], location: rx(/\bsan\s+antonio\b|american water damage/i) },
+  { key: 'colorado', owners: [USERS.robertMartinez, USERS.hershalJohnson], codes: ['DEN', 'COS'], states: ['CO'], location: rx(/\bcolorado\b|\bdenver\b/i) },
+  { key: 'arizona', owners: [USERS.derekLewisWTE], states: ['AZ'], location: rx(/\barizona\b|\bphoenix\b|\btucson\b/i) },
+  { key: 'detroit', owners: [USERS.jackRepokis], codes: ['DET'], states: ['MI'], location: rx(/\bdetroit\b|\bmichigan\b/i) },
+  { key: 'oregon', owners: [USERS.ianNelson], codes: ['POR', 'SLE', 'PDX'], states: ['OR'], location: rx(/\boregon\b|\bportland\b|\bsalem\b/i) },
+  { key: 'hawaii', owners: [USERS.marwinjayVillegas], states: ['HI'], location: rx(/\bhawaii\b|\boahu\b|\bmaui\b|\bhonolulu\b/i) },
+];
 // JobNimbus locations the Testing jobs are filed under (account/settings →
 // locations, verified 2026-10-20: 6,844 Testing jobs on 198; 1,405 AZ + 361 HI
 // on 30, none of those on 198).
@@ -76,8 +99,6 @@ const STATE_CODES = {
   'south carolina': 'SC', 'south dakota': 'SD', tennessee: 'TN', texas: 'TX', utah: 'UT', vermont: 'VT', virginia: 'VA', washington: 'WA',
   'west virginia': 'WV', wisconsin: 'WI', wyoming: 'WY', 'district of columbia': 'DC',
 };
-const DALLAS_CODES = new Set(['DAL']);
-const SAN_ANTONIO_CODES = new Set(['SA', 'SAN', 'SAT']);
 const TESTING_RECORD_TYPE = 'Testing';
 const TYPE_CODE_RE = /^(MIT|CON|REB|STR|TST|ABT|RCN|PO)$/i;
 const TRAILING_PAREN_RE = /\(([^()]*)\)\s*$/;
@@ -130,17 +151,22 @@ function mostCommonAbbr(codes) {
 function testingJobName(base, abbr, n = 1) {
   return `${base} (${abbr} - TST)${n > 1 ? ` ${n}` : ''}`;
 }
-function isDallas(abbr, locationName) {
-  return DALLAS_CODES.has(String(abbr || '').toUpperCase()) || /\bdallas\b/i.test(String(locationName || ''));
+function ruleMatches(rule, { abbr, locationName, state }) {
+  if (rule.match && rule.match({ abbr, locationName, state })) return true;
+  const code = String(abbr || '').toUpperCase();
+  if (code && (rule.codes || []).includes(code)) return true;
+  const st = stateCode(state);
+  if (st && (rule.states || []).includes(st)) return true;
+  return !!(rule.location && locationName && rule.location(locationName));
 }
-function isSanAntonio(abbr, locationName) {
-  return SAN_ANTONIO_CODES.has(String(abbr || '').toUpperCase()) || /\bsan\s+antonio\b/i.test(String(locationName || ''));
-}
-function testingOwnersFor({ abbr, locationName }, rules = DEFAULT_OWNER_RULES) {
-  const out = [...(rules.always || [])];
-  if (isDallas(abbr, locationName)) out.push(...(rules.dallas || []));
-  if (isSanAntonio(abbr, locationName)) out.push(...(rules.sanAntonio || []));
+function testingOwnersFor({ abbr, locationName, state }, rules = DEFAULT_OWNER_RULES) {
+  const out = [];
+  for (const rule of rules) if (ruleMatches(rule, { abbr, locationName, state })) out.push(...(rule.owners || []));
   return uniq(out);
+}
+// Which rules fired (for the result / logs).
+function matchedOwnerRules({ abbr, locationName, state }, rules = DEFAULT_OWNER_RULES) {
+  return rules.filter((r) => r.key !== 'always' && ruleMatches(r, { abbr, locationName, state })).map((r) => r.key);
 }
 // "TX" / "Texas" / " tx " → "TX"; anything else → null.
 function stateCode(stateText) {
@@ -193,14 +219,12 @@ function pickLeadSource(sources, locationName) {
   return null;
 }
 function ownerRulesFromEnv() {
-  const always = envList('TESTING_JOB_OWNERS');
-  const dallas = envList('TESTING_JOB_OWNERS_DALLAS');
-  const sanAntonio = envList('TESTING_JOB_OWNERS_SAN_ANTONIO');
-  return {
-    always: always.length ? always : DEFAULT_OWNER_RULES.always,
-    dallas: process.env.TESTING_JOB_OWNERS_DALLAS !== undefined ? dallas : DEFAULT_OWNER_RULES.dallas,
-    sanAntonio: process.env.TESTING_JOB_OWNERS_SAN_ANTONIO !== undefined ? sanAntonio : DEFAULT_OWNER_RULES.sanAntonio,
-  };
+  return DEFAULT_OWNER_RULES.map((rule) => {
+    const name = rule.key === 'always' ? 'TESTING_JOB_OWNERS' : `TESTING_JOB_OWNERS_${rule.key.toUpperCase()}`;
+    if (process.env[name] === undefined) return rule;
+    const ids = envList(name);
+    return { ...rule, owners: rule.key === 'always' && !ids.length ? rule.owners : ids };
+  });
 }
 function locationRulesFromEnv() {
   const states = envList('TESTING_JOB_WHITE_TAIL_STATES');
@@ -307,11 +331,13 @@ function mountTestingJobs(app, deps) {
     if (!abbr) { abbr = cityAbbrForCity(src.city); abbrFrom = 'job city'; }
     if (!abbr) throw Object.assign(new Error(`cannot work out a city code for "${src.name}" (no "(CTY - MIT)" suffix, no sibling jobs with one, no location or job city)`), { status: 422 });
     if (abbrFrom !== 'job name') warnings.push(`CITY_FROM_${abbrFrom.replace(/\s+/g, '_').toUpperCase()}`);
-    const owners = testingOwnersFor({ abbr, locationName: srcLoc && srcLoc.name }, OWNER_RULES);
     const state = stateCode(src.state_text) || (srcLoc && stateCode(srcLoc.state)) || null;
     if (!stateCode(src.state_text) && state) warnings.push('STATE_FROM_JN_LOCATION');
     if (!state) warnings.push('NO_STATE');
     const locationId = testingLocationFor({ state }, LOCATION_RULES);
+    const ownerCtx = { abbr, locationName: srcLoc && srcLoc.name, state };
+    const owners = testingOwnersFor(ownerCtx, OWNER_RULES);
+    const ownerRules = matchedOwnerRules(ownerCtx, OWNER_RULES);
     const users = await usersById().catch((e) => { warn('user lookup failed', e.message); return new Map(); });
     for (const id of owners) { const u = users.get(id); if (users.size && (!u || u.active === false)) warnings.push(`OWNER_${!u ? 'UNKNOWN' : 'INACTIVE'}:${id}`); }
     const source = pickLeadSource(settings.sources, srcLoc && srcLoc.name);
@@ -372,7 +398,7 @@ function mountTestingJobs(app, deps) {
       }
       if (!jobJnId) throw Object.assign(new Error('JobNimbus did not return a job id'), { status: 502 });
     }
-    log(woId, dryrun ? 'dryrun' : 'created', jobJnId, jobName, `location=${locationId}`, `state=${state || '-'}`, `owners=${owners.join(',')}`, `source=${source ? source.name : '-'}`);
+    log(woId, dryrun ? 'dryrun' : 'created', jobJnId, jobName, `location=${locationId}`, `state=${state || '-'}`, `rules=${ownerRules.join('+') || 'base'}`, `owners=${owners.join(',')}`, `source=${source ? source.name : '-'}`);
 
     // 6. notes (owners tagged at the bottom, one per line — JN note rule)
     const extra = [];
@@ -396,7 +422,7 @@ function mountTestingJobs(app, deps) {
       source_job: { jn_id: src.jnid || jobRef.id, name: src.name, location: srcLoc },
       job: { jn_id: jobJnId, name: jobName, jn_url: dryrun ? null : jnUrl(jobJnId), location_id: locationId },
       contact: { jn_id: contactId, name: src.primary && src.primary.name },
-      city_abbr: abbr, state, owners, source, payload, note, source_note: srcNote, warnings,
+      city_abbr: abbr, state, owners, owner_rules: ownerRules, source, payload, note, source_note: srcNote, warnings,
     };
   }
 
@@ -439,5 +465,6 @@ module.exports.baseNameOf = baseNameOf;
 module.exports.mostCommonAbbr = mostCommonAbbr;
 module.exports.testingJobName = testingJobName;
 module.exports.testingOwnersFor = testingOwnersFor;
+module.exports.matchedOwnerRules = matchedOwnerRules;
 module.exports.isTestingWorkOrder = isTestingWorkOrder;
 module.exports.pickLeadSource = pickLeadSource;
