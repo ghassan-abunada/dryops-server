@@ -4,7 +4,13 @@
   Templates → "Invite user" → Message body (source/HTML view).
 
   Template variables (Supabase GoTrue / Go text-template):
-    {{ .ConfirmationURL }}   full accept-invite action link (confirms + redirects)
+    {{ .SiteURL }}           the project Site URL (https://dryops.app)
+    {{ .TokenHash }}         one-time token, verified by the app's /accept-invite
+                             page ONLY when the person taps the button. The old
+                             {{ .ConfirmationURL }} verified on first fetch, so
+                             mail scanners (Outlook Safe Links, Gmail previews)
+                             spent the link before anyone clicked it and people
+                             landed on the login form instead of set-password.
     {{ .Email }}             the invited email address
     {{ .Data.full_name }}    metadata sent by /invite-user
     {{ .Data.role }}         "admin" | "owner" | "technician" | "executive"
@@ -107,13 +113,13 @@
           <tr>
             <td class="card px" align="center" style="background-color:#FFFFFF; padding:30px 48px 8px 48px;">
               <!--[if mso]>
-              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="{{ .ConfirmationURL }}" style="height:52px;v-text-anchor:middle;width:320px;" arcsize="24%" strokecolor="#0369A1" fillcolor="#0369A1">
+              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="{{ .SiteURL }}/accept-invite?token_hash={{ .TokenHash }}&amp;type=invite" style="height:52px;v-text-anchor:middle;width:320px;" arcsize="24%" strokecolor="#0369A1" fillcolor="#0369A1">
                 <w:anchorlock/>
                 <center style="color:#ffffff;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:16px;font-weight:700;">Accept your invitation</center>
               </v:roundrect>
               <![endif]-->
               <!--[if !mso]><!-- -->
-              <a href="{{ .ConfirmationURL }}" class="cta" style="display:inline-block; background-color:#0369A1; color:#FFFFFF; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:16px; font-weight:700; line-height:52px; text-align:center; text-decoration:none; width:320px; max-width:80%; border-radius:12px; box-shadow:0 2px 6px rgba(3,105,161,0.25);">Accept your invitation</a>
+              <a href="{{ .SiteURL }}/accept-invite?token_hash={{ .TokenHash }}&amp;type=invite" class="cta" style="display:inline-block; background-color:#0369A1; color:#FFFFFF; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:16px; font-weight:700; line-height:52px; text-align:center; text-decoration:none; width:320px; max-width:80%; border-radius:12px; box-shadow:0 2px 6px rgba(3,105,161,0.25);">Accept your invitation</a>
               <!--<![endif]-->
             </td>
           </tr>
@@ -125,7 +131,7 @@
                 Button not working? Copy and paste this link into your browser:
               </p>
               <p class="fallback" style="margin:8px 0 0 0; padding:12px 14px; background-color:#F8FAFC; border-radius:8px; font-family:'Courier New',monospace; font-size:12px; line-height:18px; color:#0369A1; word-break:break-all;">
-                <a href="{{ .ConfirmationURL }}" style="color:#0369A1; text-decoration:none;">{{ .ConfirmationURL }}</a>
+                <a href="{{ .SiteURL }}/accept-invite?token_hash={{ .TokenHash }}&amp;type=invite" style="color:#0369A1; text-decoration:none;">{{ .SiteURL }}/accept-invite?token_hash={{ .TokenHash }}&amp;type=invite</a>
               </p>
             </td>
           </tr>

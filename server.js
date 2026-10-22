@@ -2801,18 +2801,57 @@ app.post('/invite-user', requireAuth, requireAdmin, async (req, res) => {
   if (!email) return res.status(400).json({ error: 'email is required' });
 
   try {
-    // Custom app role: resolve its base_role (server-authoritative). The
-    // invite metadata role is clamped by handle_new_user anyway; the trusted
-    // path is the profile PATCH below, after the auth user exists.
+    // Who is inviting? Owners may only add technicians to their own
+    // locations; admins may add any non-admin role anywhere.
+    const callerRows = await sbGet(`profiles?id=eq.${encodeURIComponent(req.userId)}&select=role,location_id,location_ids`);
+    const caller = Array.isArray(callerRows) && callerRows[0] ? callerRows[0] : null;
+    const callerRole = caller ? caller.role : null;
+
+    // Custom app role: resolve its base_role (server-authoritative).
     let inviteRole = role;
     let appRoleId = null;
     if (app_role_id) {
+      if (callerRole !== 'admin') return res.status(403).json({ error: 'Only admins can assign custom roles' });
       const ar = await sbGet(`app_roles?id=eq.${encodeURIComponent(app_role_id)}&select=base_role`);
       const base = Array.isArray(ar) && ar[0] ? ar[0].base_role : null;
       if (!base) return res.status(400).json({ error: 'app_role_id not found' });
       inviteRole = base;
       appRoleId = app_role_id;
     }
+    // 'admin' is never minted through an invite.
+    const INVITE_ROLES = ['owner', 'technician', 'technician_2', 'executive'];
+    if (!INVITE_ROLES.includes(inviteRole)) {
+      return res.status(400).json({ error: `role must be one of ${INVITE_ROLES.join(', ')}` });
+    }
+
+    // Locations: arrays win, the single fields are the legacy shape.
+    let locIds = Array.isArray(req.body.location_ids)
+      ? req.body.location_ids.filter(Boolean).map(String)
+      : (location_id ? [String(location_id)] : []);
+    locIds = [...new Set(locIds)];
+    if (inviteRole === 'executive') locIds = []; // executives see every location
+    if (callerRole === 'owner') {
+      if (!['technician', 'technician_2'].includes(inviteRole)) {
+        return res.status(403).json({ error: 'Owners can invite technicians only' });
+      }
+      const mine = new Set([caller.location_id, ...(caller.location_ids || [])].filter(Boolean).map(String));
+      if (locIds.some((id) => !mine.has(id))) {
+        return res.status(403).json({ error: 'Owners can only invite into their own locations' });
+      }
+    }
+    if (inviteRole !== 'executive' && locIds.length === 0) {
+      return res.status(400).json({ error: 'Pick at least one location' });
+    }
+    // Names from the locations table (the client's copy is only a fallback).
+    const clientNames = Array.isArray(req.body.location_names) ? req.body.location_names : (location_name ? [location_name] : []);
+    let locNames = locIds.map((id, i) => (clientNames[i] == null ? '' : String(clientNames[i])));
+    if (locIds.length) {
+      const locRows = await sbGet(`locations?id=in.(${locIds.map(encodeURIComponent).join(',')})&select=id,name`);
+      const byId = new Map((Array.isArray(locRows) ? locRows : []).map((l) => [String(l.id), l.name || '']));
+      if (locIds.some((id) => !byId.has(id))) return res.status(400).json({ error: 'Unknown location' });
+      locNames = locIds.map((id) => byId.get(id) || '');
+    }
+
     const r = await fetch(`${SUPABASE_URL}/auth/v1/invite`, {
       method: 'POST',
       headers: {
@@ -2822,32 +2861,51 @@ app.post('/invite-user', requireAuth, requireAdmin, async (req, res) => {
       },
       body: JSON.stringify({
         email,
-        data: { role: inviteRole, location_id, location_name, full_name,
-                location_ids: req.body.location_ids, location_names: req.body.location_names },
+        data: { role: inviteRole, location_id: locIds[0] || null, location_name: locNames[0] || null, full_name,
+                location_ids: locIds, location_names: locNames },
         redirect_to: WEB_APP_URL,
       }),
     });
-    const body = await r.json();
-    // handle_new_user clamps metadata roles; set the real role + bundle via
-    // service key once the profile row exists (same statement → satisfies the
-    // app-role consistency trigger).
-    if (r.ok && body && body.id && req.body.jn_user_id) {
-      await sbPatch('profiles', `id=eq.${body.id}`, { jn_user_id: String(req.body.jn_user_id).trim() })
-        .catch((e) => console.warn('[invite-user] jn_user_id patch failed', e.message));
-    }
-    if (r.ok && appRoleId && body && body.id) {
-      const pr = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${body.id}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ role: inviteRole, app_role_id: appRoleId, updated_at: new Date().toISOString() }),
-      });
-      if (!pr.ok) {
-        const t = await pr.text();
-        console.error('[invite-user] app-role patch failed', pr.status, t.slice(0, 200));
-        return res.status(502).json({ error: 'invite sent but custom role assignment failed', detail: t.slice(0, 200) });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body || !body.id) {
+      const msg = (body && (body.msg || body.message || body.error_description || body.error)) || '';
+      if (r.status === 422 || /already/i.test(msg)) {
+        return res.status(409).json({ error: `${email} already has a DryOps account. Open them under Settings → Users to change role or locations, or have them use "Forgot password?".` });
       }
+      return res.status(r.ok ? 502 : r.status).json({ error: msg || 'invite failed' });
     }
-    res.status(r.status).json(body);
+
+    // Write the real profile. handle_new_user runs BEFORE GoTrue stamps
+    // invited_at (the user row is inserted first, the invite flag is a later
+    // UPDATE), so the trigger treats every invite as an untrusted self-signup:
+    // role clamped to technician, locations emptied. This service-role upsert
+    // is the trusted path — role + app_role_id in the same statement (the
+    // consistency trigger needs the pair) — and the result is verified.
+    const profile = {
+      id: body.id,
+      role: inviteRole,
+      app_role_id: appRoleId,
+      location_id: locIds[0] || null, location_name: locNames[0] || null,
+      location_ids: locIds, location_names: locNames,
+      updated_at: new Date().toISOString(),
+      ...(full_name ? { full_name } : {}),
+      ...(req.body.jn_user_id ? { jn_user_id: String(req.body.jn_user_id).trim() } : {}),
+    };
+    const pr = await fetch(`${SUPABASE_URL}/rest/v1/profiles?on_conflict=id`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=representation' },
+      body: JSON.stringify(profile),
+    });
+    const prText = await pr.text();
+    let landed = null;
+    try { const rows = JSON.parse(prText); landed = Array.isArray(rows) ? rows[0] : null; } catch { landed = null; }
+    const sameLocs = landed && Array.isArray(landed.location_ids)
+      && landed.location_ids.length === locIds.length && locIds.every((id) => landed.location_ids.includes(id));
+    if (!pr.ok || !landed || landed.role !== inviteRole || !sameLocs) {
+      console.error('[invite-user] profile upsert failed', pr.status, prText.slice(0, 300));
+      return res.status(502).json({ error: `Invite emailed to ${email}, but their role/locations could not be saved — open them under Settings → Users and set them by hand.`, detail: prText.slice(0, 200) });
+    }
+    res.status(200).json({ ok: true, id: body.id, email, role: inviteRole, app_role_id: appRoleId, location_ids: locIds });
   } catch (err) {
     console.error('[invite-user error]', err.message);
     res.status(502).json({ error: err.message });
