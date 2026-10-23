@@ -22,6 +22,11 @@
 
 const crypto = require('crypto');
 const { deliver, notifyChannels } = require('./notify');
+const testingIntake = require('./intakeTesting');
+const {
+  isTestingRecordType, normalizeTestTypes, testingServiceMinutes, formatTestTypes,
+  testingAbbrFor, testingNameCandidates, testingLeadType, testingOwnersForIntake, testingNoteLines,
+} = testingIntake;
 
 module.exports = function mountIntake(app, deps) {
   const {
@@ -37,9 +42,13 @@ module.exports = function mountIntake(app, deps) {
   const DRYRUN = process.env.JN_INTAKE_DRYRUN === '1';
   const REDIRECT_LOCATION = Number(process.env.JN_INTAKE_REDIRECT_LOCATION || 0) || null;
   const APP_URL = (WEB_APP_URL || 'https://dryops.app').replace(/\/$/, '');
-  const RECORD_TYPES = ['Mitigation', 'Contents', 'Rebuild'];
-  const TYPE_CODE = { Mitigation: 'MIT', Contents: 'CON', Rebuild: 'REB' };
-  const LEAD_TYPES = ['Google', 'Plumber', 'Internal Referral', 'External MIT Company', 'Other'];
+  // Testing / Abatements (testing locations) ride the same path with the
+  // work-order automation's naming + owner rules — see intakeTesting.js.
+  const RECORD_TYPES = ['Mitigation', 'Contents', 'Rebuild', 'Testing', 'Abatements'];
+  const TYPE_CODE = { Mitigation: 'MIT', Contents: 'CON', Rebuild: 'REB', Testing: 'TST', Abatements: 'ABT' };
+  const LEAD_TYPES = ['Google', 'Plumber', 'Internal Referral', 'External MIT Company', 'External Referral', 'Other'];
+  const VISIT_KINDS = ['inspection', 'testing'];
+  const VISIT_LABEL = { inspection: 'Inspection', testing: 'Testing visit' };
   const DUP_NAME_RE = /display.?name|duplicate|already exists|already in use/i;
   const TRAILING_PAREN_RE = /\(([^()]*)\)\s*$/;
   const CITY_ABBR_OVERRIDES = {
@@ -314,6 +323,7 @@ module.exports = function mountIntake(app, deps) {
     if (d.scope_summary) lines.push(`Scope: ${clean(d.scope_summary, 1000)}`);
     if (d.areas_affected) lines.push(`Areas Affected: ${clean(d.areas_affected, 500)}`);
     if (ctx.referringJob) lines.push(`Referring job: ${ctx.referringJob}`);
+    if (isTestingRecordType(body.record_type)) lines.push(...testingNoteLines(d, { leadLink: body.lead_link }));
     if (d.notes) lines.push(`Notes: ${clean(d.notes, 2000)}`);
     if (ctx.repName) lines.push(`Sales rep: ${ctx.repName}`);
     lines.push(`Entered by ${ctx.actorName}`);
@@ -326,6 +336,7 @@ module.exports = function mountIntake(app, deps) {
     if (d.cause_of_damage) lines.push(`Cause of Loss: ${clean(d.cause_of_damage, 500)}`);
     if (d.date_loss) lines.push(`Date of Loss: ${clean(d.date_loss)}`);
     lines.push(`Date Contacted: ${zonedStamp(Date.now(), tz)}`);
+    if (isTestingRecordType(body.record_type) && formatTestTypes(d.test_types)) lines.push(`Testing: ${formatTestTypes(d.test_types)}`);
     if (d.rooms_affected) lines.push(`Rooms Affected: ${clean(d.rooms_affected)}`);
     if (typeof d.standing_water === 'boolean') lines.push(`Needs Extraction: ${d.standing_water ? 'Yes' : 'No'}`);
     if (body.property_type === 'commercial') lines.push(`Caller: ${clean(body.contact.first_name)} ${clean(body.contact.last_name)}${body.contact.role ? ` (${clean(body.contact.role)})` : ''}`);
@@ -338,7 +349,7 @@ module.exports = function mountIntake(app, deps) {
     const bad = (field, error) => ({ field, error });
     if (!body || typeof body !== 'object') return bad('body', 'Missing body');
     if (!UUID_RE.test(String(body.client_request_id || ''))) return bad('client_request_id', 'client_request_id must be a uuid');
-    if (!RECORD_TYPES.includes(body.record_type)) return bad('record_type', 'record_type must be Mitigation, Contents or Rebuild');
+    if (!RECORD_TYPES.includes(body.record_type)) return bad('record_type', 'record_type must be Mitigation, Contents, Rebuild, Testing or Abatements');
     const enabled = (loc.record_types || []).length ? loc.record_types : ['Mitigation'];
     if (!enabled.includes(body.record_type)) return bad('record_type', `${loc.name} does not create ${body.record_type} jobs`);
     if (!['residential', 'commercial'].includes(body.property_type)) return bad('property_type', 'property_type must be residential or commercial');
@@ -355,7 +366,8 @@ module.exports = function mountIntake(app, deps) {
       if (clean(body.caller.email) && !EMAIL_RE.test(clean(body.caller.email))) return bad('caller.email', 'Caller email looks invalid');
     }
     const a = body.address || {};
-    if (!clean(a.street) && !clean(a.formatted)) return bad('address.street', 'Address is required');
+    // A testing job linked to one of our jobs may borrow its address (copied in createIntakeJob).
+    if (!clean(a.street) && !clean(a.formatted) && !(isTestingRecordType(body.record_type) && body.referring_job_id)) return bad('address.street', 'Address is required');
     if (!body.lead || !UUID_RE.test(String(body.lead.lead_source_company_id || ''))) return bad('lead.lead_source_company_id', 'Pick a lead source');
     if (body.lead.lead_source_id && !UUID_RE.test(String(body.lead.lead_source_id))) return bad('lead.lead_source_id', 'Invalid referrer');
     if (body.lead.lead_type && !LEAD_TYPES.includes(body.lead.lead_type)) return bad('lead.lead_type', 'Invalid lead type');
@@ -367,6 +379,17 @@ module.exports = function mountIntake(app, deps) {
       if (typeof d.standing_water !== 'boolean') return bad('details.standing_water', 'Standing water: pick Yes or No');
     }
     if (body.record_type === 'Rebuild' && !clean(d.scope_summary)) return bad('details.scope_summary', 'Scope summary is required');
+    if (body.record_type === 'Testing' && !normalizeTestTypes(d.test_types).length) return bad('details.test_types', 'Pick at least one type of testing');
+    if (d.insurance_type && !['Insurance', 'Non-Insurance'].includes(clean(d.insurance_type))) return bad('details.insurance_type', 'insurance_type must be Insurance or Non-Insurance');
+    if (body.visit) {
+      const vs = body.visit;
+      if (!VISIT_KINDS.includes(vs.task_type)) return bad('visit.task_type', 'visit.task_type must be inspection or testing');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(vs.date || ''))) return bad('visit.date', 'Visit date must be YYYY-MM-DD');
+      if (!UUID_RE.test(String(vs.assigned_to_profile_id || ''))) return bad('visit.assigned_to_profile_id', 'Pick who runs the visit');
+      const s = vs.slot;
+      if (s && !(Number.isInteger(s.start_min) && Number.isInteger(s.end_min) && s.end_min > s.start_min)) return bad('visit.slot', 'Invalid arrival window');
+      if (vs.task_type === 'testing' && !isTestingRecordType(body.record_type)) return bad('visit.task_type', 'Testing visits belong to Testing jobs');
+    }
     if (d.date_loss && !/^\d{4}-\d{2}-\d{2}$/.test(String(d.date_loss))) return bad('details.date_loss', 'Date of loss must be YYYY-MM-DD');
     if (body.inspection) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(String(body.inspection.date || ''))) return bad('inspection.date', 'Inspection date must be YYYY-MM-DD');
@@ -379,8 +402,9 @@ module.exports = function mountIntake(app, deps) {
 
   // ── The create sequence ───────────────────────────────────────────────────
   const inflight = new Map(); // client_request_id → promise
-  async function createIntakeJob(body, actor) {
+  async function createIntakeJob(body, actor, opts = {}) {
     const rid = String(body.client_request_id);
+    const isTesting = isTestingRecordType(body.record_type);
     const step = (s, extra) => log(rid, `step=${s}`, extra ? JSON.stringify(extra).slice(0, 300) : '');
     const warnings = [];
     const httpError = (status, code, error, extra) => Object.assign(new Error(error), { status, code, extra });
@@ -388,7 +412,7 @@ module.exports = function mountIntake(app, deps) {
     // 1. load + validate
     const loc = await loadLocation(body.location_id);
     if (!loc) throw httpError(400, 'VALIDATION', 'Unknown location', { field: 'location_id' });
-    if (!canCreateAt(actor, loc.id)) throw httpError(403, 'FORBIDDEN', 'You cannot create jobs at this location');
+    if (!opts.system && !canCreateAt(actor, loc.id)) throw httpError(403, 'FORBIDDEN', 'You cannot create jobs at this location');
     const v = validate(body, loc);
     if (v) throw httpError(400, 'VALIDATION', v.error, { field: v.field });
     if (!loc.jn_location_id) throw httpError(400, 'VALIDATION', `${loc.name} has no JobNimbus location id (Settings → Locations)`, { field: 'location_id' });
@@ -414,7 +438,10 @@ module.exports = function mountIntake(app, deps) {
       if (!jnSourceId) warnings.push('NO_JN_SOURCE');
     }
     if (jnSourceId && !settings.sources.some((s) => s.id === jnSourceId)) { warn(rid, 'jn source id not in account settings', jnSourceId); }
-    const leadType = body.lead.lead_type || lead.lead_type || (lead.company_type === 'Plumber' ? 'Plumber' : lead.company_type === 'Google' ? 'Google' : 'Other');
+    const leadType = isTesting
+      ? testingLeadType({ requested: body.lead.lead_type, lead })
+      : (body.lead.lead_type || lead.lead_type || (lead.company_type === 'Plumber' ? 'Plumber' : lead.company_type === 'Google' ? 'Google' : 'Other'));
+    const jnSourceName = jnSourceId ? ((settings.sources.find((x) => x.id === jnSourceId) || {}).name || lead.jn_source_name || null) : null;
     let leadLabel = lead.name;
     let leadPerson = null;
     if (body.lead.lead_source_id) {
@@ -434,9 +461,28 @@ module.exports = function mountIntake(app, deps) {
 
     // referring job (Contents/Rebuild linked to a mitigation job)
     let referringJob = null;
+    let referringLoc = null;
     if (body.referring_job_id) {
-      const rj = await sbGet(`jobs?id=eq.${enc(body.referring_job_id)}&select=id,jn_id,name,jn_contact_id,client_name`);
+      const rj = await sbGet(`jobs?id=eq.${enc(body.referring_job_id)}&select=id,jn_id,name,jn_contact_id,client_name,client_phone,address,lat,lng,location_id,jn_location_id,insurance_type,claim_number,insurer,adjuster_name,adjuster_phone,adjuster_email,cat,date_loss`);
       referringJob = rj && rj[0] ? rj[0] : null;
+      if (referringJob && referringJob.location_id) {
+        const rl = await sbGet(`locations?id=eq.${enc(referringJob.location_id)}&select=id,name,jn_location_id,jn_note_tag`).catch(() => null);
+        referringLoc = rl && rl[0] ? rl[0] : null;
+      }
+      if (isTesting && referringJob) {
+        // Like the work-order automation: the testing job reuses the source
+        // job's contact and copies its address, geo, claim and adjuster.
+        if (!body.link_contact_jn_id && referringJob.jn_contact_id) body.link_contact_jn_id = referringJob.jn_contact_id;
+        const a0 = body.address || (body.address = {});
+        if (!clean(a0.street) && !clean(a0.formatted) && referringJob.address) {
+          a0.formatted = referringJob.address;
+          if (referringJob.lat != null && referringJob.lng != null) { a0.lat = referringJob.lat; a0.lng = referringJob.lng; }
+        }
+        const d0 = body.details || (body.details = {});
+        for (const [k, v] of Object.entries({ insurance_type: referringJob.insurance_type, claim_number: referringJob.claim_number, insurer: referringJob.insurer, adjuster_name: referringJob.adjuster_name, adjuster_phone: referringJob.adjuster_phone, adjuster_email: referringJob.adjuster_email, type_of_loss: referringJob.cat, date_loss: referringJob.date_loss })) {
+          if (!clean(d0[k]) && clean(v)) d0[k] = v;
+        }
+      }
     }
 
     // 3. address + geocode
@@ -452,8 +498,17 @@ module.exports = function mountIntake(app, deps) {
     const geo = Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lon: lng } : undefined;
     const jnAddress = { address_line1: street, city: clean(a.city) || undefined, state_text: clean(a.state) || undefined, zip: clean(a.zip) || undefined };
 
-    const owners = (loc.jn_default_owner_ids || []).filter(Boolean).map((id) => ({ id: String(id) }));
-    const abbr = clean(loc.city_abbr).toUpperCase() || null;
+    let owners = (loc.jn_default_owner_ids || []).filter(Boolean).map((id) => ({ id: String(id) }));
+    let abbr = clean(loc.city_abbr).toUpperCase() || null;
+    if (isTesting) {
+      // "(DAL - TST)": the address city decides, then a linked job's own code, then the location.
+      const ta = testingAbbrFor({ city: a.city, linkedJobName: referringJob && referringJob.name, locationCityAbbr: loc.city_abbr });
+      abbr = ta.abbr;
+      if (!abbr) throw httpError(400, 'VALIDATION', 'Could not work out a city code for the job name — add a city to the address', { field: 'address.city' });
+      if (ta.from && ta.from !== 'city') warnings.push(`CITY_FROM_${ta.from.replace(/\s+/g, '_').toUpperCase()}`);
+      // Regional owners (Saleah + Jalisa everywhere, the market's regulars; never Joe Brooks).
+      owners = testingOwnersForIntake({ abbr, locationName: (referringLoc && referringLoc.name) || null, state: clean(a.state) }).map((id) => ({ id }));
+    }
     const usedNames = new Set();
 
     // 4. contact
@@ -520,7 +575,9 @@ module.exports = function mountIntake(app, deps) {
       step('contact-rollback', { contactJnId, deleted: !!del.ok });
     };
     const jobSuffix = clean((loc.job_name_suffixes || {})[body.record_type]) || (abbr ? `(${abbr} - ${TYPE_CODE[body.record_type]})` : '');
-    const jobCandidates = nameCandidates(base, jobSuffix, abbr ? `${abbr} - ${TYPE_CODE[body.record_type]}` : null);
+    const jobCandidates = isTesting
+      ? testingNameCandidates(base, abbr, body.record_type)
+      : nameCandidates(base, jobSuffix, abbr ? `${abbr} - ${TYPE_CODE[body.record_type]}` : null);
     let jobName = await pickFreeName('jobs', 'name', jobCandidates);
     if (!jobName) { await rollbackContact(); throw httpError(409, 'JN_JOB', `Every job name variant of "${base}" already exists in JobNimbus`); }
     const d = body.details || {};
@@ -593,6 +650,11 @@ module.exports = function mountIntake(app, deps) {
       if (!nr.ok) warnings.push('NOTE_FAILED');
     }
     step('note', { ok: note.ok });
+    if (isTesting && referringJob && referringJob.jn_id && !DRYRUN) {
+      const srcText = `Testing requested: ${jobName} (https://app.jobnimbus.com/job/${jobJnId})${formatTestTypes(d.test_types) ? ` — ${formatTestTypes(d.test_types)}` : ''}. Entered by ${actor.name}.`;
+      const sn = await jnAddNote(referringJob.jn_id, srcText, { jnLocationId: (referringLoc && referringLoc.jn_location_id) || referringJob.jn_location_id || undefined, tag: (referringLoc && referringLoc.jn_note_tag) || undefined }).catch((e) => ({ ok: false, error: e.message }));
+      if (!sn.ok) warnings.push('SOURCE_NOTE_FAILED');
+    }
 
     // 8. local rows
     let jobId = null;
@@ -606,6 +668,7 @@ module.exports = function mountIntake(app, deps) {
       adjuster_name: clean(d.adjuster_name) || null, adjuster_phone: clean(d.adjuster_phone) || null, adjuster_email: clean(d.adjuster_email) || null,
       sales_rep: rep ? rep.full_name : null, sales_rep_profile_id: rep ? rep.id : null,
       lead_source_company_id: lead.id, lead_source_id: leadPerson ? leadPerson.id : null,
+      jn_source_id: jnSourceId || null, jn_source_name: jnSourceName,
       property_type: body.property_type, referring_job_id: referringJob ? referringJob.id : null,
       intake_request_id: rid, callrail_call_id: clean(body.callrail_call_id) || null,
       jn_created: new Date().toISOString(), jn_updated: new Date().toISOString(), last_synced: new Date().toISOString(),
@@ -633,30 +696,44 @@ module.exports = function mountIntake(app, deps) {
     } catch (err) { warn(rid, 'local upsert failed', err.message); warnings.push('LOCAL_UPSERT_FAILED'); }
     step('local', { jobId });
 
-    // 9. visit (inspection) + scheduled note
+    // 9. visit + scheduled note. Mitigation: `inspection` with the sales rep.
+    //    Testing: `visit` { task_type:'testing', assigned_to_profile_id, test_types, service_min }.
     let visit = null;
-    if (body.inspection && rep && jobId) {
-      const slot = body.inspection.slot || null;
+    const testTypes = isTesting ? normalizeTestTypes(d.test_types) : [];
+    let visitReq = null;
+    if (body.visit) {
+      const tr = await sbGet(`profiles?id=eq.${enc(body.visit.assigned_to_profile_id)}&select=id,full_name,jn_user_id`);
+      const tech = tr && tr[0] ? tr[0] : null;
+      if (!tech) warnings.push('VISIT_TECH_NOT_FOUND');
+      else visitReq = { task_type: body.visit.task_type, date: body.visit.date, slot: body.visit.slot || null, who: tech,
+        test_types: body.visit.task_type === 'testing' ? (normalizeTestTypes(body.visit.test_types).length ? normalizeTestTypes(body.visit.test_types) : testTypes) : null,
+        service_min: body.visit.task_type === 'testing' ? (Number(body.visit.service_min) > 0 ? Math.round(Number(body.visit.service_min)) : testingServiceMinutes(testTypes)) : null };
+    } else if (body.inspection && rep) {
+      visitReq = { task_type: 'inspection', date: body.inspection.date, slot: body.inspection.slot || null, who: rep, test_types: null, service_min: null };
+    }
+    if (visitReq && jobId) {
+      const slot = visitReq.slot;
       const label = windowLabel(slot);
       try {
         let ins = await sbInsert('inspections', {
-          job_id: jobId, jn_id: jobJnId, scheduled_date: body.inspection.date,
+          job_id: jobId, jn_id: jobJnId, scheduled_date: visitReq.date,
           slot_start_min: slot ? slot.start_min : null, slot_end_min: slot ? slot.end_min : null,
-          scheduled_time: label, task_type: 'inspection', status: 'scheduled',
-          assigned_to_ids: [rep.id], notes: null, location_id: loc.id, created_by: actor.id,
+          scheduled_time: label, task_type: visitReq.task_type, status: 'scheduled',
+          assigned_to_ids: [visitReq.who.id], notes: null, location_id: loc.id, created_by: actor.id || null,
           block_kind: 'window', crew_size: null, jn_task_dirty: true,
+          ...(visitReq.task_type === 'testing' ? { test_types: visitReq.test_types || [], service_min: visitReq.service_min } : {}),
         });
         if (!ins || !ins.id) {
           // PostgREST sometimes returns an empty representation even though the
           // insert succeeded (seen in prod — the visit was on the schedule while
           // the form said it failed). Read the row back before giving up.
-          const back = await sbGet(`inspections?job_id=eq.${enc(jobId)}&task_type=eq.inspection&status=eq.scheduled&order=created_at.desc&limit=1&select=id`);
+          const back = await sbGet(`inspections?job_id=eq.${enc(jobId)}&task_type=eq.${enc(visitReq.task_type)}&status=eq.scheduled&order=created_at.desc&limit=1&select=id`);
           if (back && back[0] && back[0].id) ins = back[0];
         }
         if (ins && ins.id) {
-          visit = { id: ins.id, date: body.inspection.date, window: label };
+          visit = { id: ins.id, date: visitReq.date, window: label, task_type: visitReq.task_type, who: visitReq.who.full_name || null };
           syncVisitJnTask(ins.id).catch((e) => warn(rid, 'task sync', e.message));
-          const sn = await postInspectionScheduledNote(ins.id, { loc, rep, jobJnId, jnLocId, date: body.inspection.date, label, actor }).catch((e) => ({ ok: false, error: e.message }));
+          const sn = await postInspectionScheduledNote(ins.id, { loc, rep: visitReq.who, jobJnId, jnLocId, date: visitReq.date, label, actor, taskType: visitReq.task_type, testTypes: visitReq.test_types }).catch((e) => ({ ok: false, error: e.message }));
           if (!sn.ok) warnings.push('SCHED_NOTE_FAILED');
         } else warnings.push('VISIT_FAILED');
       } catch (err) {
@@ -665,7 +742,7 @@ module.exports = function mountIntake(app, deps) {
         visit = { id: null, error: pe.message, code: pe.code, conflicts: pe.details ? safeJson(pe.details) : null };
         warn(rid, 'visit failed', pe.message);
       }
-    } else if (body.inspection && !jobId) warnings.push('VISIT_FAILED');
+    } else if ((body.inspection || body.visit) && !jobId) warnings.push('VISIT_FAILED');
     step('visit', { visit: visit && visit.id });
 
     const result = {
@@ -677,7 +754,7 @@ module.exports = function mountIntake(app, deps) {
     };
 
     // 10. notifications + CallRail activity (fire and forget)
-    notifyJobCreated({ loc, body, row, result, rep, leadLabel, actor }).catch((e) => warn(rid, 'notify', e.message));
+    notifyJobCreated({ loc, body, row, result, rep: rep || (visit && visit.who ? { full_name: visit.who } : null), leadLabel, actor }).catch((e) => warn(rid, 'notify', e.message));
     if (row.callrail_call_id && loc.post_call_activities) setTimeout(() => postCallActivities().catch(() => {}), 2000);
     return result;
   }
@@ -720,8 +797,9 @@ module.exports = function mountIntake(app, deps) {
     }
     if (!jobJnId) return { ok: false, error: 'No JobNimbus job' };
     const reps = ctx.reps || (rep ? [rep] : []);
-    const who = reps.map((r) => r.full_name).filter(Boolean).join(' & ') || 'the sales rep';
-    const text = `Inspection scheduled for ${fmtLongDate(date)}, ${label} with ${who}.`;
+    const who = reps.map((r) => r.full_name).filter(Boolean).join(' & ') || (ctx.taskType === 'testing' ? 'the tester' : 'the sales rep');
+    const kinds = Array.isArray(ctx.testTypes) && ctx.testTypes.length ? ` (${ctx.testTypes.join(' + ')})` : '';
+    const text = `${VISIT_LABEL[ctx.taskType] || 'Inspection'}${kinds} scheduled for ${fmtLongDate(date)}, ${label} with ${who}.`;
     const users = await jnUsersById().catch(() => new Map());
     const mentions = [];
     const push = (id) => { const u = id && users.get(String(id)); if (u && u.mention && !mentions.includes(u.mention)) mentions.push(u.mention); };
@@ -754,8 +832,9 @@ module.exports = function mountIntake(app, deps) {
     const c = body.contact || {};
     const isCommercial = body.property_type === 'commercial';
     const leadName = clean(leadLabel) || 'New';
+    const testing = isTestingRecordType(body.record_type);
     const lines = [];
-    lines.push({ b: `🚨 ${leadName} Lead · ${loc.name} 🚨` });
+    lines.push({ b: testing ? `🧪 ${leadName} testing lead · ${loc.name}` : `🚨 ${leadName} Lead · ${loc.name} 🚨` });
     lines.push('');
     if (isCommercial) {
       lines.push({ label: 'Business', value: result.contact.display_name, prefix: '🏢 ' });
@@ -769,6 +848,11 @@ module.exports = function mountIntake(app, deps) {
     lines.push('');
     lines.push({ b: '⚒️ Job Details' });
     lines.push({ label: 'Job type', value: body.record_type });
+    if (testing && formatTestTypes(d.test_types)) lines.push({ label: 'Testing', value: formatTestTypes(d.test_types) });
+    if (testing && d.referring_wo) lines.push({ label: 'Referring WO', value: `#${clean(d.referring_wo, 80)}` });
+    if (testing && d.referring_contact) lines.push({ label: 'Referring contact', value: clean(d.referring_contact, 200) });
+    if (testing && d.instructions) lines.push({ label: 'Instructions', value: clean(d.instructions, 600) });
+    if (testing && body.lead_link && body.lead_link.sender_name) lines.push({ label: 'Sent by', value: `${clean(body.lead_link.sender_name, 80)} via lead link` });
     if (d.type_of_loss) lines.push({ label: 'Type', value: clean(d.type_of_loss) });
     if (d.cause_of_damage) lines.push({ label: 'Cause', value: clean(d.cause_of_damage, 200) });
     if (d.rooms_affected) lines.push({ label: 'Rooms affected', value: clean(d.rooms_affected) });
@@ -780,8 +864,9 @@ module.exports = function mountIntake(app, deps) {
     if (d.areas_affected) lines.push({ label: 'Areas', value: clean(d.areas_affected, 200) });
     if (d.notes) lines.push({ label: 'Notes', value: clean(d.notes, 600) });
     lines.push('');
-    if (result.visit && result.visit.id) lines.push({ label: 'Inspection', value: `${fmtLongDate(result.visit.date)} · ${result.visit.window}${rep ? ` — ${rep.full_name}` : ''}`, prefix: '📅 ' });
-    else lines.push({ label: 'Inspection', value: `Not scheduled${rep ? ` · Rep: ${rep.full_name}` : ''}`, prefix: '📅 ' });
+    const visitWord = testing ? 'Testing visit' : 'Inspection';
+    if (result.visit && result.visit.id) lines.push({ label: visitWord, value: `${fmtLongDate(result.visit.date)} · ${result.visit.window}${rep ? ` — ${rep.full_name}` : ''}`, prefix: '📅 ' });
+    else lines.push({ label: visitWord, value: testing ? 'Not scheduled · on the testing routes list' : `Not scheduled${rep ? ` · Rep: ${rep.full_name}` : ''}`, prefix: '📅 ' });
     lines.push('');
     lines.push({ i: `Created in JobNimbus by ${actor.name} · ${result.job.name}` });
     const buttons = [{ text: 'Open in JobNimbus', url: result.job.jn_url }];
@@ -917,5 +1002,5 @@ module.exports = function mountIntake(app, deps) {
     } catch (err) { res.status(502).json({ error: err.message }); }
   });
 
-  return { createIntakeJob, postInspectionScheduledNote, postCallActivities, surveyLocation, jnAccountSettings };
+  return { createIntakeJob, loadActor, loadLocation, postInspectionScheduledNote, postCallActivities, surveyLocation, jnAccountSettings };
 };
