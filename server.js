@@ -271,6 +271,17 @@ function jnNum(v) {
   if (v === undefined || v === null || v === '') return undefined;
   const n = Number(v); return Number.isFinite(n) ? n : undefined;
 }
+// JobNimbus job.source (JobSourceId) + source_name → jobs.jn_source_id / jn_source_name.
+function jnSourceCols(job) {
+  const out = {};
+  if (!job || typeof job !== 'object') return out;
+  const raw = job.source != null && typeof job.source === 'object' ? job.source.id : job.source;
+  if (raw !== undefined && raw !== null && raw !== '' && /^\d+$/.test(String(raw))) out.jn_source_id = Number(raw);
+  else if (raw === null || raw === '' || raw === 0) out.jn_source_id = null;
+  if (job.source_name !== undefined) out.jn_source_name = job.source_name ? String(job.source_name).trim() : null;
+  return out;
+}
+
 function invoiceBalanceCols(job) {
   const out = {};
   const total = jnNum(job.approved_invoice_total);
@@ -337,6 +348,9 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   set('date_start', jnToDate(job.start_date));
   set('record_type', recordType || undefined);
   set('status', job.status_name || undefined);
+  // JobNimbus lead source (every record type): the Stats "Lead Sources" panel
+  // at testing locations groups by it (columns from add_job_intake.sql).
+  Object.assign(row, jnSourceCols(job));
   if (job.active !== undefined) set('is_active', !!job.active);
   else if (job.is_active !== undefined) set('is_active', !!job.is_active);
   set('jn_created', jnToISO(job.date_created));
@@ -1484,7 +1498,7 @@ let lastInvoiceBalanceSync = null;
 async function jnFetchArJobs() {
   const out = [];
   const filter = encodeURIComponent(JSON.stringify({ must: [{ terms: { status_name: AR_STATUSES } }] }));
-  const fields = 'jnid,status_name,record_type_name,approved_invoice_total,approved_invoice_due,last_invoice_date_invoice,date_updated';
+  const fields = 'jnid,status_name,record_type_name,approved_invoice_total,approved_invoice_due,last_invoice_date_invoice,date_updated,source,source_name';
   let count = Infinity;
   for (let from = 0; from < 10000 && out.length < count; from += 500) {
     const r = await fetch(`${JN_BASE}/jobs?size=500&from=${from}&filter=${filter}&fields=${fields}`, {
@@ -1525,7 +1539,7 @@ async function reconcileInvoiceBalances() {
       if (!id || !tracked.has(id)) continue;
       const cols = invoiceBalanceCols(j);
       if (cols.approved_invoice_due === undefined && cols.approved_invoice_total === undefined) continue;
-      rows.push({ jn_id: id, ...cols });
+      rows.push({ jn_id: id, ...cols, ...jnSourceCols(j) });
     }
     for (let i = 0; i < rows.length; i += 500) await sbBulkUpsert('jobs', rows.slice(i, i + 500));
 
@@ -1554,6 +1568,84 @@ app.post('/admin/jobs/invoice-balances', requireAuth, requireAdmin, (req, res) =
 app.get('/admin/jobs/invoice-balances', requireAuth, requireAdmin, (req, res) => {
   res.json({ running: invoiceBalanceRunning, last: lastInvoiceBalanceSync });
 });
+
+// ── JN lead-source backfill ───────────────────────────────────────────────────
+// One-time: fill jobs.jn_source_id / jn_source_name for every tracked job of a
+// record type (default Testing; also Abatements). The webhook keeps them
+// current from here on. Pages JN /jobs filtered to the workflow id (the ES
+// from+size cap is 10k; Testing ≈ 8.6k across both testing locations) and
+// bulk-upserts only jnids we already track, so no skeleton rows appear.
+//   POST /admin/jobs/backfill-sources?record_type=Testing[&dryrun=1]
+let sourceBackfill = { running: false, last: null };
+async function jnWorkflowIdByName(name) {
+  const j = await jnGetJson('account/settings');
+  const w = (Array.isArray(j && j.workflows) ? j.workflows : [])
+    .find((x) => x.object_type === 'job' && String(x.name || '').trim().toLowerCase() === String(name).toLowerCase());
+  return w ? Number(w.id) : null;
+}
+async function jnFetchJobsByWorkflow(wfId) {
+  const out = [];
+  const filter = encodeURIComponent(JSON.stringify({ must: [{ term: { record_type: wfId } }] }));
+  const fields = 'jnid,record_type_name,source,source_name,date_updated';
+  let count = Infinity;
+  for (let from = 0; from < 10000 && out.length < count; from += 500) {
+    const r = await fetch(`${JN_BASE}/jobs?size=500&from=${from}&sort_field=date_created&sort_direction=desc&filter=${filter}&fields=${fields}`, {
+      headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' },
+    });
+    if (!r.ok) throw new Error(`JN /jobs ${r.status}`);
+    const data = await r.json();
+    const page = data?.results ?? data?.data ?? [];
+    count = data?.count ?? data?.total ?? page.length;
+    out.push(...page);
+    if (page.length < 500) break;
+  }
+  return { jobs: out, count: count === Infinity ? out.length : count };
+}
+async function backfillJobSources({ recordType, dryrun }) {
+  sourceBackfill = { running: true, last: { phase: 'started', record_type: recordType, dryrun, at: new Date().toISOString() } };
+  try {
+    const wfId = await jnWorkflowIdByName(recordType);
+    if (!wfId) throw new Error(`No JobNimbus job workflow named "${recordType}"`);
+    const { jobs, count } = await jnFetchJobsByWorkflow(wfId);
+    const ids = jobs.map(j => String(j.jnid || j.id || '')).filter(Boolean);
+    const tracked = new Set();
+    for (let i = 0; i < ids.length; i += 200) {
+      const inList = ids.slice(i, i + 200).map(id => `"${id}"`).join(',');
+      const rows = await sbSelect('jobs', `select=jn_id&jn_id=in.(${encodeURIComponent(inList)})`);
+      for (const r of rows) tracked.add(r.jn_id);
+    }
+    const rows = [];
+    let withSource = 0;
+    for (const j of jobs) {
+      const id = String(j.jnid || j.id || '');
+      if (!id || !tracked.has(id)) continue;
+      const cols = jnSourceCols(j);
+      if (cols.jn_source_id === undefined && cols.jn_source_name === undefined) continue;
+      if (cols.jn_source_id) withSource++;
+      rows.push({ jn_id: id, ...cols });
+    }
+    if (!dryrun) for (let i = 0; i < rows.length; i += 500) await sbBulkUpsert('jobs', rows.slice(i, i + 500));
+    const summary = { phase: 'done', record_type: recordType, workflow_id: wfId, dryrun, jn_jobs: jobs.length, jn_count: count, tracked: rows.length, with_source: withSource, capped: count > 10000, at: new Date().toISOString() };
+    console.log('[source-backfill]', JSON.stringify(summary));
+    sourceBackfill = { running: false, last: summary };
+    return summary;
+  } catch (err) {
+    console.error('[source-backfill] failed:', err.message);
+    sourceBackfill = { running: false, last: { phase: 'error', record_type: recordType, error: err.message, at: new Date().toISOString() } };
+    throw err;
+  }
+}
+app.post('/admin/jobs/backfill-sources', requireAuth, requireAdmin, async (req, res) => {
+  if (sourceBackfill.running) return res.status(409).json({ error: 'Backfill already running', last: sourceBackfill.last });
+  const recordType = String(req.query.record_type || 'Testing');
+  const dryrun = req.query.dryrun === '1';
+  try {
+    if (dryrun) return res.json({ ok: true, ...(await backfillJobSources({ recordType, dryrun: true })) });
+    backfillJobSources({ recordType, dryrun: false }).catch(() => {}); // background
+    res.status(202).json({ ok: true, started: true, record_type: recordType });
+  } catch (err) { res.status(502).json({ error: err.message }); }
+});
+app.get('/admin/jobs/backfill-sources', requireAuth, requireAdmin, (req, res) => res.json(sourceBackfill));
 
 // ── JN contact-id backfill ────────────────────────────────────────────────────
 // One-time: fill jobs.jn_contact_id (the job's related contact jnid) for every
@@ -3541,9 +3633,15 @@ function techRateOk(token) {
   return e.n <= 60;
 }
 
-const VISIT_TYPE_LABEL = { inspection: 'Inspection', monitor: 'Monitor', demo: 'Demo', closeout: 'Closeout' };
+const VISIT_TYPE_LABEL = { inspection: 'Inspection', monitor: 'Monitor', demo: 'Demo', closeout: 'Closeout', testing: 'Testing' };
+// "Testing (Asbestos + Lead)" for testing visits with test types; the plain label otherwise.
+function visitKindLabel(visit) {
+  const label = VISIT_TYPE_LABEL[visit && visit.task_type] || 'Visit';
+  const types = visit && visit.task_type === 'testing' && Array.isArray(visit.test_types) ? visit.test_types.filter(Boolean) : [];
+  return types.length ? `${label} (${types.join(' + ')})` : label;
+}
 function visitNoteText(visit, pct, actorName, note) {
-  const label = VISIT_TYPE_LABEL[visit.task_type] || 'Visit';
+  const label = visitKindLabel(visit);
   const head = visit.task_type === 'demo' && pct < 100 ? `${label} ${pct}% complete` : `${label} complete`;
   const n = String(note || '').trim();
   return n ? `${head} — ${actorName}: ${n}` : `${head} — ${actorName}`;
@@ -4147,7 +4245,7 @@ async function visitNoteContext(visit, actorId) {
 
 // Shared by the token route and the signed-in route.
 async function completeVisit({ visitId, pct, note, actor, source }) {
-  const visit = await loadVisit(visitId, `id,jn_id,task_type,status,assigned_to_ids,completion_pct,location_id,${REPORT_COLUMNS.join(',')}`);
+  const visit = await loadVisit(visitId, `id,jn_id,task_type,test_types,status,assigned_to_ids,completion_pct,location_id,${REPORT_COLUMNS.join(',')}`);
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
   if (visit.status === 'cancelled') return { status: 409, body: { error: 'This visit was cancelled' } };
   let p = Number(pct);
@@ -4200,7 +4298,7 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
 
 // Re-post the JN note for the latest failed update.
 async function retryVisitJn(visitId) {
-  const visit = await loadVisit(visitId, `id,jn_id,task_type,status,location_id,${REPORT_COLUMNS.join(',')}`);
+  const visit = await loadVisit(visitId, `id,jn_id,task_type,test_types,status,location_id,${REPORT_COLUMNS.join(',')}`);
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
   const rows = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
   const upd = rows && rows[0];
@@ -4462,8 +4560,10 @@ function buildJnTaskBody(v, job, techs, settings, taskType, tz) {
   const label = VISIT_TYPE_LABEL[v.task_type] || 'Visit';
   const jobName = (job && (job.name || job.client_name)) || v.jn_id;
   const crew = v.crew_size || (v.assigned_to_ids || []).length || null;
+  const testTypes = v.task_type === 'testing' && Array.isArray(v.test_types) ? v.test_types.filter(Boolean) : [];
   const lines = [
     String(v.notes || '').trim() || null,
+    testTypes.length ? `Testing: ${testTypes.join(' + ')}${v.service_min ? ` · ~${v.service_min} min on site` : ''}` : null,
     `${blockLine(v, settings)}${crew ? ` · crew of ${crew}` : ''}`,
     unlinked.length ? `Assigned (no JobNimbus user): ${unlinked.join(', ')}` : null,
     REPORT_KINDS[v.task_type] && reportOf(v) ? REPORT_KINDS[v.task_type].taskLine(reportOf(v)) : null,
@@ -4498,10 +4598,10 @@ function buildJnTaskBody(v, job, techs, settings, taskType, tz) {
 // pushed before clearing the dirty flag (edits racing the push stay dirty).
 function visitFingerprint(v) {
   return JSON.stringify([v.scheduled_date, v.slot_start_min, v.slot_end_min, v.block_kind, v.crew_size,
-    v.task_type, v.status, v.notes, v.jn_id, [...(v.assigned_to_ids || [])].sort()]);
+    v.task_type, v.status, v.notes, v.jn_id, [...(v.assigned_to_ids || [])].sort(), v.test_types || null, v.service_min || null]);
 }
 
-const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,slot_start_min,slot_end_min,block_kind,crew_size,task_type,status,notes,' +
+const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,slot_start_min,slot_end_min,block_kind,crew_size,task_type,test_types,service_min,status,notes,' +
   'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,demo_report,monitor_report,inspection_report,jobs(name,client_name,location_id,jn_location_id)';
 
 const visitSyncLocks = new Set();
@@ -6581,7 +6681,9 @@ require('./supp-admin')(app, {
 });
 
 // New Job intake (app → JobNimbus contact → job → note → visit; see intake.js).
-require('./intake')(app, {
+// Testing / Abatements jobs go through the same path with the work-order
+// automation's naming + owner rules (intakeTesting.js).
+const intake = require('./intake')(app, {
   SUPABASE_URL, SUPABASE_SERVICE_KEY, WEB_APP_URL: process.env.WEB_APP_URL || 'https://dryops.app',
   requireAuth, requireAdmin,
   sbGet, sbInsert, sbPatch, sbUpsert,
@@ -6589,6 +6691,15 @@ require('./intake')(app, {
   geocode, normPhone, toE164, UUID_RE, EMAIL_RE,
   callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
   syncVisitJnTask, loadScheduleSettings, fmtMin,
+});
+
+// Lead-source links (dryops.app/lead/<token>): an external referrer's one-screen
+// testing request → Testing job + photos on the JN job (see leadLinks.js).
+require('./leadLinks')(app, {
+  SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAuth,
+  sbGet, sbInsert, sbPatch, jnUploadFile,
+  createIntakeJob: intake.createIntakeJob, loadActor: intake.loadActor,
+  makeRateLimiter: require('./homeowner').makeRateLimiter, clientIp: require('./homeowner').clientIp,
 });
 
 // Testing job from a testing work order (JN automation webhook → Testing job
