@@ -448,7 +448,7 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
 <div class="tot"><div class="card"><span>In Progress</span>${q('ip')}<b>${whole(ipAll)}</b>${help('ip', 'Owner-entered value of every job being worked on, all pooled locations.')}</div><div class="card"><span>Collecting</span>${q('col')}<b>${whole(cAll)}</b>${help('col', 'Invoiced money expected to land this week — owner-entered or set by "Review notes".')}</div>
 <div class="card"><span>AR</span>${q('ar')}<b>${whole(arAll)}</b>${help('ar', 'DryOps Open AR: approved-invoice balance on Invoice Created / Invoiced / Pending Payment jobs, every record type. Same number as the Dashboard.')}</div><div class="card"><span>Bank Balance</span>${q('bank')}<b>${whole(bankAll)}</b>${bankMissing ? `<div class="meta">${bankMissing} location${bankMissing === 1 ? '' : 's'} not entered</div>` : ''}${help('bank', 'Sum of the balances owners typed on their forms today.')}</div></div>
 <div class="actions" style="margin:0 0 14px"><button class="btn ghost" id="review-all">Review all AR notes</button><a class="btn ghost" href="/wip/master/${esc(req.params.master)}/text" target="_blank">Combined text</a></div>
-<div class="sub" style="margin-bottom:14px">“Review notes” reads each invoiced job's JobNimbus notes from the last 3 weeks and marks what is agreed or issued as Collecting. ${weeklyReview.enabled ? `It runs by itself every <b>Saturday at ${weeklyReview.hourLabel} Central</b> for every location here` : 'The automatic Saturday run is switched off (WIP_AUTO_REVIEW=off)'}${anthropic ? '' : ' — <b>ANTHROPIC_API_KEY is not set on the server, so it will fail until it is</b>'}.</div>
+<div class="sub" style="margin-bottom:14px">“Review notes” reads each invoiced job's JobNimbus notes from the last 5 weeks and marks as Collecting what should actually arrive during the upcoming week — a mailed carrier check counts 10–14 business days after its issue date, not when it was promised. ${weeklyReview.enabled ? `It runs by itself every <b>Saturday at ${weeklyReview.hourLabel} Central</b> for every location here` : 'The automatic Saturday run is switched off (WIP_AUTO_REVIEW=off)'}${anthropic ? '' : ' — <b>ANTHROPIC_API_KEY is not set on the server, so it will fail until it is</b>'}.</div>
 <div id="review-out"></div>
 ${cards.join('') || '<div class="card">No locations yet — add one below, then send the owner link.</div>'}
 <div class="card"><b>Add a location</b><div class="row" style="margin-top:10px"><select id="add-loc" style="flex:1"><option value="">Choose a location…</option>${options}</select><button class="btn ghost" id="add-btn">Add</button></div></div>`;
@@ -519,7 +519,23 @@ document.addEventListener('change',async e=>{const i=e.target.closest('input[dat
   // ones are actually collectible this week; writes the answer into wip_entries
   // as 'ai-review' rows. Owner-edited rows are never overwritten.
   const REVIEW_MODEL = 'claude-opus-5';
-  const REVIEW_LOOKBACK_DAYS = 21;
+  // 5 weeks: a mailed carrier check takes 10–14 business days (≈ 2–3 calendar
+  // weeks) to arrive, so the "issued" note for a check landing next week can be
+  // up to ~3 weeks old, and an overdue one older still.
+  const REVIEW_LOOKBACK_DAYS = 35;
+  // The week the WIP report covers. Sat/Sun runs (the Saturday auto-review)
+  // look at the coming Mon–Sun; a weekday run covers the rest of this week.
+  function upcomingWeek(now = new Date()) {
+    const d = new Date(now.toLocaleDateString('en-CA', { timeZone: 'America/Chicago' }) + 'T12:00:00Z');
+    const dow = d.getUTCDay(); // 0 Sun … 6 Sat
+    const start = new Date(d);
+    if (dow === 6) start.setUTCDate(d.getUTCDate() + 2);
+    else if (dow === 0) start.setUTCDate(d.getUTCDate() + 1);
+    const end = new Date(start);
+    end.setUTCDate(start.getUTCDate() + (7 - start.getUTCDay()) % 7);
+    const iso = x => x.toISOString().slice(0, 10);
+    return { today: iso(d), start: iso(start), end: iso(end) };
+  }
   const NOISE_TYPES = new Set(['Assigned Job', 'Unassigned Job', 'Assigned Contact', 'Text Message', 'Attachment deleted', 'Related to task', 'Task Completed', 'Automation']);
 
   const ReviewSchema = z.object({
@@ -531,14 +547,20 @@ document.addEventListener('change',async e=>{const i=e.target.closest('input[dat
     })),
   });
 
-  const REVIEW_SYSTEM = `You review collections notes for a water-damage restoration company and decide, per invoiced job, whether payment can realistically be collected in the coming week.
+  const REVIEW_SYSTEM = `You review collections notes for a water-damage restoration company and decide, per invoiced job, whether payment will realistically ARRIVE during the upcoming week stated in the message. "Collecting" means money we expect to have in hand that week — not money that has merely been promised.
+
+Mail time is the key rule. Insurance carriers pay by mailed check by default, and a mailed check takes 10–14 business days (about 14–20 calendar days) to reach the office from the date it was issued/mailed. So:
+- Carrier check issued or mailed on date D: expected arrival is D + 14 to D + 20 calendar days. It is "collecting" only if that arrival window overlaps the upcoming week. A check issued fewer than ~14 days before the week starts will arrive the week after — "not_yet", and say when it is expected.
+- A mailed check whose arrival window has already passed (issued more than ~3 weeks ago) with no receipt logged: still "collecting" if the office has since confirmed it is in transit or has been re-issued; "not_yet" if there is no follow-up, since it may be lost and needs a call.
+- EFT / ACH / direct deposit, overnight or courier, card payments, or a customer/mortgage company who says they have the check in hand or will pay that week: arrival is days, not weeks — "collecting" when the note is recent.
+- "Approved", "agreed to the amount", "sent to payment processing" is NOT issued. Only count it when the notes give an issue/mail date that fits the window above, or the payer committed to paying that week.
 
 Decisions:
-- "collecting": within the last ~3 weeks the notes show payment is agreed or issued — a carrier confirmed it issued/mailed a check or agreed to a specific amount, the customer confirmed they have the check or will pay this week, or a check is on its way to the office. amount = the agreed/issued amount if one is stated (minus anything already paid), otherwise the balance due.
+- "collecting": per the rules above the money should arrive during the upcoming week. amount = the issued/agreed amount if one is stated (minus anything already paid), otherwise the balance due.
 - "received": the notes say the check was received, deposited, or payment posted, but the job still shows a balance. amount = what was received. (Nobody has logged the payment yet.)
-- "not_yet": anything else — invoice under review, comparative or line items disputed, claim denied, waiting on adjuster/reviewer with no answer, attorney, public adjuster or appraisal, monthly payment plan, bank investigation, customer unresponsive, or a promised check that is now more than 3 weeks old with no follow-up confirming it.
+- "not_yet": anything else — invoice under review, comparative or line items disputed, claim denied, waiting on adjuster/reviewer with no answer, attorney, public adjuster or appraisal, monthly payment plan, bank investigation, customer unresponsive, or a check that will not arrive until after the upcoming week.
 
-Be conservative: silence is "not_yet". Never invent amounts. reason: one short sentence (max 120 characters) naming the payer and the date of the key note. Return one entry for every job you were given.`;
+Be conservative: silence is "not_yet". Never invent amounts or dates. reason: one short sentence (max 120 characters) naming the payer, the date of the key note and, for mailed checks, the expected arrival. Return one entry for every job you were given.`;
 
   async function jnActivities(jnIds, sinceMs) {
     const out = [];
@@ -565,7 +587,8 @@ Be conservative: silence is "not_yet". Never invent amounts. reason: one short s
   async function reviewLocation(pool, opts = {}) {
     const data = await loadLocation(pool);
     const ar = data.rows.filter(r => r.group === 'ar' && !r.custom && r.jn_id);
-    const since = Date.now() - REVIEW_LOOKBACK_DAYS * 86400000;
+    const now = opts.now || new Date();
+    const since = now.getTime() - REVIEW_LOOKBACK_DAYS * 86400000;
     const acts = ar.length ? await jnActivities(ar.map(r => r.jn_id), since) : [];
     const byJn = {};
     for (const a of acts) {
@@ -588,13 +611,13 @@ Be conservative: silence is "not_yet". Never invent amounts. reason: one short s
     if (!anthropic) throw new Error('ANTHROPIC_API_KEY is not set on the server');
     if (!jobs.length) return { label: data.label, jobs_reviewed: 0, applied: 0, skipped_owner: [], jobs: [] };
 
-    const today = new Date().toISOString().slice(0, 10);
+    const week = upcomingWeek(now);
     const response = await anthropic.messages.parse({
       model: REVIEW_MODEL,
       max_tokens: 16000,
       system: REVIEW_SYSTEM,
       output_config: { format: zodOutputFormat(ReviewSchema), effort: 'medium' },
-      messages: [{ role: 'user', content: `Today is ${today}. Location: ${data.label}.\n\nJobs (with recent JobNimbus notes, newest first):\n${JSON.stringify(jobs, null, 1)}` }],
+      messages: [{ role: 'user', content: `Today is ${week.today}. The upcoming week is ${week.start} (Monday) through ${week.end} (Sunday). Location: ${data.label}.\n\nJobs (with JobNimbus notes from the last ${REVIEW_LOOKBACK_DAYS} days, newest first):\n${JSON.stringify(jobs, null, 1)}` }],
     });
     if (response.stop_reason === 'refusal' || !response.parsed_output) {
       throw new Error(`model returned no decision (${response.stop_reason})`);
@@ -666,7 +689,7 @@ Be conservative: silence is "not_yet". Never invent amounts. reason: one short s
         const last = (await sbGet(`wip_reviews?location_id=eq.${p.location_id}&result->>trigger=eq.weekly&select=reviewed_at&order=reviewed_at.desc&limit=1`))[0];
         if (last && new Date(last.reviewed_at).toLocaleDateString('en-CA', { timeZone: 'America/Chicago' }) === t.date) continue;
         try {
-          const r = await reviewLocation(p, { trigger: 'weekly' });
+          const r = await reviewLocation(p, { trigger: 'weekly', now });
           ran.push({ location_id: p.location_id, label: r.label, jobs_reviewed: r.jobs_reviewed, applied: r.applied });
           console.log(`[wip weekly] ${r.label}: ${r.jobs_reviewed} AR jobs reviewed, ${r.applied} updated`);
         } catch (err) {
@@ -699,5 +722,5 @@ Be conservative: silence is "not_yet". Never invent amounts. reason: one short s
       res.status(err instanceof Anthropic.APIError ? 502 : 500).json({ error: err.message });
     }
   });
-  return { weeklyReviewTick, chicagoNow, weeklyReview };
+  return { weeklyReviewTick, chicagoNow, weeklyReview, upcomingWeek };
 };
