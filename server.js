@@ -5630,21 +5630,29 @@ async function photoReportLogoForJob(jobJnId) {
     const locs = await sbSelect('locations', `id=eq.${locId}&select=name,logo_url&limit=1`);
     const loc = locs && locs[0];
     if (!loc) return null;
-    let url = loc.logo_url || null;
-    if (!url) {
-      const rows = await sbSelect('brand_logos', `brand=eq.${encodeURIComponent(brandOfLocationName(loc.name))}&select=variant,url`);
-      const by = Object.fromEntries((rows || []).map(r => [r.variant, r.url]));
-      url = by.full || by.light || by.icon || null;
-    }
+    const url = await locationLogoUrl(loc);
     if (!url) return null;
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    const buf = Buffer.from(await r.arrayBuffer());
-    return await sharp(buf).resize({ width: 400, withoutEnlargement: true }).png().toBuffer();
+    return await logoPngFromUrl(url);
   } catch (err) {
     console.warn('[photo-report] logo unavailable:', err.message);
     return null;
   }
+}
+// Public logo URL for a {name, logo_url} location: per-location logo first,
+// then the brand pack's full → light → icon variant. Shared with the WIP pages.
+async function locationLogoUrl(loc) {
+  if (!loc) return null;
+  if (loc.logo_url) return loc.logo_url;
+  const rows = await sbSelect('brand_logos', `brand=eq.${encodeURIComponent(brandOfLocationName(loc.name || ''))}&select=variant,url`);
+  const by = Object.fromEntries((rows || []).map(r => [r.variant, r.url]));
+  return by.full || by.light || by.icon || null;
+}
+// Logo bytes normalized to PNG so pdfkit can embed any source format.
+async function logoPngFromUrl(url) {
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  const buf = Buffer.from(await r.arrayBuffer());
+  return await sharp(buf).resize({ width: 400, withoutEnlargement: true }).png().toBuffer();
 }
 
 async function jnGetJobFull(jnid) {
@@ -6630,7 +6638,7 @@ async function jnGetJson(pathAndQuery) {
   if (!r.ok) throw new Error(`JobNimbus ${r.status} on ${pathAndQuery.split('?')[0]}`);
   return r.json();
 }
-require('./wip')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet: jnGetJson, anthropic: wipAnthropic });
+require('./wip')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet: jnGetJson, anthropic: wipAnthropic, locationLogoUrl, logoPngFromUrl });
 
 // ── Collections classifier (owner Collections tab; see collections.js) ───────
 // Reads Open AR jobs' JobNimbus notes with a cheap LLM (COLLECTIONS_MODEL:
