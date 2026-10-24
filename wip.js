@@ -184,6 +184,9 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
   // ── HTML shell ──────────────────────────────────────────────────────────────
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
   function json(o) { return JSON.stringify(o).replace(/</g, '\\u003c'); }
+  // Small "?" that reveals a one-line explanation under the heading it follows.
+  function q(id) { return `<button type="button" class="q" data-help="${esc(id)}" aria-label="What is this?" aria-expanded="false">?</button>`; }
+  function help(id, text) { return `<div class="help" id="help-${esc(id)}">${esc(text)}</div>`; }
   // Mobile-first: one column, big tap targets, a sticky top bar and a fixed
   // bottom action bar; desktop just gets a wider column.
   const CSS = `
@@ -225,7 +228,10 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
   .list{border-top:1px solid var(--line)}.list>div{padding:10px 0;border-bottom:1px solid var(--line)}
   .steps ol{margin:8px 0 10px;padding-left:22px}.steps li{margin:6px 0;line-height:1.4}
   .lbl{display:block;font-size:13px;font-weight:600;color:var(--mut);margin:14px 0 6px;text-transform:uppercase;letter-spacing:.05em}
-  .sec-hint{color:var(--mut);font-size:13.5px;margin:-2px 2px 10px;line-height:1.4}
+  .q{font:inherit;font-size:12px;font-weight:700;line-height:1;width:20px;height:20px;padding:0;border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--mut);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-left:6px;flex:none;text-transform:none;letter-spacing:0}
+  .q.on{background:var(--acc);border-color:var(--acc);color:#fff}
+  .help{display:none;color:var(--mut);font-size:13px;line-height:1.4;margin:6px 0 0}.help.on{display:block}
+  details.sec .help{margin:-2px 2px 10px}
   .job.need{border-color:#e0b04a;background:#fffbf0}.need-txt{color:#9a6210;font-weight:600}
   @media(min-width:600px){.actions{grid-template-columns:repeat(4,1fr)}}
   `;
@@ -249,6 +255,7 @@ document.getElementById('sheet-sms').href='sms:?&body='+encodeURIComponent(text)
 document.getElementById('sheet-copy').onclick=async()=>{try{await navigator.clipboard.writeText(text);document.getElementById('sheet-copy').textContent='Copied ✓'}catch(e){document.getElementById('sheet-text').select()}};
 s.classList.add('open')}
 document.addEventListener('click',e=>{const b=e.target.closest('[data-share]');if(b){e.preventDefault();shareText(b.dataset.share,b.dataset.shareTitle||'WIP')}if(e.target.id==='sheet')closeSheet()});
+document.addEventListener('click',e=>{const q=e.target.closest('.q[data-help]');if(!q)return;e.preventDefault();e.stopPropagation();const h=document.getElementById('help-'+q.dataset.help);const on=!(h&&h.classList.contains('on'));if(h)h.classList.toggle('on',on);q.classList.toggle('on',on);q.setAttribute('aria-expanded',on)});
 </script>${script ? `<script>${script}</script>` : ''}</body></html>`;
   }
 
@@ -262,33 +269,33 @@ document.addEventListener('click',e=>{const b=e.target.closest('[data-share]');i
       const textUrl = `/wip/${esc(pool.token)}/text`;
       const topbar = `<div class="top"><h1>${esc(data.label)} · WIP</h1><button class="btn small" data-share="${textUrl}" data-share-title="${esc(data.label)} WIP">Share</button></div>`;
       const body = `
-<div class="card steps"><b>What to do — about 5 minutes</b>
+<div class="card steps"><b>About 5 minutes${q('steps')}</b>
+${help('steps', 'Everything saves by itself as you type. Tap the ? next to any heading if you are not sure what it means. When you are finished, tap "Done — send it" at the bottom.')}
 <ol>
-<li>Type your <b>name</b> below.</li>
-<li><b>Jobs we're working on:</b> type what each job is worth. A rough guess is fine.</li>
-<li><b>Money coming in this week:</b> for each invoice, type how much you expect to actually get paid <b>this week</b>. Leave it blank if nothing.</li>
-<li>Type <b>today's bank balance</b>.</li>
-</ol>
-<div class="sub">Everything saves by itself as you type. When you're finished, tap <b>Done — send it</b> at the bottom.</div></div>
-<label class="lbl" for="who">1. Your name</label>
+<li>Type your <b>name</b>.</li>
+<li><b>In Progress:</b> what each job is worth.</li>
+<li><b>Collecting:</b> what you expect to get paid this week.</li>
+<li><b>Bank Balance:</b> today's balance.</li>
+</ol></div>
+<label class="lbl" for="who">Your name</label>
 <input type="text" id="who" placeholder="Type your name" autocomplete="name">
-<div class="tot" style="margin-top:14px"><div class="card"><span>Jobs we're working on</span><b id="t-ip">$0</b><div class="meta" id="n-ip"></div></div>
-<div class="card"><span>Money coming in this week</span><b id="t-col">$0</b><div class="meta" id="n-col"></div></div>
-<div class="card"><span>Total owed to us</span><b>${whole(data.arTotal)}</b><div class="meta">unpaid invoices on billed jobs — same number as the DryOps dashboard</div></div>
-<div class="card"><span>4. Money in the bank today</span><div class="amt-row" style="margin-top:4px"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" id="bank" value="${data.bank ? esc(data.bank.balance) : ''}" placeholder="type it here"></div>
-<div class="meta" id="bank-meta">${data.bank && data.bank.at ? `entered ${esc(new Date(data.bank.at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' }))}${data.bank.by ? ' by ' + esc(data.bank.by) : ''}` : '<span class="need-txt">please type today\'s balance</span>'}</div></div></div>
+<div class="tot" style="margin-top:14px"><div class="card"><span>In Progress</span>${q('ip')}<b id="t-ip">$0</b><div class="meta" id="n-ip"></div>${help('ip', 'Jobs we are working on right now. Type what each one is worth — a rough guess is fine.')}</div>
+<div class="card"><span>Collecting</span>${q('col')}<b id="t-col">$0</b><div class="meta" id="n-col"></div>${help('col', 'Invoices that are sent and unpaid. Type how much you expect to actually get paid this week.')}</div>
+<div class="card"><span>AR</span>${q('ar')}<b>${whole(data.arTotal)}</b>${help('ar', 'Everything customers and carriers still owe us on invoiced jobs. Comes from JobNimbus — the same number as the DryOps dashboard.')}</div>
+<div class="card"><span>Bank Balance</span>${q('bank')}<div class="amt-row" style="margin-top:4px"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" id="bank" value="${data.bank ? esc(data.bank.balance) : ''}" placeholder="type it here"></div>
+<div class="meta" id="bank-meta">${data.bank && data.bank.at ? `entered ${esc(new Date(data.bank.at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' }))}${data.bank.by ? ' by ' + esc(data.bank.by) : ''}` : '<span class="need-txt">please type today\'s balance</span>'}</div>${help('bank', "Today's balance in the bank account. Type it in — it is not pulled from anywhere.")}</div></div>
 <div id="sections"></div>
 <div class="bar"><div class="status" id="status">Loaded</div><button class="btn ghost small" id="add-btn">+ Add a job</button><button class="btn" data-share="${textUrl}" data-share-title="${esc(data.label)} WIP">Done — send it</button></div>
-<div class="sheet" id="add-sheet"><div><b>Add a job that isn't on the list</b><div class="sub" style="margin-top:6px">Only for jobs that aren't in JobNimbus yet.</div><div class="actions" style="margin-top:12px"><button class="btn" onclick="addCustom('in_progress')">A job we're working on</button><button class="btn ghost" onclick="addCustom('collecting')">Money coming in this week</button></div></div></div>`;
+<div class="sheet" id="add-sheet"><div><b>Add a job that isn't on the list</b><div class="sub" style="margin-top:6px">Only for jobs that aren't in JobNimbus yet.</div><div class="actions" style="margin-top:12px"><button class="btn" onclick="addCustom('in_progress')">In Progress</button><button class="btn ghost" onclick="addCustom('collecting')">Collecting</button></div></div></div>`;
       const script = `
 const TOKEN=${json(pool.token)};let ROWS=${json(data.rows)};
 const GROUPS=[
-['in_progress','2. Jobs we\\'re working on',true,'Type what each job is worth. A rough guess is fine. If we are NOT working on a job, tap "hide it".'],
-['ar','3. Money coming in this week',true,'These invoices are sent and unpaid. Type how much you expect to actually get paid THIS WEEK. Leave blank if nothing yet.'],
-['billing','Finished, not sent to insurance yet',false,'You can usually skip these. Type a value only if you want it counted as a job we\\'re working on.'],
-['other','Leads and jobs on hold',false,'You can usually skip these.'],
-['custom','Jobs you added',true,'Type the name and what it\\'s worth.'],
-['hidden','Hidden — not counted',false,'Tap "count it" to put a job back.']];
+['in_progress','In Progress',true,'Jobs we are working on. Type what each one is worth — a rough guess is fine. Not working on it? Tap "hide it".'],
+['ar','Collecting',true,'Invoices that are sent and unpaid. Type how much you expect to actually get paid THIS WEEK. Leave blank if nothing yet.'],
+['billing','Not invoiced yet',false,'Finished jobs that have not been sent to insurance. You can usually skip these — type a value only if you want one counted as In Progress.'],
+['other','On hold',false,'Leads and jobs on hold. You can usually skip these.'],
+['custom','Added by you',true,'Jobs that are not in JobNimbus yet. Type the name and what it is worth.'],
+['hidden','Hidden',false,'Not counted. Tap "count it" to put a job back.']];
 // Where a card is shown: in-progress jobs the owner hid go to "Hidden".
 function viewGroup(r){return r.group==='in_progress'&&!r.category?'hidden':r.group}
 // Bucket follows the section: invoiced jobs count as Collecting only when an
@@ -317,7 +324,7 @@ function render(){const host=document.getElementById('sections');host.innerHTML=
 for(const [g,title,dflt,hint] of GROUPS){const rows=ROWS.filter(r=>viewGroup(r)===g);if(!rows.length)continue;
 const open=OPEN[g]!==undefined?OPEN[g]:dflt;
 const sec=document.createElement('details');sec.className='sec';sec.open=open;sec.dataset.g=g;
-sec.innerHTML='<summary><h2>'+esc(title)+'</h2><span class="count">'+rows.length+'</span></summary><div class="sec-hint">'+esc(hint)+'</div>'+rows.map(jobCard).join('');
+sec.innerHTML='<summary><h2>'+esc(title)+'</h2><button type="button" class="q" data-help="sec-'+g+'" aria-label="What is this?" aria-expanded="false">?</button><span class="count">'+rows.length+'</span></summary><div class="help" id="help-sec-'+g+'">'+esc(hint)+'</div>'+rows.map(jobCard).join('');
 sec.addEventListener('toggle',()=>{OPEN[g]=sec.open;try{localStorage.setItem('wip_open',JSON.stringify(OPEN))}catch(e){}});
 host.appendChild(sec)}totals()}
 const bankEl=document.getElementById('bank');let bankTimer=null;
@@ -438,8 +445,8 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
       const topbar = `<div class="top"><h1>WIP · all locations</h1><button class="btn small" data-share="/wip/master/${esc(req.params.master)}/text" data-share-title="WIP — all locations">Share all</button></div>`;
       const body = `
 <div class="sub" style="margin-bottom:10px">${pool.length} location${pool.length === 1 ? '' : 's'} · ${today()}</div>
-<div class="tot"><div class="card"><span>In Progress</span><b>${whole(ipAll)}</b></div><div class="card"><span>Collecting</span><b>${whole(cAll)}</b></div>
-<div class="card"><span>Total AR</span><b>${whole(arAll)}</b><div class="meta">DryOps Open AR definition</div></div><div class="card"><span>Bank balances</span><b>${whole(bankAll)}</b>${bankMissing ? `<div class="meta">${bankMissing} location${bankMissing === 1 ? '' : 's'} not entered</div>` : ''}</div></div>
+<div class="tot"><div class="card"><span>In Progress</span>${q('ip')}<b>${whole(ipAll)}</b>${help('ip', 'Owner-entered value of every job being worked on, all pooled locations.')}</div><div class="card"><span>Collecting</span>${q('col')}<b>${whole(cAll)}</b>${help('col', 'Invoiced money expected to land this week — owner-entered or set by "Review notes".')}</div>
+<div class="card"><span>AR</span>${q('ar')}<b>${whole(arAll)}</b>${help('ar', 'DryOps Open AR: approved-invoice balance on Invoice Created / Invoiced / Pending Payment jobs, every record type. Same number as the Dashboard.')}</div><div class="card"><span>Bank Balance</span>${q('bank')}<b>${whole(bankAll)}</b>${bankMissing ? `<div class="meta">${bankMissing} location${bankMissing === 1 ? '' : 's'} not entered</div>` : ''}${help('bank', 'Sum of the balances owners typed on their forms today.')}</div></div>
 <div class="actions" style="margin:0 0 14px"><button class="btn ghost" id="review-all">Review all AR notes</button><a class="btn ghost" href="/wip/master/${esc(req.params.master)}/text" target="_blank">Combined text</a></div>
 <div class="sub" style="margin-bottom:14px">“Review notes” reads each invoiced job's JobNimbus notes from the last 3 weeks and marks what is agreed or issued as Collecting${anthropic ? '' : ' — <b>ANTHROPIC_API_KEY is not set on the server, so this will fail until it is</b>'}.</div>
 <div id="review-out"></div>
