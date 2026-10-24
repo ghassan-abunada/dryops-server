@@ -37,7 +37,7 @@ function typeTag(recordType) {
 
 // deps: jnGet(pathAndQuery) → parsed JobNimbus JSON; anthropic → an SDK client
 // (or null when the review feature is unconfigured). Credentials stay in server.js.
-module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet, anthropic }) {
+module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet, anthropic }, opts = {}) {
   const sbHeaders = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
   const money2 = v => Math.round(Number(v) * 100) / 100;
 
@@ -425,13 +425,13 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
         ipAll += s.ipTotal; cAll += s.cTotal; arAll += data.arTotal;
         if (data.bank) bankAll += data.bank.balance; else bankMissing++;
         const ownerUrl = `${req.protocol}://${req.get('host')}/wip/${p.token}`;
-        const lastReview = (await sbGet(`wip_reviews?location_id=eq.${p.location_id}&select=reviewed_at,jobs_reviewed,applied&order=reviewed_at.desc&limit=1`))[0];
+        const lastReview = (await sbGet(`wip_reviews?location_id=eq.${p.location_id}&select=reviewed_at,jobs_reviewed,applied,result->>trigger&order=reviewed_at.desc&limit=1`))[0];
         cards.push(`<div class="card" data-pool="${esc(p.id)}">
 <input type="text" value="${esc(data.label)}" data-label="${esc(p.id)}" class="nm" title="Report heading" aria-label="Report heading">
 <div class="meta" style="margin-top:6px">${esc(p.locations ? p.locations.name : '')}</div>
 <div class="row" style="margin-top:10px;gap:14px"><span>In Progress <b>${whole(s.ipTotal)}</b></span><span>Collecting <b>${whole(s.cTotal)}</b></span><span>AR <b>${whole(data.arTotal)}</b></span><span>Bank <b>${data.bank ? whole(data.bank.balance) : '—'}</b></span></div>
 <div class="meta" style="margin-top:8px">${data.lastUpdate ? `Owner updated ${esc(data.lastUpdate.slice(0, 16).replace('T', ' '))}${data.lastBy ? ' by ' + esc(data.lastBy) : ''}` : 'No owner input yet'}
- · ${lastReview ? `AI review ${esc(lastReview.reviewed_at.slice(0, 16).replace('T', ' '))} (${lastReview.jobs_reviewed} jobs, ${lastReview.applied} updated)` : 'no AI review yet'}</div>
+ · ${lastReview ? `AI review ${esc(lastReview.reviewed_at.slice(0, 16).replace('T', ' '))}${lastReview.trigger === 'weekly' ? ' (auto)' : ''} (${lastReview.jobs_reviewed} jobs, ${lastReview.applied} updated)` : 'no AI review yet'}</div>
 <div class="actions">
   <button class="btn" data-share="/wip/${esc(p.token)}/text" data-share-title="${esc(data.label)} WIP">Share</button>
   <button class="btn ghost" data-review="${esc(p.id)}">Review notes</button>
@@ -448,7 +448,7 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
 <div class="tot"><div class="card"><span>In Progress</span>${q('ip')}<b>${whole(ipAll)}</b>${help('ip', 'Owner-entered value of every job being worked on, all pooled locations.')}</div><div class="card"><span>Collecting</span>${q('col')}<b>${whole(cAll)}</b>${help('col', 'Invoiced money expected to land this week — owner-entered or set by "Review notes".')}</div>
 <div class="card"><span>AR</span>${q('ar')}<b>${whole(arAll)}</b>${help('ar', 'DryOps Open AR: approved-invoice balance on Invoice Created / Invoiced / Pending Payment jobs, every record type. Same number as the Dashboard.')}</div><div class="card"><span>Bank Balance</span>${q('bank')}<b>${whole(bankAll)}</b>${bankMissing ? `<div class="meta">${bankMissing} location${bankMissing === 1 ? '' : 's'} not entered</div>` : ''}${help('bank', 'Sum of the balances owners typed on their forms today.')}</div></div>
 <div class="actions" style="margin:0 0 14px"><button class="btn ghost" id="review-all">Review all AR notes</button><a class="btn ghost" href="/wip/master/${esc(req.params.master)}/text" target="_blank">Combined text</a></div>
-<div class="sub" style="margin-bottom:14px">“Review notes” reads each invoiced job's JobNimbus notes from the last 3 weeks and marks what is agreed or issued as Collecting${anthropic ? '' : ' — <b>ANTHROPIC_API_KEY is not set on the server, so this will fail until it is</b>'}.</div>
+<div class="sub" style="margin-bottom:14px">“Review notes” reads each invoiced job's JobNimbus notes from the last 3 weeks and marks what is agreed or issued as Collecting. ${weeklyReview.enabled ? `It runs by itself every <b>Saturday at ${weeklyReview.hourLabel} Central</b> for every location here` : 'The automatic Saturday run is switched off (WIP_AUTO_REVIEW=off)'}${anthropic ? '' : ' — <b>ANTHROPIC_API_KEY is not set on the server, so it will fail until it is</b>'}.</div>
 <div id="review-out"></div>
 ${cards.join('') || '<div class="card">No locations yet — add one below, then send the owner link.</div>'}
 <div class="card"><b>Add a location</b><div class="row" style="margin-top:10px"><select id="add-loc" style="flex:1"><option value="">Choose a location…</option>${options}</select><button class="btn ghost" id="add-btn">Add</button></div></div>`;
@@ -620,9 +620,69 @@ Be conservative: silence is "not_yet". Never invent amounts. reason: one short s
     if (writes.length) await sbWrite('POST', 'wip_entries?on_conflict=location_id,key', writes, 'resolution=merge-duplicates,return=minimal');
     await sbWrite('POST', 'wip_reviews', {
       location_id: pool.location_id, model: REVIEW_MODEL, jobs_reviewed: jobs.length, applied: writes.length,
-      result: { results, usage: response.usage },
+      result: { trigger: opts.trigger || 'manual', results, usage: response.usage },
     }, 'return=minimal');
     return { label: data.label, jobs_reviewed: jobs.length, applied: writes.length, skipped_owner: skippedOwner, jobs: results };
+  }
+
+  // ── Weekly automatic review ─────────────────────────────────────────────────
+  // Every Saturday from WIP_AUTO_REVIEW_HOUR (default 6 = 6:00 AM Central, so
+  // the owner forms already carry the Collecting decisions when owners open
+  // them) run reviewLocation() once for every pooled location. A 10-minute
+  // tick checks the clock; the wip_reviews row tagged trigger=weekly is the
+  // memory, so a restart or a long tick never runs a location twice on the
+  // same Saturday. A location that fails is retried on later ticks that day,
+  // at most WEEKLY_MAX_ATTEMPTS times. WIP_AUTO_REVIEW=off disables it.
+  const WEEKLY_DAY = 'Sat';
+  const WEEKLY_TICK_MS = 10 * 60 * 1000;
+  const WEEKLY_MAX_ATTEMPTS = 3;
+  const weeklyHour = Math.min(23, Math.max(0, parseInt(process.env.WIP_AUTO_REVIEW_HOUR || '6', 10) || 0));
+  const weeklyReview = {
+    enabled: String(process.env.WIP_AUTO_REVIEW || 'on').toLowerCase() !== 'off',
+    hour: weeklyHour,
+    hourLabel: `${weeklyHour % 12 || 12}:00 ${weeklyHour < 12 ? 'AM' : 'PM'}`,
+  };
+  function chicagoNow(now = new Date()) {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', weekday: 'short', hour: 'numeric', hour12: false }).formatToParts(now);
+    const get = t => (parts.find(p => p.type === t) || {}).value;
+    return { date: now.toLocaleDateString('en-CA', { timeZone: 'America/Chicago' }), weekday: get('weekday'), hour: parseInt(get('hour'), 10) % 24 };
+  }
+  let weeklyRunning = false;
+  const weeklyAttempts = {}; // `${date}:${location_id}` → failed attempts today
+  async function weeklyReviewTick(now = new Date()) {
+    if (!weeklyReview.enabled || weeklyRunning) return { ran: [], skipped: 'off-or-running' };
+    const t = chicagoNow(now);
+    if (t.weekday !== WEEKLY_DAY || t.hour < weeklyReview.hour) return { ran: [], skipped: 'not-time' };
+    if (!anthropic) {
+      if (!weeklyAttempts[`${t.date}:warned`]) { weeklyAttempts[`${t.date}:warned`] = 1; console.error('[wip weekly] ANTHROPIC_API_KEY is not set — skipping the Saturday review'); }
+      return { ran: [], skipped: 'no-key' };
+    }
+    weeklyRunning = true;
+    const ran = [];
+    try {
+      for (const p of await loadPool()) {
+        const key = `${t.date}:${p.location_id}`;
+        if ((weeklyAttempts[key] || 0) >= WEEKLY_MAX_ATTEMPTS) continue;
+        const last = (await sbGet(`wip_reviews?location_id=eq.${p.location_id}&result->>trigger=eq.weekly&select=reviewed_at&order=reviewed_at.desc&limit=1`))[0];
+        if (last && new Date(last.reviewed_at).toLocaleDateString('en-CA', { timeZone: 'America/Chicago' }) === t.date) continue;
+        try {
+          const r = await reviewLocation(p, { trigger: 'weekly' });
+          ran.push({ location_id: p.location_id, label: r.label, jobs_reviewed: r.jobs_reviewed, applied: r.applied });
+          console.log(`[wip weekly] ${r.label}: ${r.jobs_reviewed} AR jobs reviewed, ${r.applied} updated`);
+        } catch (err) {
+          weeklyAttempts[key] = (weeklyAttempts[key] || 0) + 1;
+          console.error(`[wip weekly] ${p.label || p.location_id} failed (attempt ${weeklyAttempts[key]}): ${err.message}`);
+        }
+      }
+    } catch (err) {
+      console.error('[wip weekly]', err.message);
+    } finally { weeklyRunning = false; }
+    return { ran };
+  }
+  if (weeklyReview.enabled && !opts.noSchedule) {
+    const timer = setInterval(() => weeklyReviewTick().catch(err => console.error('[wip weekly]', err.message)), WEEKLY_TICK_MS);
+    if (timer.unref) timer.unref();
+    console.log(`[wip weekly] AI review scheduled every Saturday from ${weeklyReview.hourLabel} Central`);
   }
 
   app.post('/wip/master/:master/review', requireMaster, async (req, res) => {
@@ -639,4 +699,5 @@ Be conservative: silence is "not_yet". Never invent amounts. reason: one short s
       res.status(err instanceof Anthropic.APIError ? 502 : 500).json({ error: err.message });
     }
   });
+  return { weeklyReviewTick, chicagoNow, weeklyReview };
 };
