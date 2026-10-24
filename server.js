@@ -6689,7 +6689,7 @@ const intake = require('./intake')(app, {
   sbGet, sbInsert, sbPatch, sbUpsert,
   jnSendJson, jnGetJson, jnAddNote, jnFetchAccountUsers,
   geocode, normPhone, toE164, UUID_RE, EMAIL_RE,
-  callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
+  callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, mapCallRow,
   syncVisitJnTask, loadScheduleSettings, fmtMin,
 });
 

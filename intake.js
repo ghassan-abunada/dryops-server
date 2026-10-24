@@ -35,7 +35,7 @@ module.exports = function mountIntake(app, deps) {
     sbGet, sbInsert, sbPatch, sbUpsert,
     jnSendJson, jnGetJson, jnAddNote, jnFetchAccountUsers,
     geocode, normPhone, toE164, UUID_RE, EMAIL_RE,
-    callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
+    callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, mapCallRow,
     syncVisitJnTask, loadScheduleSettings, fmtMin,
   } = deps;
 
@@ -1002,5 +1002,81 @@ module.exports = function mountIntake(app, deps) {
     } catch (err) { res.status(502).json({ error: err.message }); }
   });
 
-  return { createIntakeJob, loadActor, loadLocation, postInspectionScheduledNote, postCallActivities, surveyLocation, jnAccountSettings };
+  // ── Recent calls for the New Job form (pull from CallRail on demand) ───────
+  // The `calls` table fills from the post-call webhook (OGS Expansion account
+  // only) or the 30-minute reconcile, so a call that just ended can be half an
+  // hour away from the form. `?refresh=1` pulls the last ~2 days for the
+  // location's tracking numbers straight from CallRail, upserts them, runs the
+  // Mitigation-first job matcher, and answers from the DB. Throttled to one
+  // CallRail pull per location per 15 s.
+  const RECENT_PULL_MIN_MS = 15 * 1000;
+  const recentPulls = new Map(); // locationId → { at, inProgress: Set<callrail_id> }
+  async function pullRecentCalls(locationId) {
+    const now = Date.now();
+    const prev = recentPulls.get(locationId);
+    if (prev && now - prev.at < RECENT_PULL_MIN_MS) return { pulled: 0, upserted: 0, inProgress: prev.inProgress, cached: true };
+    const nums = (await sbGet(`location_tracking_numbers?location_id=eq.${enc(locationId)}&active=eq.true&select=phone_norm`)) || [];
+    const set = new Set(nums.map((n) => n.phone_norm).filter(Boolean));
+    const inProgress = new Set();
+    const out = { pulled: 0, upserted: 0, inProgress, cached: false };
+    if (!set.size || !CALLRAIL_API_KEY) { recentPulls.set(locationId, { at: now, inProgress }); return out; }
+    const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+    const dateQ = `&start_date=${day(now - 2 * 86400 * 1000)}&end_date=${day(now + 86400 * 1000)}`;
+    const fields = 'call_type,source,medium,campaign,first_call,gclid';
+    const rows = [];
+    for (const acct of CALLRAIL_ACCOUNT_IDS) {
+      let r = await callrailApi(acct, `calls.json?per_page=100&direction=inbound&sort=start_time&order=desc&fields=${fields}${dateQ}`);
+      if (!r.ok) r = await callrailApi(acct, `calls.json?per_page=100&direction=inbound&sort=start_time&order=desc${dateQ}`);
+      if (!r.ok) { warn('calls/recent CallRail', acct, r.status); continue; }
+      const calls = (r.json && (r.json.calls || r.json.data)) || [];
+      out.pulled += calls.length;
+      for (const c of calls) {
+        if (!set.has(normPhone(c.tracking_phone_number))) continue;
+        const row = mapCallRow ? mapCallRow(c) : null;
+        if (!row || !row.callrail_id) continue;
+        row.location_id = locationId;
+        rows.push(row);
+        if (c.call_type === 'in_progress') inProgress.add(row.callrail_id);
+      }
+    }
+    if (rows.length) {
+      const uniq = [...new Map(rows.map((r) => [r.callrail_id, r])).values()];
+      await sbUpsert('calls', uniq, 'callrail_id');
+      out.upserted = uniq.length;
+      // Job match for the new rows (same resolver the reconcile uses).
+      await fetch(`${SUPABASE_URL}/rest/v1/rpc/callrail_resolve_all`, {
+        method: 'POST', headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' }, body: '{}',
+      }).catch((e) => warn('calls/recent resolve', e.message));
+    }
+    recentPulls.set(locationId, { at: now, inProgress });
+    return out;
+  }
+  app.get('/calls/recent', requireAuth, async (req, res) => {
+    try {
+      const locationId = String(req.query.location_id || '');
+      if (!UUID_RE.test(locationId)) return res.status(400).json({ error: 'location_id required' });
+      const actor = await loadActor(req);
+      if (!actor) return res.status(403).json({ error: 'Profile not found' });
+      if (actor.role !== 'admin' && !actor.locs.includes(locationId)) return res.status(403).json({ error: 'Not your location' });
+      let pull = { pulled: 0, upserted: 0, inProgress: new Set(), cached: true };
+      let warning = null;
+      if (req.query.refresh === '1') {
+        try { pull = await pullRecentCalls(locationId); } catch (e) { warning = 'CallRail unavailable'; warn('calls/recent pull failed', e.message); }
+      } else {
+        const prev = recentPulls.get(locationId);
+        if (prev) pull.inProgress = prev.inProgress;
+      }
+      const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      const rows = (await sbGet(`calls?location_id=eq.${enc(locationId)}&direction=eq.inbound&job_id=is.null&start_time=gte.${enc(since)}&order=start_time.desc&limit=10&select=id,callrail_id,customer_name,customer_phone_number,customer_city,customer_state,start_time,answered,voicemail,duration,source,medium,is_google_ads,first_call,job_id`)) || [];
+      if (pull.upserted) log('calls/recent', locationId.slice(0, 8), `pulled ${pull.pulled} upserted ${pull.upserted}`);
+      res.json({
+        calls: rows.map((r) => ({ ...r, in_progress: pull.inProgress.has(r.callrail_id) })),
+        refreshed_at: new Date().toISOString(),
+        pulled: !pull.cached,
+        warning,
+      });
+    } catch (err) { res.status(502).json({ error: err.message }); }
+  });
+
+  return { createIntakeJob, loadActor, loadLocation, postInspectionScheduledNote, postCallActivities, surveyLocation, jnAccountSettings, pullRecentCalls };
 };
