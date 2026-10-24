@@ -13,7 +13,18 @@ const { z } = require('zod');
 // Locations carry every record type they run (mitigation, contents, abatement,
 // rebuild, testing) — nothing is filtered by record type. Grouping is by status:
 // production-stage work that isn't finished counts as "in progress" by default.
-const AR_STATUSES = new Set(['Invoiced', 'Pending Payment', 'Pending Payments', 'Payment Plan', 'Attorney', 'Public Adjuster']);
+//
+// Two different status lists on purpose:
+//  • COLLECTING_STATUSES decides which jobs sit in the "Money coming in this
+//    week" section — anything invoiced where a payment could still land,
+//    including Payment Plan / Attorney / Public Adjuster.
+//  • Total AR is NOT derived from that section. It is the DryOps definition
+//    (lib/ar.ts + public.is_ar_status(): Invoice Created / Invoiced / Pending
+//    Payment(s), every record type) over jobs.approved_invoice_due — the
+//    JobNimbus job's approved-invoice balance that server.js keeps fresh — via
+//    the same open_ar_total RPC the Dashboard calls. The `invoices` mirror is
+//    no longer used here: it misses JN deletions and some paid updates.
+const COLLECTING_STATUSES = new Set(['Invoiced', 'Pending Payment', 'Pending Payments', 'Payment Plan', 'Attorney', 'Public Adjuster']);
 // Work Complete stays "in progress" (still WIP until invoiced); these are the
 // post-work statuses that are excluded by default.
 const BILLING_STATUSES = new Set(['Invoice Created', 'In storage', 'PB complete', 'PO Complete', 'Revision Requested']);
@@ -28,6 +39,7 @@ function typeTag(recordType) {
 // (or null when the review feature is unconfigured). Credentials stay in server.js.
 module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet, anthropic }) {
   const sbHeaders = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+  const money2 = v => Math.round(Number(v) * 100) / 100;
 
   async function sbGet(pathAndQuery) {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}`, { headers: sbHeaders });
@@ -43,6 +55,13 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
     const text = await r.text();
     if (!r.ok) throw new Error(`supabase ${r.status} ${method} ${pathAndQuery.split('?')[0]}: ${text.slice(0, 200)}`);
     return text ? JSON.parse(text) : null;
+  }
+  async function sbRpc(name, args) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
+      method: 'POST', headers: { ...sbHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify(args || {}),
+    });
+    if (!r.ok) throw new Error(`supabase ${r.status} rpc ${name}: ${(await r.text()).slice(0, 200)}`);
+    return r.json();
   }
 
   // ── Token lookups ───────────────────────────────────────────────────────────
@@ -78,23 +97,20 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
 
   async function loadLocation(pool) {
     const locId = pool.location_id;
-    const jobs = await sbGet(`jobs?location_id=eq.${locId}&or=(stage.is.null,stage.not.in.(Completed,Lost))&name=not.ilike.*test%20dummy*`
-      + `&select=id,jn_id,number,name,status,stage,record_type,jn_created&order=jn_created.asc`);
-    const due = {}; const invTotal = {};
-    for (let i = 0; i < jobs.length; i += 80) {
-      const ids = jobs.slice(i, i + 80).map(j => j.id).join(',');
-      const inv = await sbGet(`invoices?job_id=in.(${ids})&or=(status_name.is.null,status_name.neq.Void)&select=job_id,total,due`);
-      for (const r of inv) {
-        due[r.job_id] = (due[r.job_id] || 0) + Number(r.due || 0);
-        invTotal[r.job_id] = (invTotal[r.job_id] || 0) + Number(r.total || 0);
-      }
-    }
-    const entries = await sbGet(`wip_entries?location_id=eq.${locId}&select=key,custom_name,category,amount,note,updated_by,updated_at`);
+    // Per-job balances come from the JobNimbus job rollup (approved invoices
+    // only), the same columns DryOps' Stats / Collections read.
+    const [jobs, entries, arRpc] = await Promise.all([
+      sbGet(`jobs?location_id=eq.${locId}&or=(stage.is.null,stage.not.in.(Completed,Lost))&name=not.ilike.*test%20dummy*`
+        + `&select=id,jn_id,number,name,status,stage,record_type,jn_created,approved_invoice_total,approved_invoice_due&order=jn_created.asc`),
+      sbGet(`wip_entries?location_id=eq.${locId}&select=key,custom_name,category,amount,note,updated_by,updated_at`),
+      // Total AR — identical to the Dashboard's Open AR card for this location.
+      sbRpc('open_ar_total', { p_location_ids: [String(locId)] }),
+    ]);
     const byKey = Object.fromEntries(entries.map(e => [e.key, e]));
 
     const rows = jobs.map(j => {
       const e = byKey[j.id];
-      const group = AR_STATUSES.has(j.status) ? 'ar'
+      const group = COLLECTING_STATUSES.has(j.status) ? 'ar'
         : BILLING_STATUSES.has(j.status) ? 'billing'
         : HOLD_STATUSES.has(j.status) ? 'other'
         : (j.status === 'In Progress' || j.stage === 'In Production') ? 'in_progress' : 'other';
@@ -103,8 +119,8 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
       return {
         key: j.id, name: cleanName(j.name) + typeTag(j.record_type), number: j.number, status: j.status, stage: j.stage,
         record_type: j.record_type, created: j.jn_created ? j.jn_created.slice(0, 10) : null,
-        due: due[j.id] != null ? Math.round(due[j.id] * 100) / 100 : null,
-        inv_total: invTotal[j.id] != null ? Math.round(invTotal[j.id] * 100) / 100 : null,
+        due: j.approved_invoice_due != null ? money2(j.approved_invoice_due) : null,
+        inv_total: j.approved_invoice_total != null ? money2(j.approved_invoice_total) : null,
         group, category, amount: e && e.amount != null ? Number(e.amount) : null,
         note: (e && e.note) || '', custom: false, jn_id: j.jn_id,
         updated_by: (e && e.updated_by) || null,
@@ -118,8 +134,9 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
     }
     const lastUpdate = entries.reduce((m, e) => (e.updated_at > m ? e.updated_at : m), '');
     const lastBy = entries.filter(e => e.updated_at === lastUpdate).map(e => e.updated_by).find(Boolean) || '';
-    // Total AR = every open job's outstanding invoice balance, whatever its status.
-    const arTotal = Math.round(rows.reduce((s, r) => s + (!r.custom && r.due > 0 ? r.due : 0), 0) * 100) / 100;
+    // Total AR = open_ar_total(location): sum(jobs.approved_invoice_due) over
+    // Invoice Created / Invoiced / Pending Payment(s) jobs — the DryOps number.
+    const arTotal = money2(arRpc || 0);
     const bank = pool.bank_balance != null ? { balance: Number(pool.bank_balance), at: pool.bank_balance_at, by: pool.bank_balance_by } : null;
     return { pool, label: pool.label || (pool.locations && pool.locations.name) || 'Location', rows, lastUpdate, lastBy, arTotal, bank };
   }
@@ -257,7 +274,7 @@ document.addEventListener('click',e=>{const b=e.target.closest('[data-share]');i
 <input type="text" id="who" placeholder="Type your name" autocomplete="name">
 <div class="tot" style="margin-top:14px"><div class="card"><span>Jobs we're working on</span><b id="t-ip">$0</b><div class="meta" id="n-ip"></div></div>
 <div class="card"><span>Money coming in this week</span><b id="t-col">$0</b><div class="meta" id="n-col"></div></div>
-<div class="card"><span>Total owed to us</span><b>${whole(data.arTotal)}</b><div class="meta">all unpaid invoices</div></div>
+<div class="card"><span>Total owed to us</span><b>${whole(data.arTotal)}</b><div class="meta">unpaid invoices on billed jobs — same number as the DryOps dashboard</div></div>
 <div class="card"><span>4. Money in the bank today</span><div class="amt-row" style="margin-top:4px"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" id="bank" value="${data.bank ? esc(data.bank.balance) : ''}" placeholder="type it here"></div>
 <div class="meta" id="bank-meta">${data.bank && data.bank.at ? `entered ${esc(new Date(data.bank.at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' }))}${data.bank.by ? ' by ' + esc(data.bank.by) : ''}` : '<span class="need-txt">please type today\'s balance</span>'}</div></div></div>
 <div id="sections"></div>
@@ -422,7 +439,7 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
       const body = `
 <div class="sub" style="margin-bottom:10px">${pool.length} location${pool.length === 1 ? '' : 's'} · ${today()}</div>
 <div class="tot"><div class="card"><span>In Progress</span><b>${whole(ipAll)}</b></div><div class="card"><span>Collecting</span><b>${whole(cAll)}</b></div>
-<div class="card"><span>Total AR</span><b>${whole(arAll)}</b></div><div class="card"><span>Bank balances</span><b>${whole(bankAll)}</b>${bankMissing ? `<div class="meta">${bankMissing} location${bankMissing === 1 ? '' : 's'} not entered</div>` : ''}</div></div>
+<div class="card"><span>Total AR</span><b>${whole(arAll)}</b><div class="meta">DryOps Open AR definition</div></div><div class="card"><span>Bank balances</span><b>${whole(bankAll)}</b>${bankMissing ? `<div class="meta">${bankMissing} location${bankMissing === 1 ? '' : 's'} not entered</div>` : ''}</div></div>
 <div class="actions" style="margin:0 0 14px"><button class="btn ghost" id="review-all">Review all AR notes</button><a class="btn ghost" href="/wip/master/${esc(req.params.master)}/text" target="_blank">Combined text</a></div>
 <div class="sub" style="margin-bottom:14px">“Review notes” reads each invoiced job's JobNimbus notes from the last 3 weeks and marks what is agreed or issued as Collecting${anthropic ? '' : ' — <b>ANTHROPIC_API_KEY is not set on the server, so this will fail until it is</b>'}.</div>
 <div id="review-out"></div>
