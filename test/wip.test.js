@@ -105,7 +105,8 @@ function weeklyHarness({ alreadyRanToday = false } = {}) {
     if (path.startsWith('wip_entries?on_conflict') || path.startsWith('wip_reviews')) return new Response('', { status: 201 });
     throw new Error('unexpected supabase call ' + path);
   };
-  const anthropic = { messages: { parse: async () => ({ stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 },
+  const modelCalls = [];
+  const anthropic = { messages: { parse: async (args) => (modelCalls.push(args), { stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 },
     parsed_output: { jobs: [
       { job_number: '1001', decision: 'collecting', amount: 1000, reason: 'carrier issued check 10/20' },
       { job_number: '1002', decision: 'not_yet', amount: null, reason: 'waiting on adjuster' },
@@ -113,7 +114,7 @@ function weeklyHarness({ alreadyRanToday = false } = {}) {
   const jnGet = async () => ({ activity: [{ date_created: Math.floor(Date.now() / 1000) - 86400, record_type_name: 'Note', note: 'check issued', related: [{ id: 'jn1' }] }] });
   const app = express(); app.use(express.json());
   const wip = require('../wip')(app, { SUPABASE_URL: SB, SUPABASE_SERVICE_KEY: 'svc', jnGet, anthropic }, { noSchedule: true });
-  return { wip, calls, restore: () => { global.fetch = realFetch; } };
+  return { wip, calls, modelCalls, restore: () => { global.fetch = realFetch; } };
 }
 const SAT_6AM_CT = new Date('2026-10-24T11:30:00Z'); // Saturday 6:30 AM CDT
 const SAT_5AM_CT = new Date('2026-10-24T10:30:00Z');
@@ -149,5 +150,29 @@ test('weekly tick: a location that already ran this Saturday is skipped', async 
     assert.deepStrictEqual(r.ran, []);
     assert.ok(!h.calls.some(c => c.path === 'wip_reviews' && c.method === 'POST'));
     assert.ok(!h.calls.some(c => c.path.startsWith('jobs?')), 'no review work when already done today');
+  } finally { h.restore(); }
+});
+
+test('review prompt: mail-time rule and the upcoming week are spelled out for the model', async () => {
+  const h = weeklyHarness();
+  try {
+    await h.wip.weeklyReviewTick(SAT_6AM_CT);
+    const call = h.modelCalls[0];
+    assert.match(call.system, /10–14 business days/);
+    assert.match(call.system, /D \+ 14 to D \+ 20 calendar days/);
+    assert.match(call.messages[0].content, /Today is 2026-10-24\. The upcoming week is 2026-10-26 \(Monday\) through 2026-11-01 \(Sunday\)/);
+    assert.match(call.messages[0].content, /notes from the last 35 days/);
+  } finally { h.restore(); }
+});
+
+test('upcomingWeek: Sat/Sun → next Mon–Sun; weekday → today through Sunday (Central dates)', () => {
+  const h = weeklyHarness();
+  try {
+    const w = h.wip.upcomingWeek;
+    assert.deepStrictEqual(w(new Date('2026-10-24T11:30:00Z')), { today: '2026-10-24', start: '2026-10-26', end: '2026-11-01' }); // Saturday
+    assert.deepStrictEqual(w(new Date('2026-10-25T20:00:00Z')), { today: '2026-10-25', start: '2026-10-26', end: '2026-11-01' }); // Sunday
+    assert.deepStrictEqual(w(new Date('2026-10-28T15:00:00Z')), { today: '2026-10-28', start: '2026-10-28', end: '2026-11-01' }); // Wednesday
+    assert.deepStrictEqual(w(new Date('2026-10-26T15:00:00Z')), { today: '2026-10-26', start: '2026-10-26', end: '2026-11-01' }); // Monday
+    assert.deepStrictEqual(w(new Date('2026-10-26T03:30:00Z')), { today: '2026-10-25', start: '2026-10-26', end: '2026-11-01' }); // Sun 10:30 PM Central
   } finally { h.restore(); }
 });
