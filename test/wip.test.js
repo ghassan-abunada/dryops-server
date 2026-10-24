@@ -66,7 +66,9 @@ test('Total AR = open_ar_total RPC for the location; rows carry the JN rollup ba
 test('owner page shows the DryOps AR number and per-job "they owe" from approved_invoice_due', async () => {
   await withServer(async base => {
     const html = await (await fetch(`${base}/wip/${TOKEN}`)).text();
-    assert.match(html, /Total owed to us<\/span><b>\$42,000<\/b>/);
+    assert.match(html, /<span>AR<\/span><button[^>]*data-help="ar"[^>]*>\?<\/button><b>\$42,000<\/b>/);
+    assert.match(html, /<span>Bank Balance<\/span>/);
+    assert.ok(!/Total owed to us|Money in the bank/.test(html));
     assert.match(html, /"due":1234\.57/);
     assert.match(html, /"inv_total":9000/);
   });
