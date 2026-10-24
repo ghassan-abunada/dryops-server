@@ -57,6 +57,8 @@ npm start
 - `JN_TOKEN` — JobNimbus bearer token (required; server exits at startup if missing)
 - `SUPABASE_URL` — Supabase project URL
 - `SUPABASE_SERVICE_KEY` — Supabase service role key (required; server exits at startup if missing)
+- `ANTHROPIC_API_KEY` — enables the WIP "Review notes" AI review (wip.js); unset = the buttons and the Saturday run are skipped with a warning
+- `WIP_AUTO_REVIEW` / `WIP_AUTO_REVIEW_HOUR` — the WIP AI review runs by itself every Saturday from 6:00 AM Central for every pooled location (`off` disables; hour 0–23). Deduped per location per Saturday via `wip_reviews.result->>trigger = 'weekly'`; failures retry on later 10-minute ticks that day, max 3
 
 ## Supplemental storage billing (monthly)
 
