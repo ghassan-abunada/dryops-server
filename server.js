@@ -3201,6 +3201,44 @@ app.delete('/admin/users/:id', requireAuth, requireStrictAdmin, async (req, res)
   }
 });
 
+// ── Self-service account deletion (App Store guideline 5.1.1(v)) ─────────────
+// Any signed-in user may delete their OWN account. Refused for the last admin
+// so a company can't lock itself out. Referral partners: their encrypted
+// W-9/bank secrets are erased and the lead_source row is unlinked (kept, since
+// referrals/payouts are the company's records). profiles cascades from
+// auth.users. Live tokens die with the sessions delete + auth-cache purge.
+app.delete('/me', requireAuth, async (req, res) => {
+  const uid = req.userId;
+  try {
+    const prof = await sbGet(`profiles?id=eq.${uid}&select=role`);
+    const role = prof && prof[0] ? prof[0].role : null;
+    if (role === 'admin') {
+      const admins = await sbGet(`profiles?role=eq.admin&id=neq.${uid}&select=id&limit=1`);
+      if (!Array.isArray(admins) || admins.length === 0) {
+        return res.status(409).json({ error: 'You are the only admin. Make someone else an admin before deleting your account.' });
+      }
+    }
+    if (role === 'lead_source') {
+      const links = await sbGet(`lead_sources?user_id=eq.${uid}&select=id`);
+      for (const ls of Array.isArray(links) ? links : []) {
+        await sbAdmin('DELETE', `/rest/v1/lead_source_secure?lead_source_id=eq.${ls.id}`).catch(() => {});
+        await sbAdmin('PATCH', `/rest/v1/lead_sources?id=eq.${ls.id}`, { user_id: null, status: 'invited' }, 'return=minimal').catch(() => {});
+      }
+      leadSourceCache.delete(uid);
+    }
+    try { await gotrueAdmin('DELETE', `users/${uid}/sessions`); } catch { /* best effort */ }
+    const { ok, status, body } = await gotrueAdmin('DELETE', `users/${uid}`);
+    if (!ok) return res.status(status).json({ error: (body && (body.msg || body.message)) || 'delete failed' });
+    try { await sbAdmin('DELETE', `/rest/v1/profiles?id=eq.${uid}`); } catch { /* cascade already handled it */ }
+    for (const [token, entry] of authCache) if (entry.userId === uid) authCache.delete(token);
+    console.log('[self-delete]', uid, role);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[self-delete error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 app.post('/admin/users/:id/reset-password', requireAuth, requireStrictAdmin, async (req, res) => {
   try {
     if (!(await assertActionableTarget(req, res, req.params.id))) return;
