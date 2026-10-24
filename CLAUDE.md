@@ -60,6 +60,36 @@ npm start
 - `ANTHROPIC_API_KEY` — enables the WIP "Review notes" AI review (wip.js); unset = the buttons and the Saturday run are skipped with a warning
 - `WIP_AUTO_REVIEW` / `WIP_AUTO_REVIEW_HOUR` — the WIP AI review runs by itself every Saturday from 6:00 AM Central for every pooled location (`off` disables; hour 0–23). Deduped per location per Saturday via `wip_reviews.result->>trigger = 'weekly'`; failures retry on later 10-minute ticks that day, max 3
 
+## WIP pages (wip.js, wipDash.js, wipPdf.js)
+- Links are the credential: owner form `/wip/<pool token>`, manager dashboard
+  `/wip/master/<wip_managers.token>` (only that manager's locations), super
+  master `/wip/master/<wip_config.master_token>` (every pooled location, can
+  add/remove pool rows), admin portal `/wip/admin/<wip_config.admin_token>`
+  (add managers, assign locations, regenerate/deactivate links). Schema:
+  `supabase_wip_pages.sql` + `supabase_wip_dashboard.sql` (managers,
+  `wip_manager_locations`, `wip_job_estimates`, `wip_snapshots.manager_id`,
+  `admin_token`). Pages degrade with a clear message until the second file runs.
+- Dashboard numbers: **Collected last week** = `payments.jn_created` in the
+  previous Mon–Sun (Central), `method_id` ≠ −1; **Invoiced last week** =
+  `invoices.jn_created` in that week — both exactly the DryOps Stats
+  definitions. **AR** = `open_ar_total` RPC. **Forecast vs actual** = the last
+  `wip_snapshots.collecting_total` saved in the 7 days before that Monday
+  (the Saturday auto-review saves one per location) vs collected. **Estimate
+  accuracy** = latest `wip_job_estimates` row per job (appended whenever an
+  owner's In Progress value changes) vs `jobs.approved_invoice_total` /
+  collected-so-far, for jobs that have since been invoiced. A saved
+  `wip_entries` row only counts if it fits the job's current section (an
+  estimate on a now-invoiced job is not In Progress any more).
+- Manual AI review is start-and-poll: `POST /wip/master/:t/review` → `{run_id}`,
+  `GET …/review/:run_id` → progress (phases loading → notes → deciding →
+  saving, per-location ticks); one run per master link at a time.
+- PDFs (pdfkit, `wipPdf.js`): `/wip/<token>/pdf`, `…/master/:t/pdf?pool_id=`
+  (one location) and `…/master/:t/pdf` (one-row-per-location summary). Single
+  page by design: type steps 10→9→8→7.5 pt until it fits; continues to a
+  second page only when it still overflows (~40+ rows).
+- Location logo (`locations.logo_url`, else brand pack full → light → icon via
+  `locationLogoUrl`) shows in the owner form header, card chips and PDFs.
+
 ## Supplemental storage billing (monthly)
 
 Replaces the Zapier + JN-automation anniversary flow. On the 1st of each month
