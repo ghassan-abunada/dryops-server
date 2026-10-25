@@ -10,14 +10,17 @@
 
 const CSS = `
   .wrap.wide{max-width:1280px}
-  .pagerow{display:flex;align-items:center;gap:10px;margin:0 0 14px;min-height:40px}
-  .pagerow h2{margin:0;flex:1;font-size:20px}.pagerow .meta{white-space:nowrap}
+  .pagerow{display:flex;align-items:center;gap:8px;margin:0 0 14px;min-height:48px;flex-wrap:wrap}
+  .pagerow .pt{flex:1;min-width:200px;display:flex;flex-direction:column}.pagerow h2{margin:0;font-size:17px}.pagerow .meta{white-space:nowrap}
+  .top .brand{display:none}.top .brand span{color:var(--hdrsub);font-weight:700;margin-left:8px}
+  @media(min-width:900px){.top .brand{display:block}.top .ph{display:none}.pagerow{border-bottom:1px solid var(--line);padding-bottom:10px;margin:0 0 16px}}
+  @media(max-width:899px){.pagerow .dk{display:none}}
   .tbl{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
   table.t{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
   table.t th{font-weight:800;color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
   table.t td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle}table.t tr:last-child td{border-bottom:0}
   table.t .r,table.t th.r{text-align:right;white-space:nowrap}
-  table.t tr.changed td:first-child{box-shadow:inset 4px 0 0 var(--acc)}
+  table.t tr.changed td{background:rgba(219,234,254,.35)}
   table.t td.amber{background:var(--amberbg)}
   .big{font-size:17px;font-weight:800;color:var(--ink)}.sm{display:block;font-size:12px;color:var(--mut);font-weight:600;margin-top:2px}
   ::placeholder{color:var(--mut);opacity:.85;font-weight:500}
@@ -38,7 +41,7 @@ const CSS = `
   .rbar.err progress::-webkit-progress-value{background:var(--danger)}.rbar .lbl2{font-size:13.5px}.rbar .pct{color:var(--mut);font-size:13px;margin-left:auto;font-variant-numeric:tabular-nums}
   .ticks{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.ticks span{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:2px 9px;color:var(--mut)}.ticks span.done{border-color:#15803D;color:#15803D}.ticks span.cur{border-color:var(--ink);color:var(--ink)}.ticks span.fail{border-color:var(--danger);color:var(--danger)}
   .mob{display:none}
-  .admin{display:grid;grid-template-columns:1fr;gap:14px}.mgr{cursor:pointer}.mgr.sel{border-color:var(--acc);box-shadow:0 0 0 2px var(--wash)}.mgr.off{opacity:.6}
+  .admin{display:grid;grid-template-columns:1fr;gap:14px}.mgr{cursor:pointer}.mgr.sel{border-color:var(--acc)}.mgr.off{opacity:.6}
   .chk{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);min-height:44px}.chk:last-child{border-bottom:0}.chk input[type=checkbox]{width:22px;height:22px;flex:none;accent-color:var(--acc)}.chk .nm{flex:1;font-weight:600}
   .pill{display:inline-block;font-size:11px;font-weight:700;border:1px solid var(--line);border-radius:999px;padding:1px 8px;color:var(--mut);margin-left:6px;vertical-align:middle}
   @media(max-width:899px){
@@ -47,7 +50,7 @@ const CSS = `
     table.t thead{display:none}table.t tr{display:block;padding:10px 0;border-bottom:1px solid var(--line)}table.t tr:last-child{border-bottom:0}
     table.t td{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 14px;border:0;white-space:normal;min-width:0}table.t td::before{content:attr(data-l);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:var(--mut);flex:none}
     table.t td.r{text-align:right}table.t td>div{min-width:0}table.t td:first-child::before{content:none}table.t td.a::before{content:none}
-    .big{font-size:16px}.bankcell input{width:112px}
+    .big{font-size:16px}.bankcell input{width:132px}
     .acts{flex-wrap:wrap;justify-content:flex-start}
   }
   @media(min-width:900px){.panels{grid-template-columns:1fr 1fr}.admin{grid-template-columns:380px 1fr}}
@@ -70,7 +73,8 @@ function renderMaster(ctx, m) {
   const { esc, json, q, help, whole, when } = ctx;
   const base = `/wip/master/${esc(m.token)}`;
   const nw = weekLabel(m.week), lw = weekLabel(m.lastWeek);
-  const topbar = `<div class="top"><div class="ttl"><h1>WIP · ${esc(m.title)}</h1><div class="sub">${m.locations.length} location${m.locations.length === 1 ? '' : 's'} · week of ${esc(nw)}</div></div><a class="btn ghost small" href="${base}/pdf" target="_blank">PDF</a><button class="btn small" data-share="${base}/text" data-share-title="WIP — ${esc(m.title)}">Share all</button></div>`;
+  const meta = `${m.locations.length} location${m.locations.length === 1 ? '' : 's'} · week of ${esc(nw)}`;
+  const topbar = `<div class="top"><div class="ttl"><h1 class="brand">DryOps <span>WIP</span></h1><h1 class="ph">WIP · ${esc(m.title)}</h1><div class="sub ph">${meta}</div></div></div>`;
 
   const rows = m.locations.map(l => {
     const missing = l.ipMissing + l.wcMissing;
@@ -110,7 +114,7 @@ function renderMaster(ctx, m) {
   const addCard = m.scope === 'all' ? `<div class="card" style="margin-top:14px"><b>Add a location</b><div class="row" style="margin-top:10px"><select id="add-loc" style="flex:1;min-width:220px"><option value="">Choose a location…</option>${m.options.map(l => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('')}</select><button class="btn ghost" id="add-btn">Add</button></div></div>` : '';
 
   const body = `
-<div class="pagerow"><h2>Locations</h2><span class="meta">${esc(m.today)}</span><button class="btn ghost small" id="review-all">Review all AR notes</button><a class="btn ghost small" href="${base}/text" target="_blank">Combined text</a></div>
+<div class="pagerow"><div class="pt"><h2 class="dk">WIP · ${esc(m.title)}</h2><span class="meta">${meta} · ${esc(m.today)}</span></div><button class="btn ghost small" id="review-all">Review all AR notes</button><a class="btn ghost small" href="${base}/text" target="_blank">Combined text</a><a class="btn ghost small" href="${base}/pdf" target="_blank">PDF</a><button class="btn small" data-share="${base}/text" data-share-title="WIP — ${esc(m.title)}">Share all</button></div>
 ${table}
 ${reviewBar}
 <div class="meta" style="margin:12px 2px 0">“Review notes” reads each invoiced job's JobNimbus notes from the last 5 weeks and proposes what should actually arrive next week; owners confirm on their form. ${m.weeklyReview.enabled ? `It runs by itself every <b>Saturday at ${esc(m.weeklyReview.hourLabel)} Central</b>.` : 'The automatic Saturday run is switched off.'}${m.anthropic ? '' : ' <b>ANTHROPIC_API_KEY is not set on the server, so it will fail until it is.</b>'}</div>
@@ -118,11 +122,11 @@ ${insights}
 ${addCard}`;
 
   const script = `
-const M=${json(m.token)};
+const M=${json(m.token)};const CHECK='<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"m5 12.5 4.5 4.5L19 7\"/></svg>',CROSS='<svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\" aria-hidden=\"true\"><path d=\"M6 6l12 12M18 6 6 18\"/></svg>';
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function num(v){if(v==null||v==='')return null;const n=Number(String(v).replace(/[^0-9.]/g,''));return isNaN(n)?null:n}
 ${m.scope === 'all' ? `document.getElementById('add-btn').onclick=async()=>{const id=document.getElementById('add-loc').value;if(!id)return;const r=await fetch('/wip/master/'+M+'/locations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location_id:id})});if(r.ok)location.reload();else alert(await r.text())};` : ''}
-document.addEventListener('click',async e=>{const c=e.target.closest('[data-copy]');if(c){try{await navigator.clipboard.writeText(c.dataset.copy);const t=c.textContent;c.textContent='Copied ✓';setTimeout(()=>c.textContent=t,1500)}catch(x){prompt('Copy this link',c.dataset.copy)}return}
+document.addEventListener('click',async e=>{const c=e.target.closest('[data-copy]');if(c){try{await navigator.clipboard.writeText(c.dataset.copy);const t=c.textContent;c.innerHTML='Copied '+CHECK;setTimeout(()=>c.textContent=t,1500)}catch(x){prompt('Copy this link',c.dataset.copy)}return}
 const r=e.target.closest('[data-remove]');if(r){if(!confirm('Remove this location from the pool? Owner values are kept.'))return;const x=await fetch('/wip/master/'+M+'/locations/'+r.dataset.remove,{method:'DELETE'});if(x.ok)location.reload();else alert(await x.text())}});
 // Bank balance per location, saved when the field is left (or after a pause).
 const bankTimers={};
@@ -135,7 +139,7 @@ const bar=document.getElementById('review-bar'),lbl=document.getElementById('rev
 const PH={loading:'loading jobs',notes:'reading JobNimbus notes',deciding:'deciding what will arrive next week',saving:'saving'};
 function paint(s){const total=s.total||1;const frac=(s.done+(s.phase_frac||0))/total;prog.value=Math.round(frac*100);pctEl.textContent=s.done+' of '+s.total+' location'+(s.total===1?'':'s');
 lbl.textContent=s.finished?(s.error?'The review could not run — '+s.error:'Done — '+(s.done-(s.failed||0))+' location'+(s.done-(s.failed||0)===1?'':'s')+' reviewed'+(s.failed?', '+s.failed+' could not be reviewed':'')):'Reviewing '+(s.current||'')+(s.phase?' · '+(PH[s.phase]||s.phase)+(s.phase==='notes'&&s.jobs!=null?' for '+s.jobs+' job'+(s.jobs===1?'':'s'):''):'');
-ticks.innerHTML=(s.items||[]).map(t=>'<span class="'+t.state+'">'+esc(t.label)+(t.state==='done'?' ✓':t.state==='fail'?' ✕':'')+'</span>').join('');bar.classList.toggle('err',!!s.error||(s.finished&&!!s.failed))}
+ticks.innerHTML=(s.items||[]).map(t=>'<span class="'+t.state+'">'+esc(t.label)+(t.state==='done'?' '+CHECK:t.state==='fail'?' '+CROSS:'')+'</span>').join('');bar.classList.toggle('err',!!s.error||(s.finished&&!!s.failed))}
 function renderResults(results){const lab={collecting:'Collecting',received:'Received — post the payment',not_yet:'Not this week'};
 out.innerHTML=results.map(x=>'<div class="card" style="margin-top:12px"><b>'+esc(x.label)+'</b><div class="meta">'+(x.error?'<span class="need-txt">could not be reviewed — '+esc(x.error)+'</span>':x.jobs_reviewed+' invoiced jobs read, '+x.applied+' proposed'+(x.skipped_owner&&x.skipped_owner.length?', '+x.skipped_owner.length+' already answered by the owner':''))+'</div>'+(x.jobs&&x.jobs.length?'<div class="list" style="margin-top:8px">'
 +x.jobs.map(d=>'<div><div class="row" style="justify-content:space-between"><span class="nm" style="font-size:15px">'+esc(d.name)+'</span><b>'+(d.amount!=null?'$'+Number(d.amount).toLocaleString('en-US',{minimumFractionDigits:2}):'')+'</b></div><div class="meta"><b>'+esc(lab[d.decision]||d.decision)+'</b>'+(d.owner_set?' · owner already answered':'')+' — '+esc(d.reason)+'</div></div>').join('')+'</div>':'')+'</div>').join('')+'<div class="actions" style="margin-top:12px"><button class="btn" onclick="location.reload()">Reload the table</button></div>'}
@@ -174,16 +178,14 @@ function renderAdmin(ctx, m) {
 <input type="text" id="loc-search" placeholder="Search locations" style="margin:10px 0" aria-label="Search locations">
 <div id="loc-list">${list}</div></div>`;
   }
-  const unassigned = m.locations.filter(l => !l.managers.length);
   const body = `<div class="admin">
 <div><div class="card"><b>Add a manager</b><div class="row" style="margin-top:10px"><input type="text" id="new-name" placeholder="Name" style="flex:1" aria-label="Manager name"><input type="text" id="new-email" placeholder="Email" style="flex:1" aria-label="Manager email (optional)"><button class="btn" id="new-btn">Add</button></div><div class="sub" style="margin-top:6px">A private master link is created for them — copy it from their card and send it.</div></div>
 ${mgrCards || '<div class="card">No managers yet.</div>'}</div>
-<div>${right}
-<div class="card"><b>Unassigned locations</b><span class="pill">${unassigned.length}</span><div class="meta" style="margin-top:6px">${unassigned.length ? unassigned.map(l => esc(l.name)).join(', ') : 'Every location has a manager.'}</div></div></div></div>`;
+<div>${right}</div></div>`;
 
   const script = `
-const A=${json(m.token)},SEL=${json(m.selected || null)};
-document.addEventListener('click',async e=>{const c=e.target.closest('[data-copy]');if(c){e.preventDefault();e.stopPropagation();try{await navigator.clipboard.writeText(c.dataset.copy);const t=c.textContent;c.textContent='Copied ✓';setTimeout(()=>c.textContent=t,1500)}catch(x){prompt('Copy this link',c.dataset.copy)}return}
+const A=${json(m.token)},SEL=${json(m.selected || null)};const CHECK='<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"m5 12.5 4.5 4.5L19 7\"/></svg>';
+document.addEventListener('click',async e=>{const c=e.target.closest('[data-copy]');if(c){e.preventDefault();e.stopPropagation();try{await navigator.clipboard.writeText(c.dataset.copy);const t=c.textContent;c.innerHTML='Copied '+CHECK;setTimeout(()=>c.textContent=t,1500)}catch(x){prompt('Copy this link',c.dataset.copy)}return}
 if(e.target.closest('[data-stop]'))return;const card=e.target.closest('[data-select]');if(card){location.search='?m='+card.dataset.select}});
 document.addEventListener('keydown',e=>{if(e.key!=='Enter')return;const card=e.target.closest&&e.target.closest('[data-select]');if(card&&e.target===card)location.search='?m='+card.dataset.select});
 document.getElementById('new-btn').onclick=async()=>{const name=document.getElementById('new-name').value.trim();if(!name)return;const r=await fetch('/wip/admin/'+A+'/managers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,email:document.getElementById('new-email').value.trim()||null})});const j=await r.json();if(!r.ok){alert(j.error||r.statusText);return}location.search='?m='+j.id};
@@ -193,7 +195,7 @@ const cb=e.target.closest('input[data-assign]');if(cb){cb.disabled=true;const r=
 const n=document.querySelectorAll('input[data-assign]:checked').length;document.getElementById('assign-count').textContent=n+' assigned'}});
 document.getElementById('loc-search').addEventListener('input',e=>{const v=e.target.value.toLowerCase();document.querySelectorAll('#loc-list .chk').forEach(x=>{x.style.display=!v||x.dataset.name.includes(v)?'':'none'})});
 document.getElementById('regen').onclick=async()=>{if(!confirm('Make a new link? The old link stops working immediately.'))return;const r=await fetch('/wip/admin/'+A+'/managers/'+SEL+'/token',{method:'POST'});if(r.ok)location.reload();else alert(await r.text())};
-document.getElementById('toggle-active').onclick=async()=>{const on=document.getElementById('toggle-active').textContent==='Activate';const r=await fetch('/wip/admin/'+A+'/managers/'+SEL,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:on})});if(r.ok)location.reload();else alert(await r.text())};}`;
+document.getElementById('toggle-active').onclick=async()=>{const on=document.getElementById('toggle-active').textContent==='Activate';if(!on&&!confirm('Deactivate this manager? Their link stops working until you activate them again.'))return;const r=await fetch('/wip/admin/'+A+'/managers/'+SEL,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:on})});if(r.ok)location.reload();else alert(await r.text())};}`;
   return { body, script, topbar };
 }
 

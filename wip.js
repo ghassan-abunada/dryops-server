@@ -214,7 +214,7 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
       return {
         key: j.id, name: cleanName(j.name) + typeTag(j.record_type), number: j.number, status: j.status, stage: j.stage,
         record_type: j.record_type, oop: !!j.insurance_type && j.insurance_type !== 'Insurance',
-        created: j.jn_created ? j.jn_created.slice(0, 10) : null,
+        created: j.jn_created ? j.jn_created.slice(0, 10) : null, createdLabel: when(j.jn_created, { time: false }),
         due: j.approved_invoice_due != null ? money2(j.approved_invoice_due) : null,
         inv_total: j.approved_invoice_total != null ? money2(j.approved_invoice_total) : null,
         group, category, amount, collect_amount: collectAmount,
@@ -331,6 +331,7 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
   .top h1{font-size:18px;font-weight:800;letter-spacing:-.2px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .top .ttl{flex:1;min-width:0}.top .sub{font-size:12px;color:var(--hdrsub);font-weight:600}
   .top .btn.ghost{background:rgba(255,255,255,.15);border-color:transparent;color:var(--hdr)}
+  .nxt{display:none}@media(min-width:520px){.nxt{display:inline}}
   .steps{display:flex;gap:4px;width:84px;flex:none}.steps span{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.18)}.steps span.on{background:#38BDF8}
   .wrap{max-width:720px;margin:0 auto;padding:14px 16px calc(96px + env(safe-area-inset-bottom))}
   h2{font-size:20px;font-weight:800;letter-spacing:-.2px;color:var(--ink);margin:4px 0 2px;display:flex;align-items:center}
@@ -339,8 +340,8 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
   .sub{color:var(--ink2);font-size:13px;font-weight:600}.meta{color:var(--mut);font-size:12px;font-weight:600}.nm{font-weight:700;font-size:15px;color:var(--ink)}
   .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:10px}
   details.sec{margin:14px 0 0}details.sec>summary{list-style:none;display:flex;align-items:center;gap:8px;padding:10px 2px;cursor:pointer;user-select:none;min-height:44px}
-  details.sec>summary::-webkit-details-marker{display:none}details.sec>summary::after{content:"›";margin-left:auto;color:var(--mut);font-size:20px;transform:rotate(90deg);transition:transform .15s}
-  details.sec[open]>summary::after{transform:rotate(-90deg)}.count{background:#E2E8F0;color:var(--ink2);border-radius:999px;padding:1px 8px;font-size:12px;font-weight:700}
+  details.sec>summary::-webkit-details-marker{display:none}details.sec>summary::after{content:"";margin-left:auto;width:18px;height:18px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23475569' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") center/18px no-repeat;transition:transform .15s}
+  details.sec[open]>summary::after{transform:rotate(180deg)}.count{background:#E2E8F0;color:var(--ink2);border-radius:999px;padding:1px 8px;font-size:12px;font-weight:700}
   .job{position:relative;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px 12px 18px;margin-bottom:10px;transition:background-color .15s,border-color .15s}
   .job::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;border-radius:12px 0 0 12px;background:var(--line)}
   .job.is-ip::before{background:var(--ip)}.job.is-col::before{background:var(--col)}
@@ -349,7 +350,7 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
   .job.off{opacity:.7}
   .job-head{margin-bottom:8px}.job-head .meta{margin-top:2px}
   .says{margin-top:6px;font-size:13px;color:var(--ink2);font-weight:600;background:var(--bg);border-radius:8px;padding:6px 10px}
-  .tag{display:inline-block;margin-left:6px;padding:2px 7px;border-radius:5px;background:rgba(148,163,184,.18);color:var(--ink2);font:800 10px/1.3 inherit;letter-spacing:.3px;text-transform:uppercase;vertical-align:middle}
+  .tag{display:inline-block;margin-left:6px;padding:2px 7px;border-radius:5px;background:rgba(148,163,184,.18);color:var(--ink2);font:800 11px/1.3 inherit;letter-spacing:.3px;text-transform:uppercase;vertical-align:middle}
   .tag.oop{background:rgba(234,88,12,.12);color:#EA580C}
   input[type=text],input[type=number],input[type=email],select,textarea{font:inherit;font-size:16px;font-weight:600;color:var(--ink);padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);min-width:0;width:100%;min-height:44px}
   input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible,a.btn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
@@ -367,7 +368,9 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
   .btn.on{background:var(--col);border-color:var(--col);color:#fff}.btn.ghost.on{background:var(--bg);color:var(--ink);border-color:var(--ink2)}
   .btn:disabled{opacity:.55}
   .actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
-  .bar{position:fixed;left:0;right:0;bottom:0;z-index:6;background:rgba(255,255,255,.96);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-top:1px solid var(--line);padding:10px 16px calc(10px + env(safe-area-inset-bottom));display:flex;gap:8px;align-items:center}
+  .bar{position:fixed;left:0;right:0;bottom:0;z-index:6;background:#fff;border-top:1px solid var(--line);padding:10px 16px calc(10px + env(safe-area-inset-bottom));display:flex;gap:8px;align-items:center}
+  .bar>*{flex:none}.bar .status{flex:1}@media(min-width:760px){.bar{padding-left:calc(50% - 344px);padding-right:calc(50% - 344px)}}
+  .lnk{font:inherit;font-size:13px;font-weight:700;color:var(--ink2);background:none;border:0;padding:0 4px;min-height:44px;cursor:pointer;text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--line)}.lnk:hover{color:var(--acc);text-decoration-color:var(--acc)}
   .bar .status{flex:1;min-width:0;display:flex;flex-direction:column}.bar .status b{font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--mut)}.bar .status span{font-size:15px;font-weight:800;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .savenote{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));transform:translateX(-50%) translateY(10px);z-index:7;background:var(--ink);color:#fff;font-size:13px;font-weight:700;padding:8px 14px;border-radius:999px;opacity:0;pointer-events:none;transition:opacity .15s,transform .15s}
   .savenote.ok,.savenote.err{opacity:1;transform:translateX(-50%) translateY(0)}.savenote.err{background:var(--danger);pointer-events:auto;cursor:pointer}
@@ -387,7 +390,7 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
   details.sec .help{margin:0 2px 10px}
   @media(min-width:600px){.actions{grid-template-columns:repeat(4,1fr)}}
   ` + DASH.CSS;
-  const ICON = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#1b6e5a"/><text x="32" y="41" font-family="-apple-system,Helvetica,Arial" font-weight="700" font-size="22" text-anchor="middle" fill="#fff">WIP</text></svg>');
+  const ICON = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#1C2333"/><text x="32" y="41" font-family="-apple-system,Helvetica,Arial" font-weight="800" font-size="22" text-anchor="middle" fill="#F1F5F9">WIP</text></svg>');
   function page(title, body, script, topbar, pageOpts = {}) {
     const icon = pageOpts.icon || ICON;
     return `<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -405,7 +408,7 @@ async function shareText(url,title){let text='';try{const r=await fetch(url,{cac
 if(navigator.share){try{await navigator.share({title,text});return}catch(e){if(e&&e.name==='AbortError')return}}
 const s=document.getElementById('sheet');document.getElementById('sheet-title').textContent=title;document.getElementById('sheet-text').value=text;
 document.getElementById('sheet-sms').href='sms:?&body='+encodeURIComponent(text);
-document.getElementById('sheet-copy').onclick=async()=>{try{await navigator.clipboard.writeText(text);document.getElementById('sheet-copy').textContent='Copied ✓'}catch(e){document.getElementById('sheet-text').select()}};
+document.getElementById('sheet-copy').onclick=async()=>{try{await navigator.clipboard.writeText(text);document.getElementById('sheet-copy').textContent='Copied'}catch(e){document.getElementById('sheet-text').select()}};
 s.classList.add('open')}
 document.addEventListener('click',e=>{const b=e.target.closest('[data-share]');if(b){e.preventDefault();shareText(b.dataset.share,b.dataset.shareTitle||'WIP')}if(e.target.id==='sheet')closeSheet()});
 document.addEventListener('click',e=>{const q=e.target.closest('.q[data-help]');if(!q)return;e.preventDefault();e.stopPropagation();const h=document.getElementById('help-'+q.dataset.help);const on=!(h&&h.classList.contains('on'));if(h)h.classList.toggle('on',on);q.classList.toggle('on',on);q.setAttribute('aria-expanded',on)});
