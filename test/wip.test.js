@@ -30,7 +30,8 @@ function stubSupabase(calls) {
     }
     if (path.startsWith('wip_entries?')) return ok([{ key: 'j1', custom_name: null, category: 'collecting', amount: null, note: '', updated_by: 'Sam', updated_at: '2026-10-24T12:00:00Z' }]);
     if (path === 'rpc/open_ar_total') return ok(42000.4);
-    if (path.startsWith('wip_snapshots')) return new Response('', { status: 201 });
+    if (path.startsWith('wip_snapshots') && (!init || !init.method || init.method === 'GET')) return ok([]);
+    if (path.startsWith('wip_snapshots')) return new Response(null, { status: 201 });
     if (path.startsWith('invoices')) throw new Error('WIP must not read the invoices mirror');
     throw new Error('unexpected supabase call ' + path);
   };
@@ -51,26 +52,30 @@ async function withServer(fn) {
 test('Total AR = open_ar_total RPC for the location; rows carry the JN rollup balances', async () => {
   await withServer(async (base, calls) => {
     const text = await (await fetch(`${base}/wip/${TOKEN}/text`)).text();
-    assert.match(text, /Total AR — \$42,000\n/, text);
+    assert.match(text, /\nAR \$42,000 · Bank \$1,000\n/, text);
     // Collecting defaults to the approved balance due, rounded to cents.
-    assert.match(text, /Collecting — \$1,235\n1\. Alice — \$1,234\.57/, text);
+    assert.match(text, /Collecting this week · 1 · \$1,235\n/, text);
+    assert.match(text, /COLLECTING THIS WEEK\nAlice — \$1,234\.57/, text);
     // The Attorney job is not in Collecting (no amount typed) and does not inflate AR.
     assert.ok(!/Bob/.test(text), text);
-    assert.match(text, /In Progress — \$0\n1\. Cara —/, text);
+    assert.match(text, /In Progress · 1 job · \$0\n/, text);
+    assert.match(text, /IN PROGRESS\nCara — no number yet/, text);
     const rpc = calls.find(c => c.path === 'rpc/open_ar_total');
     assert.deepStrictEqual(rpc.body, { p_location_ids: [LOC] });
     assert.ok(!calls.some(c => c.path.startsWith('invoices')));
   });
 });
 
-test('owner page shows the DryOps AR number and per-job "they owe" from approved_invoice_due', async () => {
+test('owner page carries per-job "they owe" from approved_invoice_due and the three steps', async () => {
   await withServer(async base => {
     const html = await (await fetch(`${base}/wip/${TOKEN}`)).text();
-    assert.match(html, /<span>AR<\/span><button[^>]*data-help="ar"[^>]*>\?<\/button><b>\$42,000<\/b>/);
-    assert.match(html, /<span>Bank Balance<\/span>/);
-    assert.ok(!/Total owed to us|Money in the bank/.test(html));
     assert.match(html, /"due":1234\.57/);
     assert.match(html, /"inv_total":9000/);
+    assert.match(html, /Step 1 of 3 · Job values/);
+    assert.match(html, /What is each job worth\?/);
+    assert.match(html, /What's coming in this week\?/);
+    assert.match(html, /Bank Balance today/);
+    assert.ok(!/Total owed to us|Money in the bank/.test(html));
   });
 });
 

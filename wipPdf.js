@@ -8,7 +8,7 @@ const PDFDocument = require('pdfkit');
 
 const PAGE = { w: 612, h: 792, m: 36 };          // LETTER portrait, 0.5" margins
 const STEPS = [{ font: 10, row: 16 }, { font: 9, row: 14 }, { font: 8, row: 12 }, { font: 7.5, row: 11 }];
-const INK = '#1c2321', MUTED = '#5f6b66', LINE = '#dde3dd', ZEBRA = '#f3f5f2', ACC = '#1b6e5a';
+const INK = '#0F172A', MUTED = '#64748B', LINE = '#E2E8F0', ZEBRA = '#F1F5F9', ACC = '#0369A1';
 
 function whole(v) { return '$' + Math.round(Number(v || 0)).toLocaleString('en-US'); }
 function money(v) { return '$' + Number(v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -86,7 +86,7 @@ function drawKpis(doc, y, kpis) {
   kpis.forEach((k, i) => {
     const x = PAGE.m + i * (w + gap);
     doc.roundedRect(x, y, w, h, 5).lineWidth(0.6).strokeColor(LINE).stroke();
-    doc.font('Helvetica').fontSize(6.5).fillColor(MUTED).text(k.label.toUpperCase(), x + 6, y + 6, { width: w - 12, lineBreak: false });
+    doc.font('Helvetica-Bold').fontSize(7.5).fillColor(MUTED).text(k.label.toUpperCase(), x + 6, y + 6, { width: w - 12, lineBreak: false });
     doc.font('Helvetica-Bold').fontSize(13).fillColor(INK).text(k.value, x + 6, y + 17, { width: w - 12, lineBreak: false });
   });
   return y + h + 12;
@@ -141,37 +141,34 @@ async function renderLocationPdf({ data, lists, extra, logoPng }) {
   const generated = new Date().toLocaleString('en-US', { timeZone: 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   let y = drawHeader(doc, {
     title: `WIP — ${data.label}`,
-    subtitle: `Week of ${weekLabel(extra.week)} · last week = ${weekLabel(extra.lastWeek)}`,
+    subtitle: `Week of ${weekLabel(extra.week)}`,
     meta: `Generated ${generated}${extra.generatedBy ? ' by ' + extra.generatedBy : ''}\n${data.lastUpdate ? 'Owner updated ' + data.lastUpdate.slice(0, 10) + (data.lastBy ? ' by ' + data.lastBy : '') : 'No owner input yet'}`,
     logoPng,
   });
   y = drawKpis(doc, y, [
-    { label: 'In Progress', value: whole(lists.ipTotal) },
-    { label: 'Collecting', value: whole(lists.cTotal) },
+    { label: `In Progress · ${lists.inProg.length} job${lists.inProg.length === 1 ? '' : 's'}`, value: whole(lists.ipTotal) },
+    { label: `Collecting this week · ${lists.coll.length}`, value: whole(lists.cTotal) },
     { label: 'AR', value: whole(data.arTotal) },
-    { label: 'Bank balance', value: data.bank ? whole(data.bank.balance) : '—' },
-    { label: 'Collected last wk', value: extra.collected != null ? whole(extra.collected) : '—' },
-    { label: 'Invoiced last wk', value: extra.invoiced != null ? whole(extra.invoiced) : '—' },
+    { label: 'Bank balance', value: data.bank ? whole(data.bank.balance) : 'not entered' },
   ]);
   const { step } = pickStep([{ rows: Math.max(1, lists.inProg.length), titled: true }, { rows: Math.max(1, lists.coll.length), titled: true }]);
-  const ipRows = lists.inProg.map((r, i) => ({ n: i + 1, name: r.name, status: r.status, started: r.created || '', amount: r.amount, note: r.note || '' }));
-  const cRows = lists.coll.map((r, i) => ({ n: i + 1, name: r.name, status: r.status, due: r.due, amount: r.amount, note: r.note || '' }));
+  const ipRows = lists.inProg.map(r => ({ name: r.name + (r.oop ? '  · OOP' : ''), status: r.status, started: r.created || '', amount: r.amount, paying: r.collect_amount, note: r.note || '' }));
+  const cRows = lists.coll.map(r => ({ name: r.name, status: r.status, due: r.due, amount: r.amount, why: [r.why, r.note].filter(Boolean).join(' · ') }));
   y = drawTable(doc, y, [
-    { key: 'n', label: '#', width: 22, align: 'right' },
     { key: 'name', label: 'Job' },
-    { key: 'status', label: 'Status', width: 86 },
-    { key: 'started', label: 'Started', width: 62 },
-    { key: 'amount', label: 'Est. value', width: 70, align: 'right', money: 'whole' },
-    { key: 'note', label: 'Note', width: 150 },
+    { key: 'status', label: 'Status', width: 84 },
+    { key: 'started', label: 'Started', width: 60 },
+    { key: 'amount', label: 'Worth', width: 64, align: 'right', money: 'whole' },
+    { key: 'paying', label: 'Paying this wk', width: 72, align: 'right', money: 'whole' },
+    { key: 'note', label: 'Note', width: 130 },
   ], ipRows.length ? ipRows : [{ name: '(none)', _muted: true }], step, { title: `In Progress — ${whole(lists.ipTotal)}` });
   y = drawTable(doc, y, [
-    { key: 'n', label: '#', width: 22, align: 'right' },
     { key: 'name', label: 'Job' },
-    { key: 'status', label: 'Status', width: 86 },
-    { key: 'due', label: 'They owe', width: 66, align: 'right', money: 'whole' },
-    { key: 'amount', label: 'Expected', width: 66, align: 'right', money: true },
-    { key: 'note', label: 'Note', width: 150 },
-  ], cRows.length ? cRows : [{ name: '(none)', _muted: true }], step, { title: `Collecting — ${whole(lists.cTotal)}` });
+    { key: 'status', label: 'Status', width: 84 },
+    { key: 'due', label: 'They owe', width: 64, align: 'right', money: 'whole' },
+    { key: 'amount', label: 'This week', width: 64, align: 'right', money: true },
+    { key: 'why', label: 'Why', width: 200 },
+  ], cRows.length ? cRows : [{ name: '(none)', _muted: true }], step, { title: `Collecting this week — ${whole(lists.cTotal)}` });
   drawFooter(doc, `DryOps WIP · ${data.label}`);
   return finish(doc);
 }
@@ -181,34 +178,25 @@ async function renderManagerPdf({ title, week, lastWeek, generatedBy, rows, tota
   const doc = new PDFDocument({ size: 'LETTER', margin: PAGE.m, bufferPages: true, info: { Title: title } });
   const generated = new Date().toLocaleString('en-US', { timeZone: 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   let y = drawHeader(doc, {
-    title, subtitle: `Week of ${weekLabel(week)} · last week = ${weekLabel(lastWeek)}`,
+    title, subtitle: `Week of ${weekLabel(week)}`,
     meta: `Generated ${generated}${generatedBy ? ' by ' + generatedBy : ''}\n${rows.length} location${rows.length === 1 ? '' : 's'}`,
   });
-  y = drawKpis(doc, y, [
-    { label: 'In Progress', value: whole(totals.ip) },
-    { label: 'Collecting', value: whole(totals.collecting) },
-    { label: 'AR', value: whole(totals.ar) },
-    { label: 'Bank balance', value: whole(totals.bank) },
-    { label: 'Collected last wk', value: whole(totals.collected) },
-    { label: 'Invoiced last wk', value: whole(totals.invoiced) },
-  ]);
-  const { step } = pickStep([{ rows: rows.length + 1, titled: true }]);
+  // Each location stands on its own: one row each, no totals across locations.
+  const { step } = pickStep([{ rows: rows.length, titled: true }]);
   const body = rows.map(r => ({
-    label: r.label, ip: r.ipTotal, col: r.cTotal, ar: r.arTotal, bank: r.bank ? r.bank.balance : null,
-    collected: r.collected, invoiced: r.invoiced,
-    need: r.ipMissing + r.wcMissing ? `${r.ipMissing + r.wcMissing} of ${r.ipCount}` : (r.ipCount ? 'all set' : '—'),
+    label: r.label, ipn: `${r.ipCount}`, ip: r.ipTotal, coln: `${r.cCount}`, col: r.cTotal, ar: r.arTotal, bank: r.bank ? r.bank.balance : null,
+    report: [r.lastSent ? 'sent' : 'not sent', r.ipMissing + r.wcMissing ? `${r.ipMissing + r.wcMissing} need a #` : ''].filter(Boolean).join(' · '),
   }));
-  body.push({ label: 'Total', ip: totals.ip, col: totals.collecting, ar: totals.ar, bank: totals.bank, collected: totals.collected, invoiced: totals.invoiced, need: totals.missing ? `${totals.missing} of ${totals.ipCount}` : '', _bold: true });
   drawTable(doc, y, [
     { key: 'label', label: 'Location' },
-    { key: 'ip', label: 'In Progress', width: 68, align: 'right', money: 'whole' },
+    { key: 'ipn', label: 'Jobs', width: 32, align: 'right' },
+    { key: 'ip', label: 'In Progress', width: 64, align: 'right', money: 'whole' },
+    { key: 'coln', label: 'Jobs', width: 32, align: 'right' },
     { key: 'col', label: 'Collecting', width: 64, align: 'right', money: 'whole' },
-    { key: 'ar', label: 'AR', width: 64, align: 'right', money: 'whole' },
     { key: 'bank', label: 'Bank', width: 64, align: 'right', money: 'whole' },
-    { key: 'collected', label: 'Collected lw', width: 68, align: 'right', money: 'whole' },
-    { key: 'invoiced', label: 'Invoiced lw', width: 68, align: 'right', money: 'whole' },
-    { key: 'need', label: 'Need a #', width: 56, align: 'right' },
-  ], body, step, { title: 'Locations' });
+    { key: 'ar', label: 'AR', width: 64, align: 'right', money: 'whole' },
+    { key: 'report', label: 'Report', width: 118, align: 'right' },
+  ], body.length ? body : [{ label: '(no locations)', _muted: true }], step, { title: 'Locations' });
   drawFooter(doc, `DryOps WIP · ${title.replace(/^WIP — /, '')}`);
   return finish(doc);
 }
