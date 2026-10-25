@@ -59,6 +59,7 @@ npm start
 - `SUPABASE_SERVICE_KEY` — Supabase service role key (required; server exits at startup if missing)
 - `ANTHROPIC_API_KEY` — enables the WIP "Review notes" AI review (wip.js); unset = the buttons and the Saturday run are skipped with a warning
 - `WIP_AUTO_REVIEW` / `WIP_AUTO_REVIEW_HOUR` — the WIP AI review runs by itself every Saturday from 6:00 AM Central for every pooled location (`off` disables; hour 0–23). Deduped per location per Saturday via `wip_reviews.result->>trigger = 'weekly'`; failures retry on later 10-minute ticks that day, max 3
+- `WIP_PDF` — WIP PDF export (per-location and manager PDFs, wipPdf.js) is OFF unless this is `on`; off = no PDF buttons and the `/pdf` routes answer "turned off"
 
 ## WIP pages (wip.js, wipOwner.js, wipDash.js, wipPdf.js)
 - Visual world = the DryOps DESIGN.md (Charcoal Navy header, Ocean Blue action,
