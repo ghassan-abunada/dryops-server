@@ -214,7 +214,7 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
       return {
         key: j.id, name: cleanName(j.name) + typeTag(j.record_type), number: j.number, status: j.status, stage: j.stage,
         record_type: j.record_type, oop: !!j.insurance_type && j.insurance_type !== 'Insurance',
-        created: j.jn_created ? j.jn_created.slice(0, 10) : null, createdLabel: when(j.jn_created, { time: false }),
+        created: j.jn_created ? j.jn_created.slice(0, 10) : null, createdLabel: dateLabel(j.jn_created),
         due: j.approved_invoice_due != null ? money2(j.approved_invoice_due) : null,
         inv_total: j.approved_invoice_total != null ? money2(j.approved_invoice_total) : null,
         group, category, amount, collect_amount: collectAmount,
@@ -300,6 +300,12 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
       catch (err) { if (!/manager_id|generated_by|42703/.test(err.message)) throw err; } // columns not migrated yet
     }
     await sbWrite('POST', 'wip_snapshots', row, 'return=minimal');
+  }
+  // Calendar date as "Sep 1" from a YYYY-MM-DD (or ISO) string, no timezone shift —
+  // the same rule wipPdf.fmtDate uses, so a job shows one start date everywhere.
+  function dateLabel(iso) {
+    if (!iso || !/^\d{4}-\d{2}-\d{2}/.test(String(iso))) return '';
+    return new Date(String(iso).slice(0, 10) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
   }
   // Null-safe date formatting for anything that came back from the database.
   function when(iso, opts = {}) {
