@@ -8,7 +8,7 @@ const { makeStore, LOC, POOL, MGR, TOKENS, J } = require('./wipFixtures');
 
 const SB = 'https://sb.test';
 
-function boot({ anthropic = null, jnGet = async () => ({ activity: [] }), logo = true } = {}) {
+function boot({ anthropic = null, jnGet = async () => ({ activity: [] }), logo = true, pdf = false } = {}) {
   // The dashboard's "last week" is relative to the real clock, so seed around it.
   const probe = require('../wip')(express(), { SUPABASE_URL: SB, SUPABASE_SERVICE_KEY: 'k', jnGet, anthropic: null }, { noSchedule: true });
   const lw = probe.lastWeek();
@@ -19,7 +19,7 @@ function boot({ anthropic = null, jnGet = async () => ({ activity: [] }), logo =
     SUPABASE_URL: SB, SUPABASE_SERVICE_KEY: 'svc', jnGet, anthropic,
     locationLogoUrl: logo ? async (loc) => loc.logo_url || (loc.name === 'AFF Dallas' ? 'https://cdn.test/aff-brand.png' : null) : undefined,
     logoPngFromUrl: async () => null,
-  }, { noSchedule: true });
+  }, { noSchedule: true, pdf });
   return new Promise(resolve => {
     const srv = app.listen(0, () => resolve({
       base: `http://127.0.0.1:${srv.address().port}`, wip, fx, lw,
@@ -213,8 +213,22 @@ test('admin portal: token gate, add manager, assign/unassign (creates the pool r
   } finally { h.close(); }
 });
 
-test('PDFs: one page per location and per manager; file names; long lists continue', async () => {
+test('PDF export is off by default: no buttons, routes say so', async () => {
   const h = await boot();
+  try {
+    const all = (await get(`${h.base}/wip/master/${TOKENS.master}`)).body;
+    assert.ok(!/\/pdf/.test(all), 'no PDF links on the dashboard');
+    const adm = (await get(`${h.base}/wip/admin/${TOKENS.admin}?m=${MGR.sam}`)).body;
+    assert.ok(!/\/pdf/.test(adm), 'no PDF links on the admin page');
+    const r = await get(`${h.base}/wip/master/${TOKENS.sam}/pdf?pool_id=${POOL.a1}`);
+    assert.strictEqual(r.status, 404);
+    assert.match(r.body, /turned off/);
+    assert.strictEqual((await get(`${h.base}/wip/${TOKENS.a1}/pdf`)).status, 404);
+  } finally { h.close(); }
+});
+
+test('PDFs (WIP_PDF=on): one page per location and per manager; file names; long lists continue', async () => {
+  const h = await boot({ pdf: true });
   try {
     const loc = await get(`${h.base}/wip/master/${TOKENS.sam}/pdf?pool_id=${POOL.a1}`);
     assert.strictEqual(loc.status, 200);

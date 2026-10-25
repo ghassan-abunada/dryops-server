@@ -51,6 +51,9 @@ const PDF = require('./wipPdf');
 module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet, anthropic, locationLogoUrl, logoPngFromUrl }, opts = {}) {
   const sbHeaders = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
   const money2 = v => Math.round(Number(v) * 100) / 100;
+  // PDF export is switched off for now: WIP_PDF=on brings the buttons and routes back.
+  const pdfEnabled = opts.pdf !== undefined ? !!opts.pdf : process.env.WIP_PDF === 'on';
+  function pdfOff(res) { return res.status(404).type('text/plain').send('PDF export is turned off for now.'); }
 
   async function sbGet(pathAndQuery) {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}`, { headers: sbHeaders });
@@ -534,6 +537,7 @@ document.addEventListener('click',e=>{const q=e.target.closest('.q[data-help]');
   });
   app.get('/wip/:token/pdf', async (req, res, next) => {
     if (req.params.token === 'master') return next();
+    if (!pdfEnabled) return pdfOff(res);
     try {
       const pool = await poolByToken(req.params.token);
       if (!pool) return res.status(404).type('text/plain').send('Invalid link');
@@ -671,7 +675,7 @@ document.addEventListener('click',e=>{const q=e.target.closest('.q[data-help]');
       const { body, script, topbar } = DASH.renderMaster(ctx, {
         token: req.params.master, scope: req.wip.scope, manager: req.wip.manager, title: titleFor(req), origin: originOf(req), today: when(new Date(), { time: false }),
         week: dash.week, lastWeek: dash.lastWeek, locations: dash.locations, totals: dash.totals, accuracy: dash.accuracy, lastVisit,
-        options, weeklyReview, anthropic: !!anthropic,
+        options, weeklyReview, anthropic: !!anthropic, pdf: pdfEnabled,
       });
       res.send(page(`WIP · ${titleFor(req)}`, body, script, topbar, { wide: true }));
     } catch (err) { errorPage(res, err, 'master'); }
@@ -709,6 +713,7 @@ document.addEventListener('click',e=>{const q=e.target.closest('.q[data-help]');
     res.type('application/pdf').set('Content-Disposition', `attachment; filename="${pdfName(`WIP ${l.label} ${dash.week.start}`)}.pdf"`).send(buf);
   }
   app.get('/wip/master/:master/pdf', resolveMaster, async (req, res) => {
+    if (!pdfEnabled) return pdfOff(res);
     try {
       const pools = await poolsFor(req);
       const by = req.wip.manager ? req.wip.manager.name : null;
@@ -787,7 +792,7 @@ document.addEventListener('click',e=>{const q=e.target.closest('.q[data-help]');
   app.get('/wip/admin/:admin', requireAdmin, async (req, res) => {
     try {
       const a = await loadAdmin();
-      const { body, script, topbar } = DASH.renderAdmin(ctx, { token: req.params.admin, masterToken: await masterToken(), origin: originOf(req), selected: String(req.query.m || '') || null, ...a });
+      const { body, script, topbar } = DASH.renderAdmin(ctx, { token: req.params.admin, masterToken: await masterToken(), origin: originOf(req), selected: String(req.query.m || '') || null, pdf: pdfEnabled, ...a });
       res.send(page('WIP · managers', body, script, topbar, { wide: true }));
     } catch (err) {
       if (isMissingTable(err)) return res.status(404).send(page('Not set up', '<div class="card"><b>Run supabase_wip_dashboard.sql in Supabase first.</b><div class="sub" style="margin-top:6px">The manager tables are missing.</div></div>'));
