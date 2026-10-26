@@ -864,7 +864,17 @@ app.post('/webhooks/callrail/calls', async (req, res) => {
       }
     }
     await sbUpsert('calls', row, 'callrail_id');
-    return res.status(200).json({ ok: true, callrail_id: row.callrail_id, pre_call: preCall, location_id: row.location_id || null, job_id: row.job_id || null });
+    // Call-modified delivery carrying the AI summary → post the JobNimbus
+    // "Phone Call" activity now (intake.js postCallActivities, targeted) instead
+    // of at the next 10-minute sweep. Harmless when the call has no job yet or
+    // the activity already exists: the targeted run finds nothing to do.
+    const changes = Array.isArray(call.changes) ? call.changes.map(String)
+      : (call.changes && typeof call.changes === 'object') ? Object.keys(call.changes) : [];
+    const summaryReady = !preCall && (changes.includes('call_summary') || (typeof call.call_summary === 'string' && call.call_summary.trim().length > 0));
+    if (summaryReady) {
+      setTimeout(() => intake.postCallActivities({ callrailId: row.callrail_id }).catch((e) => console.warn('[callrail-webhook] instant activity failed', e.message)), 500);
+    }
+    return res.status(200).json({ ok: true, callrail_id: row.callrail_id, pre_call: preCall, summary_ready: summaryReady, location_id: row.location_id || null, job_id: row.job_id || null });
   } catch (err) {
     console.error('[callrail-webhook] error', err.message);
     return res.status(502).json({ ok: false, error: err.message });

@@ -755,7 +755,7 @@ module.exports = function mountIntake(app, deps) {
 
     // 10. notifications + CallRail activity (fire and forget)
     notifyJobCreated({ loc, body, row, result, rep: rep || (visit && visit.who ? { full_name: visit.who } : null), leadLabel, actor }).catch((e) => warn(rid, 'notify', e.message));
-    if (row.callrail_call_id && loc.post_call_activities) setTimeout(() => postCallActivities().catch(() => {}), 2000);
+    if (row.callrail_call_id && loc.post_call_activities) setTimeout(() => postCallActivities({ callrailId: row.callrail_call_id }).catch(() => {}), 2000);
     return result;
   }
   function safeJson(v) { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return v; } }
@@ -926,13 +926,27 @@ module.exports = function mountIntake(app, deps) {
     return typeof s === 'string' ? s.trim() : '';
   }
   let activitiesRunning = false;
-  async function postCallActivities() {
-    if (activitiesRunning || !CALLRAIL_API_KEY) return { skipped: true };
+  // Sweep (no args): every linked call of the last 7 days without an activity.
+  // Targeted ({ callrailId }): one call, right now — used by the CallRail
+  // call-modified webhook the moment the AI summary lands, and by job creation
+  // from a call. A targeted run skips the 10-minute quiet period (the caller
+  // already knows the summary is there or wants the first attempt now) and
+  // waits briefly for a running sweep instead of being dropped.
+  async function postCallActivities(opts = {}) {
+    const targeted = opts && opts.callrailId ? String(opts.callrailId) : null;
+    if (!CALLRAIL_API_KEY) return { skipped: true };
+    if (activitiesRunning) {
+      if (!targeted) return { skipped: true };
+      const until = Date.now() + 30 * 1000;
+      while (activitiesRunning && Date.now() < until) await new Promise((r) => setTimeout(r, 500));
+      if (activitiesRunning) return { skipped: true, busy: true };
+    }
     activitiesRunning = true;
-    const out = { posted: 0, waiting: 0, failed: 0, skipped: 0 };
+    const out = { posted: 0, waiting: 0, failed: 0, skipped: 0, targeted };
     try {
       const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
-      const calls = (await sbGet(`calls?job_id=not.is.null&jn_activity_id=is.null&start_time=gte.${enc(since)}&select=id,callrail_id,customer_phone_number,customer_name,start_time,duration,location_id,job_id,jn_activity_error,jobs(jn_id,jn_location_id,name)&order=start_time.asc&limit=40`)) || [];
+      const scope = targeted ? `callrail_id=eq.${enc(targeted)}` : `start_time=gte.${enc(since)}`;
+      const calls = (await sbGet(`calls?job_id=not.is.null&jn_activity_id=is.null&${scope}&select=id,callrail_id,customer_phone_number,customer_name,start_time,duration,location_id,job_id,jn_activity_error,jobs(jn_id,jn_location_id,name)&order=start_time.asc&limit=40`)) || [];
       if (!calls.length) return out;
       const locIds = Array.from(new Set(calls.map((c) => c.location_id).filter(Boolean)));
       const locs = locIds.length ? (await sbGet(`locations?id=in.(${locIds.map(enc).join(',')})&select=id,post_call_activities,timezone,jn_location_id`)) || [] : [];
@@ -942,7 +956,7 @@ module.exports = function mountIntake(app, deps) {
         if (!loc || !loc.post_call_activities || !c.jobs || !c.jobs.jn_id) { out.skipped++; continue; }
         const startMs = c.start_time ? new Date(c.start_time).getTime() : 0;
         const ageMs = Date.now() - (startMs + (Number(c.duration) || 0) * 1000);
-        if (ageMs < ACTIVITY_MIN_AGE_MS) { out.waiting++; continue; }
+        if (!targeted && ageMs < ACTIVITY_MIN_AGE_MS) { out.waiting++; continue; }
         const cr = await callrailCall(c.callrail_id);
         if (!cr.ok) {
           out.failed++;
@@ -984,7 +998,7 @@ module.exports = function mountIntake(app, deps) {
       }
       return out;
     } catch (err) { console.error('[call activities] error', err.message); out.error = err.message; return out; }
-    finally { activitiesRunning = false; if (out.posted || out.failed) log('call activities', JSON.stringify(out)); }
+    finally { activitiesRunning = false; if (out.posted || out.failed || (targeted && out.waiting)) log(targeted ? 'call activity (instant)' : 'call activities', JSON.stringify(out)); }
   }
   if (SUPABASE_SERVICE_KEY && CALLRAIL_API_KEY) {
     setTimeout(() => { postCallActivities(); setInterval(postCallActivities, 10 * 60 * 1000); }, 90 * 1000);
