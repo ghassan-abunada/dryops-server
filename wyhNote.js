@@ -111,4 +111,35 @@ function buildWyhNote(i) {
   return lines.join('\n');
 }
 
-module.exports = { buildWyhNote, fmtPhone };
+const CALL_ISSUE_LABEL = {
+  longer_than_90s: 'longer than 90 seconds',
+  took_customer_info: 'took customer info',
+  took_call_off_google: 'took the call off of Google',
+  gave_price_over_phone: 'gave a price over the phone',
+  other: 'other',
+};
+
+/**
+ * "Call review - First Last" note for the player's feedback form. Input:
+ * { managerName, callWhen, callPhone, takenBy, opportunity, handled,
+ *   issues: string[], issueOther, missedReason }.
+ */
+function buildCallFeedbackNote(i) {
+  const lines = [];
+  lines.push(`Call review - ${String(i.managerName || '').trim()}`);
+  const who = i.takenBy ? `taken by ${String(i.takenBy).trim()}` : null;
+  lines.push(`Call: ${[i.callWhen, fmtPhone(i.callPhone) || null, who].filter(Boolean).join(' · ')}`);
+  lines.push('');
+  if (i.opportunity != null) lines.push(`Opportunity: ${i.opportunity ? 'Yes' : 'No'}`);
+  if (i.handled != null) lines.push(`Handled properly: ${i.handled ? 'Yes' : 'No'}`);
+  if (i.handled === false && i.opportunity === false) {
+    const parts = (Array.isArray(i.issues) ? i.issues : []).map((k) => (k === 'other' && i.issueOther ? `other: ${String(i.issueOther).trim()}` : (CALL_ISSUE_LABEL[k] || String(k))));
+    if (parts.length) lines.push(`Issues: ${parts.join(', ')}`);
+  }
+  if (i.handled === false && i.opportunity === true && i.missedReason) {
+    lines.push(`Missed opportunity: ${String(i.missedReason).trim()}`);
+  }
+  return lines.join('\n');
+}
+
+module.exports = { buildWyhNote, buildCallFeedbackNote, fmtPhone, CALL_ISSUE_LABEL };

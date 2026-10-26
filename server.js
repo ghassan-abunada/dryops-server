@@ -6730,7 +6730,7 @@ const intake = require('./intake')(app, {
 
 // Wash Your Hands: the checklist → "WYH - First Last" JobNimbus note (wyh.js).
 require('./wyh')(app, {
-  requireAuth, sbGet, sbPatch, jnGetJson, jnAddNote, jnFetchAccountUsers, UUID_RE,
+  requireAuth, sbGet, sbPatch, sbInsert, jnGetJson, jnAddNote, jnFetchAccountUsers, UUID_RE,
   loadActor: intake.loadActor,
   callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
   // Signs the short-lived recording links the app's inline player streams from.
