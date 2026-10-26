@@ -56,6 +56,28 @@ module.exports = function mountWyh(app, deps) {
     } catch (e) { warn('owners lookup failed', e.message); return []; }
   }
 
+  // ── JobNimbus users for "Who took the call?" (any JN user, not only DryOps profiles) ──
+  let jnUsersCache = { at: 0, list: [] };
+  app.get('/wyh/jn-users', requireAuth, async (req, res) => {
+    const q = String(req.query.q || '').trim().toLowerCase();
+    try {
+      if (Date.now() - jnUsersCache.at > 10 * 60 * 1000 || !jnUsersCache.list.length) {
+        const users = await jnFetchAccountUsers();
+        const list = [];
+        for (const [id, u] of users) {
+          if (u.active === false) continue;
+          const name = String(u.name || '').trim();
+          if (!name) continue;
+          list.push({ jn_user_id: String(id), name, email: u.email || null });
+        }
+        list.sort((a, b) => a.name.localeCompare(b.name));
+        jnUsersCache = { at: Date.now(), list };
+      }
+      const hits = q ? jnUsersCache.list.filter((u) => u.name.toLowerCase().includes(q) || String(u.email || '').toLowerCase().includes(q)) : jnUsersCache.list;
+      res.json({ users: hits.slice(0, 25), total: hits.length });
+    } catch (err) { res.status(502).json({ error: err.message }); }
+  });
+
   app.post('/wyh/reviews/:id/submit', requireAuth, async (req, res) => {
     const id = String(req.params.id || '');
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Bad review id' });
