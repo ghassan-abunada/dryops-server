@@ -939,50 +939,85 @@ app.get('/admin/callrail/webhooks', requireCallAccess, async (req, res) => {
     return res.json({ ok: true, webhook_url: url.replace(/token=[^&]*/, 'token=…'), companies });
   } catch (err) { return res.status(502).json({ error: err.message }); }
 });
+// Core of the installer, shared by the admin route and the weekly refresh.
+// Resolves { summary, results } — never throws for a single company; a
+// companies-list failure for an account is reported as one 'failed' entry.
+async function installCallrailWebhooks({ dryRun = true, only = null } = {}) {
+  const url = callrailWebhookUrl();
+  const base = url.split('?')[0];
+  const results = [];
+  for (const acct of CALLRAIL_ACCOUNT_IDS) {
+    let companies;
+    try { companies = await callrailCompanies(acct); }
+    catch (e) { results.push({ account_id: acct, company_id: null, company: null, action: 'failed', error: e.message }); continue; }
+    for (const c of companies) {
+      if (only && !only.has(String(c.id))) continue;
+      const entry = { account_id: acct, company_id: c.id, company: c.name, action: 'unchanged' };
+      results.push(entry);
+      if (c.status && String(c.status).toLowerCase() !== 'active') { entry.action = 'skipped'; entry.reason = `company ${c.status}`; continue; }
+      try {
+        const existing = await callrailWebhookIntegration(acct, c.id);
+        const config = { ...((existing && existing.config) || {}) };
+        let changed = false;
+        for (const k of CALLRAIL_WEBHOOK_EVENTS) {
+          const cur = (Array.isArray(config[k]) ? config[k] : config[k] ? [config[k]] : []).map(String);
+          // Replace any older URL of ours (e.g. rotated token), keep foreign URLs.
+          const next = [...cur.filter(u => u.split('?')[0] !== base), url];
+          if (cur.length !== next.length || cur.some((u, i) => u !== next[i])) { config[k] = next; changed = true; }
+        }
+        const wasInactive = !!(existing && existing.state && existing.state !== 'active');
+        if (existing && !changed && !wasInactive) continue;
+        entry.action = existing ? 'updated' : 'created';
+        entry.events = Object.fromEntries(CALLRAIL_WEBHOOK_EVENTS.map(k => [k, config[k]]));
+        if (dryRun) continue;
+        const r = existing
+          ? await callrailApiWrite(acct, 'PUT', `integrations/${encodeURIComponent(existing.id)}.json`, { state: 'active', config })
+          : await callrailApiWrite(acct, 'POST', 'integrations.json', { type: 'Webhooks', company_id: c.id, config });
+        if (!r.ok) { entry.action = 'failed'; entry.error = `CallRail HTTP ${r.status} ${r.text}`; }
+        else entry.integration_id = (r.json && r.json.id) || (existing && existing.id) || null;
+      } catch (e) { entry.action = 'failed'; entry.error = e.message; }
+    }
+  }
+  const summary = results.reduce((m, r) => { m[r.action] = (m[r.action] || 0) + 1; return m; }, {});
+  console.log('[callrail-webhooks]', dryRun ? 'dry run' : 'applied', JSON.stringify(summary));
+  return { summary, results, url };
+}
 app.post('/admin/callrail/webhooks', requireCallAccess, async (req, res) => {
   if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return res.status(400).json({ error: 'CallRail is not configured on the server' });
   if (!CALLRAIL_WEBHOOK_TOKEN) return res.status(400).json({ error: 'CALLRAIL_WEBHOOK_TOKEN is not set' });
   const body = req.body || {};
   const dryRun = body.dry_run !== false;
   const only = Array.isArray(body.company_ids) && body.company_ids.length ? new Set(body.company_ids.map(String)) : null;
-  const url = callrailWebhookUrl();
-  const base = url.split('?')[0];
-  const results = [];
   try {
-    for (const acct of CALLRAIL_ACCOUNT_IDS) {
-      for (const c of await callrailCompanies(acct)) {
-        if (only && !only.has(String(c.id))) continue;
-        const entry = { account_id: acct, company_id: c.id, company: c.name, action: 'unchanged' };
-        results.push(entry);
-        if (c.status && String(c.status).toLowerCase() !== 'active') { entry.action = 'skipped'; entry.reason = `company ${c.status}`; continue; }
-        try {
-          const existing = await callrailWebhookIntegration(acct, c.id);
-          const config = { ...((existing && existing.config) || {}) };
-          let changed = false;
-          for (const k of CALLRAIL_WEBHOOK_EVENTS) {
-            const cur = (Array.isArray(config[k]) ? config[k] : config[k] ? [config[k]] : []).map(String);
-            // Replace any older URL of ours (e.g. rotated token), keep foreign URLs.
-            const next = [...cur.filter(u => u.split('?')[0] !== base), url];
-            if (cur.length !== next.length || cur.some((u, i) => u !== next[i])) { config[k] = next; changed = true; }
-          }
-          const wasInactive = !!(existing && existing.state && existing.state !== 'active');
-          if (existing && !changed && !wasInactive) continue;
-          entry.action = existing ? 'updated' : 'created';
-          entry.events = Object.fromEntries(CALLRAIL_WEBHOOK_EVENTS.map(k => [k, config[k]]));
-          if (dryRun) continue;
-          const r = existing
-            ? await callrailApiWrite(acct, 'PUT', `integrations/${encodeURIComponent(existing.id)}.json`, { state: 'active', config })
-            : await callrailApiWrite(acct, 'POST', 'integrations.json', { type: 'Webhooks', company_id: c.id, config });
-          if (!r.ok) { entry.action = 'failed'; entry.error = `CallRail HTTP ${r.status} ${r.text}`; }
-          else entry.integration_id = (r.json && r.json.id) || (existing && existing.id) || null;
-        } catch (e) { entry.action = 'failed'; entry.error = e.message; }
-      }
-    }
-    const summary = results.reduce((m, r) => { m[r.action] = (m[r.action] || 0) + 1; return m; }, {});
-    console.log('[callrail-webhooks]', dryRun ? 'dry run' : 'applied', JSON.stringify(summary));
+    const { summary, results, url } = await installCallrailWebhooks({ dryRun, only });
     return res.json({ ok: true, dry_run: dryRun, webhook_url: url.replace(/token=[^&]*/, 'token=…'), summary, results });
-  } catch (err) { return res.status(502).json({ error: err.message, results }); }
+  } catch (err) { return res.status(502).json({ error: err.message }); }
 });
+
+// Weekly refresh: new CallRail companies (and new numbers under them) get the
+// webhooks without anyone clicking through CallRail. Runs Monday 06:00
+// America/Chicago (first hourly tick inside that hour), applies for real, and
+// is idempotent — an unchanged company costs one GET and no write. A failure
+// (e.g. the key went read-only again) is logged loudly for Railway.
+let callrailWebhooksWeeklyKey = null;
+async function callrailWebhooksWeeklyTick() {
+  if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length || !CALLRAIL_WEBHOOK_TOKEN) return;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', weekday: 'short', hour: 'numeric', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .formatToParts(new Date()).map(p => [p.type, p.value]));
+  if (parts.weekday !== 'Mon' || Number(parts.hour) !== 6) return;
+  const key = `${parts.year}-${parts.month}-${parts.day}`;
+  if (callrailWebhooksWeeklyKey === key) return;
+  callrailWebhooksWeeklyKey = key;
+  try {
+    const { summary, results } = await installCallrailWebhooks({ dryRun: false });
+    const failed = results.filter(r => r.action === 'failed');
+    if (failed.length) console.error('[callrail-webhooks] weekly refresh had failures:', failed.map(f => `${f.company || f.account_id}: ${f.error}`).join('; '));
+    else console.log('[callrail-webhooks] weekly refresh ok', JSON.stringify(summary));
+  } catch (err) {
+    console.error('[callrail-webhooks] weekly refresh failed:', err.message);
+  }
+}
+if (SUPABASE_SERVICE_KEY) setInterval(callrailWebhooksWeeklyTick, 60 * 60 * 1000);
 
 // TEMPORARY setup helper: returns CallRail accounts (id + name) using the API
 // key, ONLY while no account ids are configured yet. Self-disables (410) once
