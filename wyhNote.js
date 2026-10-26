@@ -1,7 +1,7 @@
 // "WYH - First Last" JobNimbus note text. Byte-for-byte twin of buildWyhNote
 // in the DryOps app (lib/wyh.ts); test/fixtures/wyhNote.json pins both. Keep
-// the two in sync — change one, change the other, regenerate nothing: the
-// fixture is hand-written and both tests assert against it.
+// the two in sync — change one, change the other; the fixture is hand-written
+// and both tests assert against it.
 
 function fmtPhone(raw) {
   const d = String(raw || '').replace(/\D/g, '');
@@ -10,17 +10,28 @@ function fmtPhone(raw) {
   return `(${n.slice(0, 3)}) ${n.slice(3, 6)}-${n.slice(6)}`;
 }
 
-const NOTE_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-function noteDate(iso) {
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+/** '2026-11-03' → 'Mon 11/3' (calendar date, no timezone). */
+function fmtMonD(iso) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
   if (!m) return String(iso || '');
-  return `${NOTE_MONTHS[Number(m[2]) - 1]} ${Number(m[3])}, ${m[1]}`;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return `${DOW[d.getUTCDay()]} ${Number(m[2])}/${Number(m[3])}`;
+}
+function fmtMin(min) {
+  const h24 = Math.floor(min / 60), mm = min % 60;
+  const h = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h}${mm ? ':' + String(mm).padStart(2, '0') : ''}${h24 < 12 ? 'am' : 'pm'}`;
+}
+function fmtWindow(start, end) {
+  if (start == null || end == null) return '';
+  return `${fmtMin(start)}–${fmtMin(end)}`;
 }
 
 const NOT_LANDED_LABEL = { quote: 'Gave HO a quote', no_damage: 'No damage found', coach_to_convert: 'Coach to convert', other: 'Other' };
-const NOT_TESTED_LABEL = { refused: 'HO/adjuster refused', results_provided: 'Results provided' };
+const NOT_TESTED_LABEL = { refused: 'HO/adjuster refused', results_provided: 'Results provided', other: 'Other' };
 const NO_PO_LABEL = { small_area: 'Small area', empty_rooms: 'Empty rooms', content_manipulation: 'Content manipulation requested', other: 'Other' };
-const WALK_REASON_LABEL = { customer_cancelled: 'Customer cancelled', scheduled_later: 'Scheduled later' };
+const WALK_REASON_LABEL = { customer_cancelled: 'Customer cancelled', scheduled_later: 'Scheduled later', other: 'Other' };
 const PHOTO_LABELS = [
   { key: 'photo_exterior', label: 'outside of home' },
   { key: 'photo_moisture', label: 'moisture readings' },
@@ -28,39 +39,51 @@ const PHOTO_LABELS = [
   { key: 'photo_wide', label: 'wide room shots' },
 ];
 
+const other = (note) => (note && String(note).trim() ? `: ${String(note).trim()}` : '');
+
 function buildWyhNote(i) {
   const r = i.review || {};
   const job = i.job || {};
   const box = (ok) => (ok ? '[x]' : '[ ]');
   const lines = [];
   lines.push(`WYH - ${String(i.managerName || '').trim()}`);
-  lines.push(`Call: ${[i.callWhen, fmtPhone(i.callPhone) || null, i.source].filter(Boolean).join(' · ')}`);
+  const takenBy = String(r.call_taken_by_name || '').trim();
+  lines.push(`Call: ${[i.callWhen, fmtPhone(i.callPhone) || null, i.source, takenBy ? `taken by ${takenBy}` : null].filter(Boolean).join(' · ')}`);
+  if (r.call_recording_reviewed) lines.push('Call recording reviewed');
+  if (r.call_handled != null) {
+    lines.push(r.call_handled ? `${box(true)} Call handled properly` : `${box(false)} Call handled properly${other(r.call_missed_reason) ? ` —${other(r.call_missed_reason).slice(1)}` : ''}`);
+  }
   lines.push('');
 
   if (r.walked) {
     if (r.walked === 'yes') lines.push(`${box(true)} Walked: Yes`);
     else {
       const why = r.walk_reason ? WALK_REASON_LABEL[r.walk_reason] : '';
-      const when = r.walk_reason === 'scheduled_later' && r.walk_scheduled_for ? ` (${noteDate(r.walk_scheduled_for)})` : '';
-      lines.push(`${box(false)} Walked: ${r.walked === 'no' ? 'No' : 'Not yet'}${why ? ` — ${why}${when}` : ''}`);
+      let when = '';
+      if (r.walk_reason === 'scheduled_later' && r.walk_scheduled_for) {
+        const win = fmtWindow(r.walk_slot_start_min, r.walk_slot_end_min);
+        when = ` (${fmtMonD(r.walk_scheduled_for)}${win ? `, ${win}` : ''})`;
+      }
+      const note = r.walk_reason === 'other' ? other(r.walk_reason_note) : '';
+      lines.push(`${box(false)} Walked: ${r.walked === 'no' ? 'No' : 'Not yet'}${why ? ` — ${why}${note}${when}` : ''}`);
     }
   }
-  if (r.landed != null) {
+  if (r.walked === 'yes' && r.landed != null) {
     if (r.landed) lines.push(`${box(true)} Landed: Yes`);
     else {
       const why = r.not_landed_reason ? NOT_LANDED_LABEL[r.not_landed_reason] : '';
-      const note = r.not_landed_reason === 'other' && r.not_landed_note ? `: ${String(r.not_landed_note).trim()}` : '';
+      const note = r.not_landed_reason === 'other' ? other(r.not_landed_note) : '';
       lines.push(`${box(false)} Landed: No${why ? ` — ${why}${note}` : ''}`);
     }
   }
   const have = PHOTO_LABELS.filter((p) => r[p.key]).map((p) => p.label);
   const missing = PHOTO_LABELS.filter((p) => !r[p.key]).map((p) => p.label);
-  if (have.length || r.walked === 'yes') {
+  if (r.walked === 'yes' && (have.length || r.landed != null)) {
     if (!missing.length) lines.push(`${box(true)} Photos: ${have.join(', ')}`);
     else if (!have.length) lines.push(`${box(false)} Photos: none`);
     else lines.push(`${box(false)} Photos: ${have.join(', ')} · missing: ${missing.join(', ')}`);
   }
-  if (r.insurance != null) {
+  if (r.walked === 'yes' && r.landed === true && r.insurance != null) {
     if (!r.insurance) lines.push(`${box(true)} Not insurance`);
     else {
       const carrier = r.has_carrier ? String(job.insurer || '').trim() || 'yes' : 'missing';
@@ -70,15 +93,16 @@ function buildWyhNote(i) {
         if (r.tested) lines.push(`${box(true)} Tested: Yes`);
         else {
           const why = r.not_tested_reason ? NOT_TESTED_LABEL[r.not_tested_reason] : '';
+          const note = r.not_tested_reason === 'other' ? other(r.not_tested_note) : '';
           const yb = r.year_built ? ` · year built ${r.year_built}` : '';
-          lines.push(`${box(false)} Tested: No${why ? ` — ${why}` : ''}${yb}`);
+          lines.push(`${box(false)} Tested: No${why ? ` — ${why}${note}` : ''}${yb}`);
         }
       }
       if (r.packout_sold != null) {
         if (r.packout_sold) lines.push(`${box(true)} Packout: Sold`);
         else {
           const parts = [];
-          if (r.no_packout_reason) parts.push(NO_PO_LABEL[r.no_packout_reason] + (r.no_packout_reason === 'other' && r.no_packout_note ? `: ${String(r.no_packout_note).trim()}` : ''));
+          if (r.no_packout_reason) parts.push(NO_PO_LABEL[r.no_packout_reason] + (r.no_packout_reason === 'other' ? other(r.no_packout_note) : ''));
           if (r.no_packout_reason === 'content_manipulation') {
             if (r.rooms_affected != null) parts.push(`${r.rooms_affected} room${r.rooms_affected === 1 ? '' : 's'} affected`);
             if (r.po_feedback_given != null) parts.push(r.po_feedback_given ? 'feedback given to sell a packout' : 'no feedback given');
@@ -111,35 +135,4 @@ function buildWyhNote(i) {
   return lines.join('\n');
 }
 
-const CALL_ISSUE_LABEL = {
-  longer_than_90s: 'longer than 90 seconds',
-  took_customer_info: 'took customer info',
-  took_call_off_google: 'took the call off of Google',
-  gave_price_over_phone: 'gave a price over the phone',
-  other: 'other',
-};
-
-/**
- * "Call review - First Last" note for the player's feedback form. Input:
- * { managerName, callWhen, callPhone, takenBy, opportunity, handled,
- *   issues: string[], issueOther, missedReason }.
- */
-function buildCallFeedbackNote(i) {
-  const lines = [];
-  lines.push(`Call review - ${String(i.managerName || '').trim()}`);
-  const who = i.takenBy ? `taken by ${String(i.takenBy).trim()}` : null;
-  lines.push(`Call: ${[i.callWhen, fmtPhone(i.callPhone) || null, who].filter(Boolean).join(' · ')}`);
-  lines.push('');
-  if (i.opportunity != null) lines.push(`Opportunity: ${i.opportunity ? 'Yes' : 'No'}`);
-  if (i.handled != null) lines.push(`Handled properly: ${i.handled ? 'Yes' : 'No'}`);
-  if (i.handled === false && i.opportunity === false) {
-    const parts = (Array.isArray(i.issues) ? i.issues : []).map((k) => (k === 'other' && i.issueOther ? `other: ${String(i.issueOther).trim()}` : (CALL_ISSUE_LABEL[k] || String(k))));
-    if (parts.length) lines.push(`Issues: ${parts.join(', ')}`);
-  }
-  if (i.handled === false && i.opportunity === true && i.missedReason) {
-    lines.push(`Missed opportunity: ${String(i.missedReason).trim()}`);
-  }
-  return lines.join('\n');
-}
-
-module.exports = { buildWyhNote, buildCallFeedbackNote, fmtPhone, CALL_ISSUE_LABEL };
+module.exports = { buildWyhNote, fmtPhone, fmtMonD, fmtWindow };

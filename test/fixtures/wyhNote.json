@@ -1,13 +1,14 @@
 [
   {
-    "name": "full insurance job, packout not sold (content manipulation)",
+    "name": "full insurance job, packout not sold (content manipulation), call reviewed",
     "input": {
       "managerName": "Gus Abunada",
-      "callWhen": "Oct 24, 2:15 PM",
+      "callWhen": "Mon 10/26, 2:15 PM",
       "callPhone": "5551234567",
       "source": "Google",
       "job": { "insurer": "State Farm", "claim_number": "CLM-123" },
       "review": {
+        "call_taken_by_name": "Jane Doe", "call_recording_reviewed": true, "call_handled": true,
         "walked": "yes", "landed": true,
         "photo_exterior": true, "photo_moisture": true, "photo_damage": true, "photo_wide": false,
         "insurance": true, "has_carrier": true, "has_claim": true,
@@ -17,54 +18,72 @@
         "notes": "Great file."
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Oct 24, 2:15 PM · (555) 123-4567 · Google\n\n[x] Walked: Yes\n[x] Landed: Yes\n[ ] Photos: outside of home, moisture readings, visible damage · missing: wide room shots\n[x] Insurance: Yes — carrier: State Farm · claim #: CLM-123\n[x] Tested: Yes\n[ ] Packout: Not sold — Content manipulation requested · 3 rooms affected · feedback given to sell a packout · real packout opportunity\n[x] File info: date of loss, category and cause present\n\nNotes:\nGreat file."
+    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google · taken by Jane Doe\nCall recording reviewed\n[x] Call handled properly\n\n[x] Walked: Yes\n[x] Landed: Yes\n[ ] Photos: outside of home, moisture readings, visible damage · missing: wide room shots\n[x] Insurance: Yes — carrier: State Farm · claim #: CLM-123\n[x] Tested: Yes\n[ ] Packout: Not sold — Content manipulation requested · 3 rooms affected · feedback given to sell a packout · real packout opportunity\n[x] File info: date of loss, category and cause present\n\nNotes:\nGreat file."
   },
   {
-    "name": "not landed (other), not insurance, no photos",
+    "name": "not landed (other), nothing below landed, call not handled properly",
     "input": {
       "managerName": "Jane Doe",
-      "callWhen": "Oct 20, 9:05 AM",
+      "callWhen": "Tue 10/20, 9:05 AM",
       "callPhone": "+1 (555) 000-1111",
       "source": "Plumber",
       "job": {},
       "review": {
+        "call_handled": false, "call_missed_reason": "Never offered an inspection",
         "walked": "yes", "landed": false, "not_landed_reason": "other", "not_landed_note": "Went with another company",
         "photo_exterior": false, "photo_moisture": false, "photo_damage": false, "photo_wide": false,
-        "insurance": false, "info_sufficient": false
+        "insurance": true, "tested": true,
+        "info_sufficient": false
       }
     },
-    "expected": "WYH - Jane Doe\nCall: Oct 20, 9:05 AM · (555) 000-1111 · Plumber\n\n[x] Walked: Yes\n[ ] Landed: No — Other: Went with another company\n[ ] Photos: none\n[x] Not insurance\n[ ] File info: incomplete (date of loss, category, cause)"
+    "expected": "WYH - Jane Doe\nCall: Tue 10/20, 9:05 AM · (555) 000-1111 · Plumber\n[ ] Call handled properly — Never offered an inspection\n\n[x] Walked: Yes\n[ ] Landed: No — Other: Went with another company\n[ ] Photos: none\n[ ] File info: incomplete (date of loss, category, cause)"
   },
   {
-    "name": "parked: not yet walked, scheduled later, no phone",
+    "name": "parked: not yet walked, scheduled later with a window, no phone",
     "input": {
       "managerName": "Gus Abunada",
-      "callWhen": "Oct 24, 2:15 PM",
+      "callWhen": "Mon 10/26, 2:15 PM",
       "callPhone": null,
       "source": "Google",
       "job": {},
-      "review": { "walked": "not_yet", "walk_reason": "scheduled_later", "walk_scheduled_for": "2026-11-03" }
+      "review": { "walked": "not_yet", "walk_reason": "scheduled_later", "walk_scheduled_for": "2026-11-03", "walk_slot_start_min": 600, "walk_slot_end_min": 720, "landed": true, "insurance": true }
     },
-    "expected": "WYH - Gus Abunada\nCall: Oct 24, 2:15 PM · Google\n\n[ ] Walked: Not yet — Scheduled later (Nov 3, 2026)"
+    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · Google\n\n[ ] Walked: Not yet — Scheduled later (Tue 11/3, 10am–12pm)"
   },
   {
-    "name": "missed-call follow-up, not tested, carrier missing, blank notes",
+    "name": "not walked (other reason), missed-call follow-up, no landed/insurance lines",
     "input": {
       "managerName": "Gus Abunada",
-      "callWhen": "Oct 24, 2:15 PM",
+      "callWhen": "Fri 10/23, 7:17 PM",
       "callPhone": "555-867-5309",
       "source": "Google",
       "job": { "insurer": "", "claim_number": "AB-1" },
       "review": {
-        "walked": "no", "walk_reason": "customer_cancelled",
+        "walked": "no", "walk_reason": "other", "walk_reason_note": "Out of service area",
         "landed": false, "not_landed_reason": "no_damage",
-        "insurance": true, "has_carrier": false, "has_claim": true,
-        "tested": false, "not_tested_reason": "refused", "year_built": 1998,
-        "packout_sold": true, "info_sufficient": true,
+        "insurance": true, "has_carrier": false, "has_claim": true, "tested": false, "not_tested_reason": "refused", "year_built": 1998,
+        "info_sufficient": true,
         "called_back": true, "missed_reason": "Tech was on a job", "operator_feedback_given": true, "operator_response": "Will forward to cell",
         "notes": "  "
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Oct 24, 2:15 PM · (555) 867-5309 · Google\n\n[ ] Walked: No — Customer cancelled\n[ ] Landed: No — No damage found\n[ ] Insurance: Yes — carrier: missing · claim #: AB-1\n[ ] Tested: No — HO/adjuster refused · year built 1998\n[x] Packout: Sold\n[x] File info: date of loss, category and cause present\nMissed call: called back · reason: Tech was on a job · feedback given to operator · response: Will forward to cell"
+    "expected": "WYH - Gus Abunada\nCall: Fri 10/23, 7:17 PM · (555) 867-5309 · Google\n\n[ ] Walked: No — Other: Out of service area\n[x] File info: date of loss, category and cause present\nMissed call: called back · reason: Tech was on a job · feedback given to operator · response: Will forward to cell"
+  },
+  {
+    "name": "landed insurance, not tested (other), packout sold",
+    "input": {
+      "managerName": "Gus Abunada",
+      "callWhen": "Fri 10/23, 7:17 PM",
+      "callPhone": "555-867-5309",
+      "source": "Google",
+      "job": { "insurer": "", "claim_number": "AB-1" },
+      "review": {
+        "call_taken_by_name": "Colt Smith", "call_handled": true,
+        "walked": "yes", "landed": true, "photo_exterior": true, "photo_moisture": true, "photo_damage": true, "photo_wide": true,
+        "insurance": true, "has_carrier": false, "has_claim": true, "tested": false, "not_tested_reason": "other", "not_tested_note": "Lab closed", "year_built": 1998,
+        "packout_sold": true, "info_sufficient": true
+      }
+    },
+    "expected": "WYH - Gus Abunada\nCall: Fri 10/23, 7:17 PM · (555) 867-5309 · Google · taken by Colt Smith\n[x] Call handled properly\n\n[x] Walked: Yes\n[x] Landed: Yes\n[x] Photos: outside of home, moisture readings, visible damage, wide room shots\n[ ] Insurance: Yes — carrier: missing · claim #: AB-1\n[ ] Tested: No — Other: Lab closed · year built 1998\n[x] Packout: Sold\n[x] File info: date of loss, category and cause present"
   }
 ]

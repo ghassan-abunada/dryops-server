@@ -11,7 +11,7 @@
 // bearer header, hence the signature).
 const crypto = require('crypto');
 const { Readable } = require('stream');
-const { buildWyhNote, buildCallFeedbackNote } = require('./wyhNote');
+const { buildWyhNote } = require('./wyhNote');
 
 const RECORDING_TTL_MS = 2 * 60 * 60 * 1000;
 
@@ -29,10 +29,13 @@ module.exports = function mountWyh(app, deps) {
   const SEES_ALL = ['admin', 'owner', 'executive'];
   const CR_ID_RE = /^[A-Za-z0-9_-]{3,64}$/;
 
+  // "Mon 10/26, 2:15 PM" in the location's timezone (WYH dates are "Mon M/D").
   function callWhen(iso, tz) {
     if (!iso) return '';
     try {
-      return new Intl.DateTimeFormat('en-US', { timeZone: tz || 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(iso));
+      const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz || 'America/Chicago', weekday: 'short', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }).formatToParts(new Date(iso));
+      const g = (t) => (parts.find((p) => p.type === t) || {}).value || '';
+      return `${g('weekday')} ${g('month')}/${g('day')}, ${g('hour')}:${g('minute')} ${g('dayPeriod')}`.replace(/\s+/g, ' ').trim();
     } catch { return String(iso).slice(0, 16); }
   }
 
@@ -136,68 +139,6 @@ module.exports = function mountWyh(app, deps) {
     return null;
   }
   const findRecordingUrl = findCallDetails;
-
-  // ── Call review (feedback on how the call was taken) ───────────────────
-  const ISSUE_KEYS = ['longer_than_90s', 'took_customer_info', 'took_call_off_google', 'gave_price_over_phone', 'other'];
-  app.post('/wyh/calls/:callId/feedback', requireAuth, async (req, res) => {
-    const callId = String(req.params.callId || '');
-    if (!UUID_RE.test(callId)) return res.status(400).json({ error: 'Bad call id' });
-    try {
-      const actor = await loadActor(req);
-      if (!actor) return res.status(403).json({ error: 'Profile not found' });
-      if (!['admin', 'owner', 'expansion_manager'].includes(actor.role)) return res.status(403).json({ error: 'Not allowed' });
-      const call = ((await sbGet(`calls?id=eq.${enc(callId)}&select=id,location_id,job_id,start_time,customer_phone_number`)) || [])[0];
-      if (!call) return res.status(404).json({ error: 'Call not found' });
-      if (actor.role === 'expansion_manager' && !actor.locs.includes(String(call.location_id))) return res.status(403).json({ error: 'Not your location' });
-
-      const b = req.body || {};
-      const opportunity = typeof b.opportunity === 'boolean' ? b.opportunity : null;
-      const handled = typeof b.handled === 'boolean' ? b.handled : null;
-      if (opportunity == null || handled == null) return res.status(400).json({ error: 'Answer both questions' });
-      const issues = handled === false && opportunity === false
-        ? (Array.isArray(b.issues) ? b.issues.map(String).filter((k) => ISSUE_KEYS.includes(k)) : [])
-        : [];
-      const issueOther = issues.includes('other') ? String(b.issue_other || '').trim().slice(0, 500) || null : null;
-      const missedReason = handled === false && opportunity === true ? String(b.missed_reason || '').trim().slice(0, 1000) || null : null;
-      if (handled === false && opportunity === false && !issues.length) return res.status(400).json({ error: 'Pick what went wrong' });
-      if (handled === false && opportunity === true && !missedReason) return res.status(400).json({ error: 'Say why the opportunity was missed' });
-      const takenById = b.taken_by_id && UUID_RE.test(String(b.taken_by_id)) ? String(b.taken_by_id) : null;
-      const takenByName = String(b.taken_by_name || '').trim().slice(0, 120) || null;
-      const managerName = actor.name || 'DryOps';
-      const now = new Date().toISOString();
-
-      // Post the note first when the call has a JobNimbus job.
-      let note = { ok: false, id: null, error: null, skipped: true };
-      let text = null;
-      if (call.job_id) {
-        const job = ((await sbGet(`jobs?id=eq.${enc(call.job_id)}&select=id,jn_id,jn_location_id,location_id`)) || [])[0];
-        if (job && job.jn_id) {
-          const loc = job.location_id ? ((await sbGet(`locations?id=eq.${enc(job.location_id)}&select=timezone`)) || [])[0] : null;
-          text = buildCallFeedbackNote({ managerName, callWhen: callWhen(call.start_time, loc && loc.timezone), callPhone: call.customer_phone_number, takenBy: takenByName, opportunity, handled, issues, issueOther, missedReason });
-          const mentions = await ownerMentions(job.jn_id);
-          const r = await jnAddNote(job.jn_id, text, { mentions, jnLocationId: job.jn_location_id, createdBy: actor.jn_user_id });
-          note = { ok: r.ok, id: r.ok ? String(r.id || 'ok') : null, error: r.ok ? null : String(r.error || 'JobNimbus note failed').slice(0, 300), skipped: false };
-        }
-      }
-
-      // Upsert the per-call review row (the WYH checklist shares it).
-      const existing = ((await sbGet(`wyh_reviews?call_id=eq.${enc(callId)}&select=id,kind,status`)) || [])[0];
-      const fields = {
-        call_taken_by: takenById, call_taken_by_name: takenByName, call_opportunity: opportunity, call_handled: handled,
-        call_issues: issues, call_issue_other: issueOther, call_missed_reason: missedReason,
-        call_feedback_by: managerName, call_feedback_at: now,
-        call_note_id: note.ok ? note.id : (existing && existing.call_note_id) || null, call_note_error: note.skipped ? null : note.error,
-        updated_at: now,
-      };
-      if (existing) await sbPatch('wyh_reviews', `id=eq.${enc(existing.id)}`, fields);
-      else await sbInsert('wyh_reviews', { call_id: callId, job_id: call.job_id || null, location_id: call.location_id, reviewer_id: actor.id, reviewer_name: managerName, kind: 'wyh', status: 'open', ...fields });
-      const saved = ((await sbGet(`wyh_reviews?call_id=eq.${enc(callId)}&select=*`)) || [])[0];
-      return res.status(note.skipped || note.ok ? 200 : 502).json({ ok: note.skipped || note.ok, note, text, review: saved });
-    } catch (err) {
-      warn('feedback failed', err.message);
-      return res.status(502).json({ error: err.message });
-    }
-  });
 
   app.get('/wyh/recording/:callrailId.mp3', async (req, res) => {
     const id = String(req.params.callrailId || '');
