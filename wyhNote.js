@@ -44,7 +44,8 @@ const other = (note) => (note && String(note).trim() ? `: ${String(note).trim()}
 function buildWyhNote(i) {
   const r = i.review || {};
   const job = i.job || {};
-  const box = (ok) => (ok ? '[x]' : '[ ]');
+  // Owner rule: a checkmark, never an x.
+  const box = (ok) => (ok ? '[✓]' : '[ ]');
   const lines = [];
   lines.push(`WYH - ${String(i.managerName || '').trim()}`);
   const takenBy = String(r.call_taken_by_name || '').trim();
