@@ -1022,7 +1022,7 @@ module.exports = function mountIntake(app, deps) {
     if (!set.size || !CALLRAIL_API_KEY) { recentPulls.set(locationId, { at: now, inProgress }); return out; }
     const day = (ms) => new Date(ms).toISOString().slice(0, 10);
     const dateQ = `&start_date=${day(now - 2 * 86400 * 1000)}&end_date=${day(now + 86400 * 1000)}`;
-    const fields = 'call_type,source,medium,campaign,first_call,gclid';
+    const fields = 'call_type,source,medium,campaign,first_call,gclid,tags,lead_status,note,company_name,recording,recording_player,recording_duration';
     const rows = [];
     for (const acct of CALLRAIL_ACCOUNT_IDS) {
       let r = await callrailApi(acct, `calls.json?per_page=100&direction=inbound&sort=start_time&order=desc&fields=${fields}${dateQ}`);

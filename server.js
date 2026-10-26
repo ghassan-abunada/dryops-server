@@ -754,6 +754,11 @@ async function callrailAccounts() {
   if (!r.ok) return [];
   const j = await r.json(); return (j && (j.accounts || j.data)) || [];
 }
+// Optional CallRail fields we ask for on every pull: attribution (source…),
+// plus the WYH review signals — tags ("Schedule Booked"), lead_status, the
+// agent note, company and the shareable recording player link.
+const CALLRAIL_CALL_FIELDS = 'source,medium,campaign,first_call,gclid,tags,lead_status,note,company_name,recording,recording_player,recording_duration';
+
 // Fetch one page of calls. If the optional `fields` param 400s (a field name not
 // valid for the account's plan poisons the whole request), retry with defaults.
 async function fetchCallsPage(acct, page, fields, dateQ) {
@@ -764,12 +769,30 @@ async function fetchCallsPage(acct, page, fields, dateQ) {
 
 // Map a CallRail call object → our `calls` row (raw fields only; location/job
 // resolution is done separately: inline for the webhook, set-based for backfill).
-function mapCallRow(call) {
+// `sparse` (webhook, single row): leave out the optional WYH fields CallRail
+// did not send so a merge-duplicates upsert can't clobber tags / recording
+// filled by the reconcile pull. Batch callers keep every key (PGRST102).
+function mapCallRow(call, { sparse = false } = {}) {
   // Use null (not undefined) for every field: JSON.stringify drops undefined
   // keys, and PostgREST bulk insert requires all objects to share identical keys
   // (else PGRST102 "All object keys must match" rejects the whole batch).
   const src = call.source || (call.lead_source && call.lead_source.source) || null;
+  // CallRail `tags` are an array of names (objects carry .name in some payloads).
+  const tags = Array.isArray(call.tags)
+    ? call.tags.map((t) => (typeof t === 'string' ? t : (t && (t.name || t.label)) || '')).map((t) => String(t).trim()).filter(Boolean)
+    : (call.tags === undefined ? undefined : []);
+  const optional = {
+    tags: tags === undefined ? (sparse ? undefined : []) : tags,
+    lead_status: call.lead_status === undefined ? (sparse ? undefined : null) : (call.lead_status || null),
+    callrail_note: call.note === undefined ? (sparse ? undefined : null) : (call.note || null),
+    company_name: call.company_name === undefined ? (sparse ? undefined : null) : (call.company_name || null),
+    recording_url: (call.recording_player === undefined && call.recording === undefined) ? (sparse ? undefined : null) : (call.recording_player || call.recording || null),
+    recording_duration: call.recording_duration === undefined ? (sparse ? undefined : null)
+      : (call.recording_duration != null && call.recording_duration !== '' ? Number(call.recording_duration) : null),
+  };
+  if (sparse) for (const k of Object.keys(optional)) if (optional[k] === undefined) delete optional[k];
   return {
+    ...optional,
     callrail_id: String(call.id ?? call.call_id ?? ''),
     tracking_phone_number: call.tracking_phone_number || null,
     customer_phone_number: call.customer_phone_number || null,
@@ -806,7 +829,7 @@ app.post('/webhooks/callrail/calls', async (req, res) => {
   if (Array.isArray(call)) call = call[0];
   if (!call || typeof call !== 'object') return res.status(200).json({ ok: true, skipped: 'empty' });
 
-  const row = mapCallRow(call);
+  const row = mapCallRow(call, { sparse: true });
   if (!row.callrail_id) return res.status(200).json({ ok: true, skipped: 'no id' });
 
   try {
@@ -834,8 +857,10 @@ app.post('/webhooks/callrail/calls', async (req, res) => {
       const j = [pick(await sbGet(`jobs?client_phone_norm=eq.${custNorm}&select=id,date_contacted,location_id,record_type,is_active,jn_created&order=jn_created.desc&limit=25`))];
       if (j[0]) {
         row.job_id = j[0].id;
-        // Set date_contacted to the earliest matched call.
-        if (row.start_time && (!j[0].date_contacted || new Date(row.start_time) < new Date(j[0].date_contacted))) {
+        // Set date_contacted to the earliest matched INBOUND call (outbound
+        // callbacks now arrive here too — they are WYH's callback signal, not
+        // first contact).
+        if (row.direction !== 'outbound' && row.start_time && (!j[0].date_contacted || new Date(row.start_time) < new Date(j[0].date_contacted))) {
           await fetch(`${SUPABASE_URL}/rest/v1/jobs?id=eq.${row.job_id}`, {
             method: 'PATCH',
             headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
@@ -945,7 +970,7 @@ app.post('/admin/callrail/backfill', requireCallAccess, async (req, res) => {
   const { start_date, end_date } = req.body || {};
   // Only OPTIONAL attribution fields (source/medium/campaign/first_call/gclid);
   // phone, answered, duration, direction, start_time, customer_* are defaults.
-  const fields = 'source,medium,campaign,first_call,gclid';
+  const fields = CALLRAIL_CALL_FIELDS;
   // CallRail date_range must be one of: recent,today,yesterday,last_7_days,
   // last_30_days,this_month,last_month,this_year,last_year,all_time. Default to
   // full history so job-matching / date_contacted / suggestions have everything.
@@ -1025,7 +1050,7 @@ async function reconcileCalls() {
     const end = new Date(Date.now() + 86400 * 1000); // tomorrow: timezone slack
     const start = new Date(Date.now() - CALLS_RECONCILE_LOOKBACK_DAYS * 86400 * 1000);
     const dateQ = `&start_date=${start.toISOString().slice(0, 10)}&end_date=${end.toISOString().slice(0, 10)}`;
-    const fields = 'source,medium,campaign,first_call,gclid';
+    const fields = CALLRAIL_CALL_FIELDS;
     let upserted = 0;
     for (const acct of CALLRAIL_ACCOUNT_IDS) {
       for (let page = 1; page <= 40; page++) {
@@ -2911,7 +2936,7 @@ app.post('/invite-user', requireAuth, requireAdmin, async (req, res) => {
       appRoleId = app_role_id;
     }
     // 'admin' is never minted through an invite.
-    const INVITE_ROLES = ['owner', 'technician', 'technician_2', 'executive'];
+    const INVITE_ROLES = ['owner', 'technician', 'technician_2', 'executive', 'expansion_manager'];
     if (!INVITE_ROLES.includes(inviteRole)) {
       return res.status(400).json({ error: `role must be one of ${INVITE_ROLES.join(', ')}` });
     }
@@ -2922,6 +2947,8 @@ app.post('/invite-user', requireAuth, requireAdmin, async (req, res) => {
       : (location_id ? [String(location_id)] : []);
     locIds = [...new Set(locIds)];
     if (inviteRole === 'executive') locIds = []; // executives see every location
+    // Expansion managers may be invited without locations: they pick the
+    // locations they oversee in Settings (and admins can set them too).
     if (callerRole === 'owner') {
       if (!['technician', 'technician_2'].includes(inviteRole)) {
         return res.status(403).json({ error: 'Owners can invite technicians only' });
@@ -2931,7 +2958,7 @@ app.post('/invite-user', requireAuth, requireAdmin, async (req, res) => {
         return res.status(403).json({ error: 'Owners can only invite into their own locations' });
       }
     }
-    if (inviteRole !== 'executive' && locIds.length === 0) {
+    if (inviteRole !== 'executive' && inviteRole !== 'expansion_manager' && locIds.length === 0) {
       return res.status(400).json({ error: 'Pick at least one location' });
     }
     // Names from the locations table (the client's copy is only a fallback).
@@ -3019,7 +3046,7 @@ function genTempPassword() {
 app.post('/admin/create-user', requireAuth, requireAdmin, async (req, res) => {
   const { email, full_name, role, location_id, location_name, location_ids, location_names, app_role_id } = req.body;
   if (!email) return res.status(400).json({ error: 'email is required' });
-  const allowedRoles = ['owner', 'technician', 'technician_2', 'executive', 'admin'];
+  const allowedRoles = ['owner', 'technician', 'technician_2', 'executive', 'expansion_manager', 'admin'];
   let finalRole = allowedRoles.includes(role) ? role : 'technician';
   // Custom app role: server-authoritative — profiles.role is forced to the
   // bundle's base_role (the consistency trigger requires the pair to match).
@@ -6699,6 +6726,15 @@ const intake = require('./intake')(app, {
   geocode, normPhone, toE164, UUID_RE, EMAIL_RE,
   callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, mapCallRow,
   syncVisitJnTask, loadScheduleSettings, fmtMin,
+});
+
+// Wash Your Hands: the checklist → "WYH - First Last" JobNimbus note (wyh.js).
+require('./wyh')(app, {
+  requireAuth, sbGet, sbPatch, jnGetJson, jnAddNote, jnFetchAccountUsers, UUID_RE,
+  loadActor: intake.loadActor,
+  callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
+  // Signs the short-lived recording links the app's inline player streams from.
+  RECORDING_SECRET: (process.env.WYH_RECORDING_SECRET || JN_WEBHOOK_TOKEN || '').trim(),
 });
 
 // Lead-source links (dryops.app/lead/<token>): an external referrer's one-screen
