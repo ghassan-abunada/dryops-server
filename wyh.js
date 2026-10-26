@@ -215,9 +215,18 @@ module.exports = function mountWyh(app, deps) {
       // file (a signed URL that must be fetched WITHOUT our Authorization
       // header). Forward Range so the browser can seek.
       const range = req.headers.range;
-      let upstream = await fetch(found.recording, { redirect: 'manual', headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, ...(range ? { Range: range } : {}) } });
-      if (upstream.status >= 300 && upstream.status < 400 && upstream.headers.get('location')) {
-        upstream = await fetch(upstream.headers.get('location'), { headers: range ? { Range: range } : {} });
+      // CallRail's `recording` resource answers the API key with a JSON body
+      // {"url": ".../recording/redirect?access_key=…"} (verified 2026-10-26);
+      // that url 302s to the MP3 and must be fetched WITHOUT our Authorization
+      // header. Older accounts may redirect straight away — handle both.
+      let upstream = await fetch(found.recording, { redirect: 'manual', headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json' } });
+      const ct = String(upstream.headers.get('content-type') || '');
+      if (upstream.ok && /json/i.test(ct)) {
+        const j = await upstream.json().catch(() => null);
+        if (!j || !j.url) return res.status(404).send('No recording for this call');
+        upstream = await fetch(j.url, { redirect: 'follow', headers: range ? { Range: range } : {} });
+      } else if (upstream.status >= 300 && upstream.status < 400 && upstream.headers.get('location')) {
+        upstream = await fetch(upstream.headers.get('location'), { redirect: 'follow', headers: range ? { Range: range } : {} });
       }
       if (!upstream.ok && upstream.status !== 206) return res.status(upstream.status === 404 ? 404 : 502).send('Recording unavailable');
       res.status(upstream.status === 206 ? 206 : 200);
