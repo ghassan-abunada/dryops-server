@@ -176,10 +176,10 @@
         "follow_up_resolved_at": "2026-10-27T15:00:00Z",
         "operator_feedback_given": true,
         "operator_feedback": "Great call, keep offering the same-day inspection.",
-        "operator_response": "Thanks, will do."
+        "operator_responded": "yes"
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google\n\nClean.\n\nAction Required: none\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] Insurance: Yes — carrier: Allstate · claim #: C1\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Great call, keep offering the same-day inspection.\n- Response: Thanks, will do."
+    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google\n\nClean.\n\nAction Required: none\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] Insurance: Yes — carrier: Allstate · claim #: C1\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Great call, keep offering the same-day inspection.\n- Response: responded well"
   },
   {
     "name": "insurance pending with a note, needs a follow up (file incomplete) — submitted anyway",
@@ -270,9 +270,31 @@
         "operator_feedback_given": true,
         "operator_feedback": "Offer a window before the HO hangs up",
         "needs_follow_up": true,
-        "follow_up_reason": "waiting"
+        "follow_up_reason": "waiting",
+        "operator_responded": "pending",
+        "follow_up_note": "Waiting on the operator's response to feedback"
       }
     },
-    "expected": "WYH - Jane Doe\nCall: Mon 10/26, 4:05 PM · Plumber\n\nAction Required:\n- Follow up needed — Waiting on someone\n- Not walked — Customer cancelled\n\nChecklist:\n[ ] Walked: No — Customer cancelled\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Offer a window before the HO hangs up"
+    "expected": "WYH - Jane Doe\nCall: Mon 10/26, 4:05 PM · Plumber\n\nAction Required:\n- Follow up needed — Waiting on someone: Waiting on the operator's response to feedback\n- Not walked — Customer cancelled\n\nChecklist:\n[ ] Walked: No — Customer cancelled\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Offer a window before the HO hangs up\n- Response: no response yet (follow up)"
+  },
+  {
+    "name": "coached, did not respond well",
+    "input": {
+      "managerName": "Gus Abunada",
+      "callWhen": "Tue 10/27, 1:10 PM",
+      "callPhone": "5551112222",
+      "source": "Google",
+      "job": {},
+      "review": {
+        "call_handled": true,
+        "walked": "no",
+        "walk_reason": "customer_cancelled",
+        "info_sufficient": true,
+        "operator_feedback_given": true,
+        "operator_feedback": "Offer a same-day window",
+        "operator_responded": "no"
+      }
+    },
+    "expected": "WYH - Gus Abunada\nCall: Tue 10/27, 1:10 PM · (555) 111-2222 · Google\n\nAction Required:\n- Not walked — Customer cancelled\n\nChecklist:\n[✓] Call handled properly\n[ ] Walked: No — Customer cancelled\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Offer a same-day window\n- Response: did not respond well"
   }
 ]
