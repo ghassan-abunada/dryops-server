@@ -6910,6 +6910,8 @@ require('./wyh')(app, {
   requireAuth, sbGet, sbPatch, sbInsert, jnGetJson, jnAddNote, jnFetchAccountUsers, UUID_RE,
   loadActor: intake.loadActor,
   callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
+  // Emails the call taker when feedback is saved or a note is posted (Resend).
+  sendEmail, escapeHtml, WEB_APP_URL,
   // Signs the short-lived recording links the app's inline player streams from.
   RECORDING_SECRET: (process.env.WYH_RECORDING_SECRET || JN_WEBHOOK_TOKEN || '').trim(),
 });
