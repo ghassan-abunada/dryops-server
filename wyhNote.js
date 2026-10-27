@@ -2,6 +2,9 @@
 // in the DryOps app (lib/wyh.ts); test/fixtures/wyhNote.json pins both. Keep
 // the two in sync — change one, change the other; the fixture is hand-written
 // and both tests assert against it.
+//
+// Layout (owner 2026-10-26): header + call line → general notes → "Action
+// Required:" (everything unchecked) → "Checklist:".
 
 function fmtPhone(raw) {
   const d = String(raw || '').replace(/\D/g, '');
@@ -11,7 +14,7 @@ function fmtPhone(raw) {
 }
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-/** '2026-11-03' → 'Mon 11/3' (calendar date, no timezone). */
+/** '2026-11-03' → 'Tue 11/3' (calendar date, no timezone). */
 function fmtMonD(iso) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
   if (!m) return String(iso || '');
@@ -42,22 +45,26 @@ const PHOTO_LABELS = [
 const other = (note) => (note && String(note).trim() ? `: ${String(note).trim()}` : '');
 
 function buildWyhNote(i) {
-  const r = i.review || {};
   const job = i.job || {};
+  const r = i.review || {};
   // Owner rule: a checkmark, never an x.
   const box = (ok) => (ok ? '[✓]' : '[ ]');
-  const lines = [];
-  lines.push(`WYH - ${String(i.managerName || '').trim()}`);
-  const takenBy = String(r.call_taken_by_name || '').trim();
-  lines.push(`Call: ${[i.callWhen, fmtPhone(i.callPhone) || null, i.source, takenBy ? `taken by ${takenBy}` : null].filter(Boolean).join(' · ')}`);
-  if (r.call_recording_reviewed) lines.push('Call recording reviewed');
-  if (r.call_handled != null) {
-    lines.push(r.call_handled ? `${box(true)} Call handled properly` : `${box(false)} Call handled properly${other(r.call_missed_reason) ? ` —${other(r.call_missed_reason).slice(1)}` : ''}`);
-  }
-  lines.push('');
+  const head = [];
+  const actions = [];
+  const check = [];
 
+  head.push(`WYH - ${String(i.managerName || '').trim()}`);
+  const takenBy = String(r.call_taken_by_name || '').trim();
+  head.push(`Call: ${[i.callWhen, fmtPhone(i.callPhone) || null, i.source, takenBy ? `taken by ${takenBy}` : null].filter(Boolean).join(' · ')}`);
+  if (r.call_recording_reviewed) head.push('Call recording reviewed');
+
+  if (r.call_handled != null) {
+    const why = String(r.call_missed_reason || '').trim();
+    check.push(r.call_handled ? `${box(true)} Call handled properly` : `${box(false)} Call handled properly${why ? ` — ${why}` : ''}`);
+    if (!r.call_handled) actions.push(`Call handling${why ? `: ${why}` : ''}`);
+  }
   if (r.walked) {
-    if (r.walked === 'yes') lines.push(`${box(true)} Walked: Yes`);
+    if (r.walked === 'yes') check.push(`${box(true)} Walked: Yes`);
     else {
       const why = r.walk_reason ? WALK_REASON_LABEL[r.walk_reason] : '';
       let when = '';
@@ -66,41 +73,51 @@ function buildWyhNote(i) {
         when = ` (${fmtMonD(r.walk_scheduled_for)}${win ? `, ${win}` : ''})`;
       }
       const note = r.walk_reason === 'other' ? other(r.walk_reason_note) : '';
-      lines.push(`${box(false)} Walked: ${r.walked === 'no' ? 'No' : 'Not yet'}${why ? ` — ${why}${note}${when}` : ''}`);
+      const detail = why ? ` — ${why}${note}${when}` : '';
+      check.push(`${box(false)} Walked: ${r.walked === 'no' ? 'No' : 'Not yet'}${detail}`);
+      actions.push(`${r.walked === 'no' ? 'Not walked' : 'Walk the job'}${detail}`);
     }
   }
   if (r.walked === 'yes' && r.landed != null) {
-    if (r.landed) lines.push(`${box(true)} Landed: Yes`);
+    if (r.landed) check.push(`${box(true)} Landed: Yes`);
     else {
       const why = r.not_landed_reason ? NOT_LANDED_LABEL[r.not_landed_reason] : '';
       const note = r.not_landed_reason === 'other' ? other(r.not_landed_note) : '';
-      lines.push(`${box(false)} Landed: No${why ? ` — ${why}${note}` : ''}`);
+      const detail = why ? ` — ${why}${note}` : '';
+      check.push(`${box(false)} Landed: No${detail}`);
+      actions.push(`Not landed${detail}`);
     }
   }
   const have = PHOTO_LABELS.filter((p) => r[p.key]).map((p) => p.label);
   const missing = PHOTO_LABELS.filter((p) => !r[p.key]).map((p) => p.label);
   if (r.walked === 'yes' && (have.length || r.landed != null)) {
-    if (!missing.length) lines.push(`${box(true)} Photos: ${have.join(', ')}`);
-    else if (!have.length) lines.push(`${box(false)} Photos: none`);
-    else lines.push(`${box(false)} Photos: ${have.join(', ')} · missing: ${missing.join(', ')}`);
+    if (!missing.length) check.push(`${box(true)} Photos: ${have.join(', ')}`);
+    else {
+      check.push(have.length ? `${box(false)} Photos: ${have.join(', ')} · missing: ${missing.join(', ')}` : `${box(false)} Photos: none`);
+      actions.push(`Add photos: ${missing.join(', ')}`);
+    }
   }
   if (r.walked === 'yes' && r.landed === true && r.insurance != null) {
-    if (!r.insurance) lines.push(`${box(true)} Not insurance`);
+    if (!r.insurance) check.push(`${box(true)} Not insurance`);
     else {
       const carrier = r.has_carrier ? String(job.insurer || '').trim() || 'yes' : 'missing';
       const claim = r.has_claim ? String(job.claim_number || '').trim() || 'yes' : 'missing';
-      lines.push(`${box(!!r.has_carrier && !!r.has_claim)} Insurance: Yes — carrier: ${carrier} · claim #: ${claim}`);
+      check.push(`${box(!!r.has_carrier && !!r.has_claim)} Insurance: Yes — carrier: ${carrier} · claim #: ${claim}`);
+      if (!r.has_carrier) actions.push('Add carrier to the file');
+      if (!r.has_claim) actions.push('Add claim number to the file');
       if (r.tested != null) {
-        if (r.tested) lines.push(`${box(true)} Tested: Yes`);
+        if (r.tested) check.push(`${box(true)} Tested: Yes`);
         else {
           const why = r.not_tested_reason ? NOT_TESTED_LABEL[r.not_tested_reason] : '';
           const note = r.not_tested_reason === 'other' ? other(r.not_tested_note) : '';
           const yb = r.year_built ? ` · year built ${r.year_built}` : '';
-          lines.push(`${box(false)} Tested: No${why ? ` — ${why}${note}` : ''}${yb}`);
+          const detail = `${why ? ` — ${why}${note}` : ''}${yb}`;
+          check.push(`${box(false)} Tested: No${detail}`);
+          actions.push(`Not tested${detail}`);
         }
       }
       if (r.packout_sold != null) {
-        if (r.packout_sold) lines.push(`${box(true)} Packout: Sold`);
+        if (r.packout_sold) check.push(`${box(true)} Packout: Sold`);
         else {
           const parts = [];
           if (r.no_packout_reason) parts.push(NO_PO_LABEL[r.no_packout_reason] + (r.no_packout_reason === 'other' ? other(r.no_packout_note) : ''));
@@ -109,15 +126,19 @@ function buildWyhNote(i) {
             if (r.po_feedback_given != null) parts.push(r.po_feedback_given ? 'feedback given to sell a packout' : 'no feedback given');
             if (r.po_real_opportunity != null) parts.push(r.po_real_opportunity ? 'real packout opportunity' : 'not a real opportunity');
           }
-          lines.push(`${box(false)} Packout: Not sold${parts.length ? ` — ${parts.join(' · ')}` : ''}`);
+          const detail = parts.length ? ` — ${parts.join(' · ')}` : '';
+          check.push(`${box(false)} Packout: Not sold${detail}`);
+          actions.push(`Packout not sold${detail}`);
         }
       }
     }
   }
   if (r.info_sufficient != null) {
-    lines.push(r.info_sufficient
-      ? `${box(true)} File info: date of loss, category and cause present`
-      : `${box(false)} File info: incomplete (date of loss, category, cause)`);
+    if (r.info_sufficient) check.push(`${box(true)} File info: date of loss, category and cause present`);
+    else {
+      check.push(`${box(false)} File info: incomplete (date of loss, category, cause)`);
+      actions.push('Add date of loss, category and cause to the file');
+    }
   }
   if (r.called_back != null || r.missed_reason || r.operator_feedback_given != null || r.operator_response) {
     const parts = [];
@@ -125,15 +146,18 @@ function buildWyhNote(i) {
     if (r.missed_reason) parts.push(`reason: ${String(r.missed_reason).trim()}`);
     if (r.operator_feedback_given != null) parts.push(r.operator_feedback_given ? 'feedback given to operator' : 'no feedback given');
     if (r.operator_response) parts.push(`response: ${String(r.operator_response).trim()}`);
-    lines.push(`Missed call: ${parts.join(' · ')}`);
+    check.push(`Missed call: ${parts.join(' · ')}`);
   }
+
+  // Layout (owner 2026-10-26): header → general notes → Action Required → checklist.
+  const out = [...head];
   const notes = String(r.notes || '').trim();
-  if (notes) {
-    lines.push('');
-    lines.push('Notes:');
-    lines.push(notes);
-  }
-  return lines.join('\n');
+  if (notes) { out.push(''); out.push(notes); }
+  out.push('');
+  if (actions.length) { out.push('Action Required:'); for (const a of actions) out.push(`- ${a}`); }
+  else out.push('Action Required: none');
+  if (check.length) { out.push(''); out.push('Checklist:'); out.push(...check); }
+  return out.join('\n');
 }
 
 module.exports = { buildWyhNote, fmtPhone, fmtMonD, fmtWindow };
