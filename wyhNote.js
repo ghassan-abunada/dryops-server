@@ -4,7 +4,8 @@
 // and both tests assert against it.
 //
 // Layout (owner 2026-10-26): header + call line → general notes → "Action
-// Required:" (everything unchecked) → "Checklist:".
+// Required:" (everything unchecked; a "Follow up needed" line first when the
+// manager flagged the review) → "Checklist:". Insurance may be "Pending".
 
 function fmtPhone(raw) {
   const d = String(raw || '').replace(/\D/g, '');
@@ -35,18 +36,19 @@ const NOT_LANDED_LABEL = { quote: 'Gave HO a quote', no_damage: 'No damage found
 const NOT_TESTED_LABEL = { refused: 'HO/adjuster refused', results_provided: 'Results provided', other: 'Other' };
 const NO_PO_LABEL = { small_area: 'Small area', empty_rooms: 'Empty rooms', content_manipulation: 'Content manipulation requested', other: 'Other' };
 const WALK_REASON_LABEL = { customer_cancelled: 'Customer cancelled', scheduled_later: 'Scheduled later', other: 'Other' };
+const FOLLOW_UP_LABEL = { major_concerns: 'Major concerns', file_incomplete: 'File incomplete', other: 'Other' };
+// "Outside of home" dropped 2026-10-26 (owner); the column stays, ignored.
 const PHOTO_LABELS = [
-  { key: 'photo_exterior', label: 'outside of home' },
   { key: 'photo_moisture', label: 'moisture readings' },
   { key: 'photo_damage', label: 'visible damage' },
   { key: 'photo_wide', label: 'wide room shots' },
 ];
 
 const other = (note) => (note && String(note).trim() ? `: ${String(note).trim()}` : '');
+const followUpReasonLabel = (r) => (r && FOLLOW_UP_LABEL[r]) || '';
 
 function buildWyhNote(i) {
-  const job = i.job || {};
-  const r = i.review || {};
+  const r = i.review;
   // Owner rule: a checkmark, never an x.
   const box = (ok) => (ok ? '[✓]' : '[ ]');
   const head = [];
@@ -97,11 +99,16 @@ function buildWyhNote(i) {
       actions.push(`Add photos: ${missing.join(', ')}`);
     }
   }
+  if (r.walked === 'yes' && r.landed === true && r.insurance == null && r.insurance_pending) {
+    const note = other(r.insurance_note).replace(/^: /, ' — ');
+    check.push(`${box(false)} Insurance: Pending${note}`);
+    actions.push(`Insurance pending${note}`);
+  }
   if (r.walked === 'yes' && r.landed === true && r.insurance != null) {
     if (!r.insurance) check.push(`${box(true)} Not insurance`);
     else {
-      const carrier = r.has_carrier ? String(job.insurer || '').trim() || 'yes' : 'missing';
-      const claim = r.has_claim ? String(job.claim_number || '').trim() || 'yes' : 'missing';
+      const carrier = r.has_carrier ? String(i.job.insurer || '').trim() || 'yes' : 'missing';
+      const claim = r.has_claim ? String(i.job.claim_number || '').trim() || 'yes' : 'missing';
       check.push(`${box(!!r.has_carrier && !!r.has_claim)} Insurance: Yes — carrier: ${carrier} · claim #: ${claim}`);
       if (!r.has_carrier) actions.push('Add carrier to the file');
       if (!r.has_claim) actions.push('Add claim number to the file');
@@ -147,6 +154,13 @@ function buildWyhNote(i) {
     if (r.operator_feedback_given != null) parts.push(r.operator_feedback_given ? 'feedback given to operator' : 'no feedback given');
     if (r.operator_response) parts.push(`response: ${String(r.operator_response).trim()}`);
     check.push(`Missed call: ${parts.join(' · ')}`);
+  }
+
+  // "Needs a follow up" leads Action Required: the file comes back at the end of the week.
+  if (r.needs_follow_up && !r.follow_up_resolved_at) {
+    const why = followUpReasonLabel(r.follow_up_reason);
+    const note = other(r.follow_up_note);
+    actions.unshift(`Follow up needed${why ? ` — ${why}${note}` : note.replace(/^: /, ' — ')}`);
   }
 
   // Layout (owner 2026-10-26): header → general notes → Action Required → checklist.
