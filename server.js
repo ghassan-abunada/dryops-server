@@ -6866,19 +6866,6 @@ require('./monitor')(app, {
   requireAuth, requireAdmin, anthropic: wipAnthropic, denverNow,
 });
 
-// ── WYH AI reviewer (Wash Your Hands suggestions; see wyhAi.js) ──────────────
-// Reads each Ready-for-WYH call's JobNimbus notes, fields and photos plus the
-// CallRail summary / transcript with the same cheap LLM and writes
-// wyh_ai_suggestions / wyh_ai_runs; managers' corrections (wyh_ai_feedback)
-// and the owner's house rules (wyh_ai_settings) shape every run.
-require('./wyhAi')(app, {
-  SUPABASE_URL, SUPABASE_SERVICE_KEY,
-  jnGet: jnGetJson, jnFetchUpdatedSince, jnListJobImages, jnDownloadFile,
-  sbSelect, sbInsert, sbPatch,
-  requireAuth, requireAdmin, loadActor: intake.loadActor, anthropic: wipAnthropic, denverNow,
-  callrailApi, CALLRAIL_ACCOUNT_IDS,
-});
-
 // SMS readiness for the app (Schedule tab shows whether ETA texts / inbound
 // replies are wired up). Same env names sendSms() reads.
 app.get('/admin/sms/status', requireAuth, requireAdmin, (req, res) => {
@@ -6927,6 +6914,20 @@ require('./wyh')(app, {
   sendEmail, escapeHtml, WEB_APP_URL,
   // Signs the short-lived recording links the app's inline player streams from.
   RECORDING_SECRET: (process.env.WYH_RECORDING_SECRET || JN_WEBHOOK_TOKEN || '').trim(),
+});
+
+// ── WYH AI reviewer (Wash Your Hands suggestions; see wyhAi.js) ──────────────
+// Mounted after intake: it borrows intake.loadActor like the WYH module.
+// Reads each Ready-for-WYH call's JobNimbus notes, fields and photos plus the
+// CallRail summary / transcript with the same cheap LLM and writes
+// wyh_ai_suggestions / wyh_ai_runs; managers' corrections (wyh_ai_feedback)
+// and the owner's house rules (wyh_ai_settings) shape every run.
+require('./wyhAi')(app, {
+  SUPABASE_URL, SUPABASE_SERVICE_KEY,
+  jnGet: jnGetJson, jnFetchUpdatedSince, jnListJobImages, jnDownloadFile,
+  sbSelect, sbInsert, sbPatch,
+  requireAuth, requireAdmin, loadActor: intake.loadActor, anthropic: wipAnthropic, denverNow,
+  callrailApi, CALLRAIL_ACCOUNT_IDS,
 });
 
 // Lead-source links (dryops.app/lead/<token>): an external referrer's one-screen
