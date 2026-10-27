@@ -16,7 +16,6 @@
         "call_handled": true,
         "walked": "yes",
         "landed": true,
-        "photo_exterior": true,
         "photo_moisture": true,
         "photo_damage": true,
         "photo_wide": false,
@@ -33,7 +32,7 @@
         "notes": "Great file."
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google · taken by Jane Doe\nCall recording reviewed\n\nGreat file.\n\nAction Required:\n- Add photos: wide room shots\n- Packout not sold — Content manipulation requested · 3 rooms affected · feedback given to sell a packout · real packout opportunity\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[ ] Photos: outside of home, moisture readings, visible damage · missing: wide room shots\n[✓] Insurance: Yes — carrier: State Farm · claim #: CLM-123\n[✓] Tested: Yes\n[ ] Packout: Not sold — Content manipulation requested · 3 rooms affected · feedback given to sell a packout · real packout opportunity\n[✓] File info: date of loss, category and cause present"
+    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google · taken by Jane Doe\nCall recording reviewed\n\nGreat file.\n\nAction Required:\n- Add photos: wide room shots\n- Packout not sold — Content manipulation requested · 3 rooms affected · feedback given to sell a packout · real packout opportunity\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[ ] Photos: moisture readings, visible damage · missing: wide room shots\n[✓] Insurance: Yes — carrier: State Farm · claim #: CLM-123\n[✓] Tested: Yes\n[ ] Packout: Not sold — Content manipulation requested · 3 rooms affected · feedback given to sell a packout · real packout opportunity\n[✓] File info: date of loss, category and cause present"
   },
   {
     "name": "not landed (other), call not handled properly, no photos, file incomplete",
@@ -50,7 +49,6 @@
         "landed": false,
         "not_landed_reason": "other",
         "not_landed_note": "Went with another company",
-        "photo_exterior": false,
         "photo_moisture": false,
         "photo_damage": false,
         "photo_wide": false,
@@ -59,7 +57,7 @@
         "info_sufficient": false
       }
     },
-    "expected": "WYH - Jane Doe\nCall: Tue 10/20, 9:05 AM · (555) 000-1111 · Plumber\n\nAction Required:\n- Call handling: Never offered an inspection\n- Not landed — Other: Went with another company\n- Add photos: outside of home, moisture readings, visible damage, wide room shots\n- Add date of loss, category and cause to the file\n\nChecklist:\n[ ] Call handled properly — Never offered an inspection\n[✓] Walked: Yes\n[ ] Landed: No — Other: Went with another company\n[ ] Photos: none\n[ ] File info: incomplete (date of loss, category, cause)"
+    "expected": "WYH - Jane Doe\nCall: Tue 10/20, 9:05 AM · (555) 000-1111 · Plumber\n\nAction Required:\n- Call handling: Never offered an inspection\n- Not landed — Other: Went with another company\n- Add photos: moisture readings, visible damage, wide room shots\n- Add date of loss, category and cause to the file\n\nChecklist:\n[ ] Call handled properly — Never offered an inspection\n[✓] Walked: Yes\n[ ] Landed: No — Other: Went with another company\n[ ] Photos: none\n[ ] File info: incomplete (date of loss, category, cause)"
   },
   {
     "name": "parked: not yet walked, scheduled later with a window, no phone",
@@ -130,7 +128,6 @@
         "call_handled": true,
         "walked": "yes",
         "landed": true,
-        "photo_exterior": true,
         "photo_moisture": true,
         "photo_damage": true,
         "photo_wide": true,
@@ -145,10 +142,10 @@
         "info_sufficient": true
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Fri 10/23, 7:17 PM · (555) 867-5309 · Google · taken by Colt Smith\n\nAction Required:\n- Add carrier to the file\n- Not tested — Other: Lab closed · year built 1998\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: outside of home, moisture readings, visible damage, wide room shots\n[ ] Insurance: Yes — carrier: missing · claim #: AB-1\n[ ] Tested: No — Other: Lab closed · year built 1998\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present"
+    "expected": "WYH - Gus Abunada\nCall: Fri 10/23, 7:17 PM · (555) 867-5309 · Google · taken by Colt Smith\n\nAction Required:\n- Add carrier to the file\n- Not tested — Other: Lab closed · year built 1998\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[ ] Insurance: Yes — carrier: missing · claim #: AB-1\n[ ] Tested: No — Other: Lab closed · year built 1998\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present"
   },
   {
-    "name": "everything in order → Action Required: none",
+    "name": "everything in order (follow-up already resolved) → Action Required: none",
     "input": {
       "managerName": "Gus Abunada",
       "callWhen": "Mon 10/26, 2:15 PM",
@@ -162,7 +159,6 @@
         "call_handled": true,
         "walked": "yes",
         "landed": true,
-        "photo_exterior": true,
         "photo_moisture": true,
         "photo_damage": true,
         "photo_wide": true,
@@ -172,9 +168,62 @@
         "tested": true,
         "packout_sold": true,
         "info_sufficient": true,
-        "notes": "Clean."
+        "notes": "Clean.",
+        "needs_follow_up": true,
+        "follow_up_reason": "other",
+        "follow_up_note": "was a concern",
+        "follow_up_resolved_at": "2026-10-27T15:00:00Z"
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google\n\nClean.\n\nAction Required: none\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: outside of home, moisture readings, visible damage, wide room shots\n[✓] Insurance: Yes — carrier: Allstate · claim #: C1\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present"
+    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google\n\nClean.\n\nAction Required: none\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] Insurance: Yes — carrier: Allstate · claim #: C1\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present"
+  },
+  {
+    "name": "insurance pending with a note, needs a follow up (file incomplete) — submitted anyway",
+    "input": {
+      "managerName": "Gus Abunada",
+      "callWhen": "Mon 10/26, 2:15 PM",
+      "callPhone": "5551234567",
+      "source": "Google",
+      "job": {
+        "insurer": "",
+        "claim_number": ""
+      },
+      "review": {
+        "call_handled": true,
+        "walked": "yes",
+        "landed": true,
+        "photo_moisture": true,
+        "photo_damage": true,
+        "photo_wide": true,
+        "insurance": null,
+        "insurance_pending": true,
+        "insurance_note": "Adjuster hasn't confirmed coverage",
+        "info_sufficient": false,
+        "needs_follow_up": true,
+        "follow_up_reason": "file_incomplete",
+        "follow_up_note": "No cause of loss yet"
+      }
+    },
+    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google\n\nAction Required:\n- Follow up needed — File incomplete: No cause of loss yet\n- Insurance pending — Adjuster hasn't confirmed coverage\n- Add date of loss, category and cause to the file\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[ ] Insurance: Pending — Adjuster hasn't confirmed coverage\n[ ] File info: incomplete (date of loss, category, cause)"
+  },
+  {
+    "name": "major concerns follow-up without a note, insurance pending without a note, no photos",
+    "input": {
+      "managerName": "Jane Doe",
+      "callWhen": "Tue 10/20, 9:05 AM",
+      "callPhone": "+1 (555) 000-1111",
+      "source": "Plumber",
+      "job": {},
+      "review": {
+        "walked": "yes",
+        "landed": true,
+        "insurance_pending": true,
+        "info_sufficient": true,
+        "needs_follow_up": true,
+        "follow_up_reason": "major_concerns",
+        "notes": "Partner argued about the quote."
+      }
+    },
+    "expected": "WYH - Jane Doe\nCall: Tue 10/20, 9:05 AM · (555) 000-1111 · Plumber\n\nPartner argued about the quote.\n\nAction Required:\n- Follow up needed — Major concerns\n- Add photos: moisture readings, visible damage, wide room shots\n- Insurance pending\n\nChecklist:\n[✓] Walked: Yes\n[✓] Landed: Yes\n[ ] Photos: none\n[ ] Insurance: Pending\n[✓] File info: date of loss, category and cause present"
   }
 ]
