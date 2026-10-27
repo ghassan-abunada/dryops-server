@@ -84,7 +84,7 @@ insurance: "yes" when the job is an insurance claim (field insurance_type, a car
 has_carrier / has_claim: true when the job's insurer field / claim_number field is filled (the fields are given to you); a note naming the carrier does not count as filled.
 tested: true when asbestos / lead testing was done or results are in the file; false when it was refused (not_tested_reason "refused"), results were provided by someone else ("results_provided"), or skipped for another reason ("other"). year_built when a note states it. Answer only when insurance is "yes".
 packout_sold: true when a contents packout / Contents job was sold or referred; false with no_packout_reason "small_area", "empty_rooms", "content_manipulation" (the customer asked for content manipulation instead) or "other". Answer only when insurance is "yes".
-info_sufficient: true when the job has a date of loss, a water category (cat) and a cause of loss; false otherwise, with info_missing listing what is missing.
+info_sufficient: true when the job has a date of loss (field date_loss), a water category (field cat) and a cause of loss (loss_type field, or a note that names the cause: supply line, roof leak, sewage backup…); false otherwise, with info_missing listing what is missing.
 general_notes: 1–3 sentences the manager would tell the partner — the one or two things that matter most on this file (max 400 characters); null when nothing stands out.
 needs_follow_up: true when the file has major concerns (lost job that should have landed, price given over the phone, customer complaint) or is too incomplete to review (follow_up_reason "major_concerns" / "file_incomplete" / "other", follow_up_note why); false otherwise.
 job_match: ONLY for a call that has no JobNimbus job. From the transcript / summary, extract the caller's name and the property address, then compare against "candidate_jobs" (jobs created at the same location around the call). Return the candidates that are the same customer or property with score 0–1 and why; an empty array when none fit. For a call that already has a job return null.
@@ -132,7 +132,7 @@ function buildPayload({ call, job, notes, callrail, priorCalls, candidates, phot
     job: job ? {
       number: job.number, name: clip(job.name, 120), status: job.status, stage: job.stage,
       insurance_type: job.insurance_type, insurer: job.insurer, claim_number: job.claim_number, tested: job.tested,
-      date_loss: job.date_loss, cat: job.cat, cause: job.cause, lead_type: job.lead_type, sales_rep: job.sales_rep,
+      date_loss: job.date_loss, cat: job.cat, loss_type: job.loss_type, lead_type: job.lead_type, sales_rep: job.sales_rep,
       created: job.jn_created, days_call_to_job: job.jn_created ? Math.round(daysBetween(job.jn_created, call.start_time) * 10) / 10 : null,
       inspection_state: job._inspection_state || 'none', inspection_date: job._inspection_date || null,
       photos_attached: photosAttached,
@@ -259,7 +259,9 @@ function mountWyhAi(app, deps) {
 
   // ── Scope ──────────────────────────────────────────────────────────────────
   const CALL_COLS = 'id,callrail_id,start_time,answered,voicemail,duration,customer_name,customer_phone_number,customer_phone_norm,tags,call_summary,location_id,job_id';
-  const JOB_COLS = 'id,jn_id,number,name,client_name,status,stage,insurance_type,insurer,claim_number,tested,date_loss,cat,cause,lead_type,sales_rep,jn_created,location_id,address,client_phone_norm';
+  // No `cause` column on jobs (prod 2026-10-27): the cause of loss comes from
+  // the notes; `loss_type` (water / fire…) is the closest mirrored field.
+  const JOB_COLS = 'id,jn_id,number,name,client_name,status,stage,insurance_type,insurer,claim_number,tested,date_loss,cat,loss_type,lead_type,sales_rep,jn_created,location_id,address,client_phone_norm';
   async function selectTargets({ location_id = null, call_id = null } = {}) {
     const since = new Date(Date.now() - CALL_DAYS * 86400000).toISOString();
     const q = `select=${CALL_COLS}&direction=eq.inbound&location_id=not.is.null&start_time=gte.${since}`
@@ -362,7 +364,7 @@ function mountWyhAi(app, deps) {
     const candidates = t.kind === 'match' ? await candidateJobsFor(t.call) : null;
     const photos = t.job ? await photosFor(t.job, photosN) : { images: [], ids: [], total: 0 };
     const lessons = lessonsFor(feedback, t.call.location_id);
-    const jobStamp = t.job ? [t.job.status, t.job.stage, t.job.insurer, t.job.claim_number, t.job.tested, t.job.date_loss, t.job.cat, t.job.cause, t.job._inspection_state, t.job._inspection_date].join('/') : '';
+    const jobStamp = t.job ? [t.job.status, t.job.stage, t.job.insurer, t.job.claim_number, t.job.tested, t.job.date_loss, t.job.cat, t.job.loss_type, t.job._inspection_state, t.job._inspection_date].join('/') : '';
     const hash = inputsHash([PROMPT_VERSION, fp, jobStamp, settings.updated_at, (callrail && callrail.transcript ? callrail.transcript.length : 0), (callrail && callrail.summary) || t.call.call_summary, photos.ids.join(','), lessons[0] ? lessons[0].id : '', (candidates || []).map(c => c.job_id).join(',')]);
     const payload = buildPayload({ call: t.call, job: t.job, notes, callrail, priorCalls: prior, candidates, photosAttached: photos.images.length, today });
     const systemPrompt = buildSystemPrompt(BASE_PROMPT, settings, lessons, accuracyFrom(feedback.slice(0, 200)));
