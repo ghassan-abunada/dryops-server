@@ -301,6 +301,45 @@ function invoiceBalanceCols(job) {
 // stage texts when a job's status moves forward). Fire-and-forget.
 const hooks = { jobStatusChanged: null };
 
+// The mirrored job columns from one JobNimbus job record (webhook payload or
+// GET /jobs/:id) — shared by the webhook and jobSync.js (reconcile + per-job
+// refresh), so every path maps the same fields the same way. Prefer JobNimbus
+// cf_string_* keys; fall back to display-name keys where webhooks drop them.
+function jnJobFields(job) {
+  const pick = (...keys) => { for (const k of keys) { const v = job[k]; if (v !== undefined && v !== null && v !== '') return v; } return undefined; };
+  const row = {};
+  const set = (col, val) => { if (val !== undefined) row[col] = val; };
+  const recordType = job.record_type_name;
+  const addrParts = [job.address_line1, job.city, (job.state_text || job.state), job.zip].filter(Boolean);
+  set('name', job.name || undefined);
+  set('number', job.number != null && job.number !== '' ? String(job.number) : undefined);
+  set('address', addrParts.length ? addrParts.join(', ') : undefined);
+  set('claim_number', pick('cf_string_2', 'Claim Number', 'Claim #'));
+  set('client_phone', pick('parent_mobile_phone'));
+  set('adjuster_name', pick('cf_string_3', 'Adjuster Name', 'Adjuster'));
+  set('adjuster_phone', pick('cf_string_4', 'Adjuster Phone'));
+  set('adjuster_email', pick('cf_string_5', 'Adjuster Email'));
+  set('lead_type', pick('cf_string_6', 'Lead Type'));
+  set('insurance_type', pick('cf_string_7', 'Insurance or Not Insurance'));
+  set('tested', pick('cf_string_8', 'Tested or Not Tested'));
+  set('insurer', pick('cf_string_9', 'Insurance Company', 'Insurance Carrier', 'Carrier', 'Insurer'));
+  set('cat', pick('cf_string_18', 'Category', 'Water Category'));
+  set('sales_rep', normalizeRepName(pick('sales_rep_name'))); // JN built-in display name, e.g. "Jane Smith"
+  set('date_loss', jnToDate(job.cf_date_1));
+  set('date_start', jnToDate(job.start_date));
+  set('record_type', recordType || undefined);
+  set('status', job.status_name || undefined);
+  // JobNimbus lead source (every record type): the Stats "Lead Sources" panel
+  // at testing locations groups by it (columns from add_job_intake.sql).
+  Object.assign(row, jnSourceCols(job));
+  if (job.active !== undefined) set('is_active', !!job.active);
+  else if (job.is_active !== undefined) set('is_active', !!job.is_active);
+  set('jn_created', jnToISO(job.date_created));
+  set('jn_updated', jnToISO(job.date_modified || job.date_updated));
+  Object.assign(row, invoiceBalanceCols(job));
+  return row;
+}
+
 app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
   if (!webhookTokenOk(req)) return res.status(401).json({ error: 'unauthorized' });
 
@@ -323,39 +362,8 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
     return res.status(200).json({ ok: true, skipped: 'deprecated type' });
   }
 
-  // Prefer JobNimbus cf_string_* keys; fall back to display-name keys if present.
-  const pick = (...keys) => { for (const k of keys) { const v = job[k]; if (v !== undefined && v !== null && v !== '') return v; } return undefined; };
-
-  const row = { jn_id: String(jnid), last_synced: new Date().toISOString() };
+  const row = { jn_id: String(jnid), last_synced: new Date().toISOString(), ...jnJobFields(job) };
   const set = (col, val) => { if (val !== undefined) row[col] = val; };
-
-  const addrParts = [job.address_line1, job.city, (job.state_text || job.state), job.zip].filter(Boolean);
-  set('name', job.name || undefined);
-  set('number', job.number != null && job.number !== '' ? String(job.number) : undefined);
-  set('address', addrParts.length ? addrParts.join(', ') : undefined);
-  set('claim_number', pick('cf_string_2'));
-  set('client_phone', pick('parent_mobile_phone'));
-  set('adjuster_name', pick('cf_string_3'));
-  set('adjuster_phone', pick('cf_string_4'));
-  set('adjuster_email', pick('cf_string_5'));
-  set('lead_type', pick('cf_string_6', 'Lead Type'));
-  set('insurance_type', pick('cf_string_7', 'Insurance or Not Insurance'));
-  set('tested', pick('cf_string_8', 'Tested or Not Tested'));
-  set('insurer', pick('cf_string_9'));
-  set('cat', pick('cf_string_18'));
-  set('sales_rep', normalizeRepName(pick('sales_rep_name'))); // JN built-in display name, e.g. "Jane Smith"
-  set('date_loss', jnToDate(job.cf_date_1));
-  set('date_start', jnToDate(job.start_date));
-  set('record_type', recordType || undefined);
-  set('status', job.status_name || undefined);
-  // JobNimbus lead source (every record type): the Stats "Lead Sources" panel
-  // at testing locations groups by it (columns from add_job_intake.sql).
-  Object.assign(row, jnSourceCols(job));
-  if (job.active !== undefined) set('is_active', !!job.active);
-  else if (job.is_active !== undefined) set('is_active', !!job.is_active);
-  set('jn_created', jnToISO(job.date_created));
-  set('jn_updated', jnToISO(job.date_modified || job.date_updated));
-  Object.assign(row, invoiceBalanceCols(job));
 
   // Resolve JobNimbus numeric location id -> our locations.id UUID. Unknown
   // ids (a location created in JN after our seed) get a placeholder row
@@ -6922,9 +6930,18 @@ require('./wyh')(app, {
 // CallRail summary / transcript with the same cheap LLM and writes
 // wyh_ai_suggestions / wyh_ai_runs; managers' corrections (wyh_ai_feedback)
 // and the owner's house rules (wyh_ai_settings) shape every run.
+// ── JobNimbus job pull (see jobSync.js) ──────────────────────────────────────
+// The webhook misses custom-field edits (claim #, carrier…); this reconciles
+// changed jobs every 30 min and refreshes one job on demand
+// (POST /jobs/:id/refresh — the WYH panel calls it on open).
+const jobSync = require('./jobSync')(app, {
+  SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGetJobFull, jnFetchUpdatedSince, jnJobFields,
+  sbSelect, requireAuth, requireAdmin, loadActor: intake.loadActor,
+});
+
 require('./wyhAi')(app, {
   SUPABASE_URL, SUPABASE_SERVICE_KEY,
-  jnGet: jnGetJson, jnFetchUpdatedSince, jnListJobImages, jnDownloadFile,
+  jnGet: jnGetJson, jnFetchUpdatedSince, jnListJobImages, jnDownloadFile, refreshJobByJnId: jobSync.refreshJobByJnId,
   sbSelect, sbInsert, sbPatch,
   requireAuth, requireAdmin, loadActor: intake.loadActor, anthropic: wipAnthropic, denverNow,
   callrailApi, CALLRAIL_ACCOUNT_IDS,
