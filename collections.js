@@ -426,8 +426,28 @@ module.exports = function mountCollections(app, deps) {
     setInterval(incrementalTick, Math.max(1, INCREMENTAL_HOURS) * 3600 * 1000);
   }
 
-  // ── Endpoints (admin OR owner — requireAdmin allows both) ──────────────────
-  app.post('/admin/collections/run', requireAuth, requireAdmin, async (req, res) => {
+  // ── Endpoints (admin, owner, or an expansion manager inside their locations) ──
+  // requireAdmin covers admin + owner; expansion managers (profiles.location_ids)
+  // may run a location-scoped review and refresh jobs at their locations
+  // (owner 2026-10-26: Collections tab for expansion managers).
+  async function requireCollections(req, res, next) {
+    try {
+      const rows = await sbSelect('profiles', `id=eq.${encodeURIComponent(req.userId)}&select=role,location_ids`);
+      const p = Array.isArray(rows) && rows[0] ? rows[0] : null;
+      const role = p ? p.role : null;
+      if (role === 'admin' || role === 'owner') { req.collectionsScope = null; return next(); }
+      if (role === 'expansion_manager') {
+        req.collectionsScope = (Array.isArray(p.location_ids) ? p.location_ids : []).map(String);
+        if (req.collectionsScope.length) return next();
+      }
+      return res.status(403).json({ error: 'Admin, owner or expansion manager access required' });
+    } catch (err) {
+      console.error('[collections auth]', err.message);
+      return res.status(502).json({ error: 'Auth verification failed' });
+    }
+  }
+
+  app.post('/admin/collections/run', requireAuth, requireCollections, async (req, res) => {
     const b = req.body || {};
     const opts = {
       mode: b.full ? 'full' : 'manual', trigger: 'admin',
@@ -435,6 +455,11 @@ module.exports = function mountCollections(app, deps) {
       limit: b.limit != null ? Math.max(0, parseInt(b.limit, 10) || 0) || null : null,
       force: !!b.force, dry: !!b.dry,
     };
+    if (req.collectionsScope) {
+      // A manager runs one of their locations at a time, never the whole book.
+      if (!opts.location_id || !req.collectionsScope.includes(opts.location_id)) return res.status(403).json({ error: 'Pick one of your locations to run the review for' });
+      opts.mode = 'manual';
+    }
     try {
       if (opts.dry) return res.json(await dryRun(opts));
       if (!provider) return res.status(503).json({ error: `Collections classifier is disabled: no API key for ${MODEL_SPEC}` });
@@ -447,7 +472,7 @@ module.exports = function mountCollections(app, deps) {
     }
   });
 
-  app.get('/admin/collections/status', requireAuth, requireAdmin, async (req, res) => {
+  app.get('/admin/collections/status', requireAuth, requireCollections, async (req, res) => {
     try {
       const [recent, ar_jobs, reviewed, errors, needs_owner, not_followed_up] = await Promise.all([
         sbSelect('collections_runs', 'select=id,mode,trigger,model,started_at,finished_at,status,jobs_in_scope,llm_calls,skipped_unchanged,no_activity,errors,input_tokens,output_tokens,thinking_tokens,est_cost_usd&order=started_at.desc&limit=10'),
@@ -469,10 +494,15 @@ module.exports = function mountCollections(app, deps) {
     }
   });
 
-  app.post('/admin/collections/jobs/:jobId/refresh', requireAuth, requireAdmin, async (req, res) => {
+  app.post('/admin/collections/jobs/:jobId/refresh', requireAuth, requireCollections, async (req, res) => {
     const jobId = String(req.params.jobId || '');
     if (!uuidRe.test(jobId)) return res.status(400).json({ error: 'invalid job id' });
     try {
+      if (req.collectionsScope) {
+        const rows = await sbSelect('jobs', `id=eq.${encodeURIComponent(jobId)}&select=location_id`);
+        const loc = Array.isArray(rows) && rows[0] ? String(rows[0].location_id || '') : '';
+        if (!loc || !req.collectionsScope.includes(loc)) return res.status(403).json({ error: 'That job is outside your locations' });
+      }
       const row = await refreshJob(jobId);
       res.json({ ok: true, review: row });
     } catch (err) {
