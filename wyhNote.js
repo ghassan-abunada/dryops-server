@@ -36,6 +36,7 @@ const NOT_LANDED_LABEL = { quote: 'Gave HO a quote', no_damage: 'No damage found
 const NOT_TESTED_LABEL = { refused: 'HO/adjuster refused', results_provided: 'Results provided', other: 'Other' };
 const NO_PO_LABEL = { small_area: 'Small area', empty_rooms: 'Empty rooms', content_manipulation: 'Content manipulation requested', other: 'Other' };
 const WALK_REASON_LABEL = { customer_cancelled: 'Customer cancelled', scheduled_later: 'Scheduled later', other: 'Other' };
+const OPERATOR_RESPONDED_LABEL = { yes: 'responded well', no: 'did not respond well', pending: 'no response yet (follow up)' };
 const FOLLOW_UP_LABEL = { waiting: 'Waiting on someone', not_landed: 'Not landed', major_concerns: 'Major concerns', file_incomplete: 'File incomplete', other: 'Other' };
 // "Outside of home" dropped 2026-10-26 (owner); the column stays, ignored.
 const PHOTO_LABELS = [
@@ -158,7 +159,8 @@ function buildWyhNote(i) {
   if (r.operator_feedback_given != null) {
     coaching.push(r.operator_feedback_given ? 'Coaching: feedback given' : 'Coaching: no feedback given');
     if (r.operator_feedback_given && String(r.operator_feedback || '').trim()) coaching.push(`- Feedback: ${String(r.operator_feedback || '').trim()}`);
-    if (r.operator_feedback_given && String(r.operator_response || '').trim()) coaching.push(`- Response: ${String(r.operator_response || '').trim()}`);
+    if (r.operator_feedback_given && r.operator_responded && OPERATOR_RESPONDED_LABEL[r.operator_responded]) coaching.push(`- Response: ${OPERATOR_RESPONDED_LABEL[r.operator_responded]}`);
+    else if (r.operator_feedback_given && String(r.operator_response || '').trim()) coaching.push(`- Response: ${String(r.operator_response || '').trim()}`);
     if (!r.operator_feedback_given) actions.push('Give the operator feedback');
   }
 
