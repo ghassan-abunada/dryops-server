@@ -175,7 +175,7 @@ function cleanSuggestions(llm, hasJob) {
 
 function mountWyhAi(app, deps) {
   const {
-    SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet, jnFetchUpdatedSince, jnListJobImages, jnDownloadFile,
+    SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet, jnFetchUpdatedSince, jnListJobImages, jnDownloadFile, refreshJobByJnId,
     sbSelect, sbInsert, sbPatch, requireAuth, requireAdmin, loadActor, anthropic, denverNow,
     callrailApi, CALLRAIL_ACCOUNT_IDS,
   } = deps;
@@ -354,6 +354,15 @@ function mountWyhAi(app, deps) {
     const photosN = t.kind === 'wyh' ? Math.max(0, Math.min(24, Number(settings.photos_per_job ?? PHOTOS_DEFAULT))) : 0;
     let notes = []; let fp = null;
     if (t.job) {
+      // Fresh fields first: the webhook misses custom-field edits (claim #,
+      // carrier…), so pull the job from JobNimbus before judging it.
+      if (refreshJobByJnId) {
+        try {
+          const fresh = await refreshJobByJnId(t.job.jn_id);
+          stats.jn_requests++;
+          if (fresh) Object.assign(t.job, { status: fresh.status, insurer: fresh.insurer, claim_number: fresh.claim_number, insurance_type: fresh.insurance_type, tested: fresh.tested, date_loss: fresh.date_loss, cat: fresh.cat, lead_type: fresh.lead_type, sales_rep: fresh.sales_rep, name: fresh.name, number: fresh.number });
+        } catch (e) { warn('job refresh', t.job.number, e.message); }
+      }
       const sinceSecs = Math.floor(Date.now() / 1000) - LOOKBACK_DAYS * 86400;
       const acts = (await fetchActs({ jnGet, tag: 'wyh-ai' }, [t.job.jn_id], sinceSecs, stats)).filter(isHuman).sort((x, y) => (y.date_created || 0) - (x.date_created || 0)).slice(0, NOTES_PER_JOB);
       fp = notesHash(PROMPT_VERSION, acts);
