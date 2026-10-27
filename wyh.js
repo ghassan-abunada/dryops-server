@@ -23,11 +23,93 @@ module.exports = function mountWyh(app, deps) {
   const {
     requireAuth, sbGet, sbPatch, sbInsert, jnGetJson, jnAddNote, jnFetchAccountUsers, loadActor, UUID_RE,
     callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, RECORDING_SECRET,
+    sendEmail, escapeHtml, WEB_APP_URL,
   } = deps;
   const enc = encodeURIComponent;
   const warn = (...a) => console.warn('[wyh]', ...a);
   const SEES_ALL = ['admin', 'owner', 'executive'];
   const CR_ID_RE = /^[A-Za-z0-9_-]{3,64}$/;
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const esc = (s) => (escapeHtml ? escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
+  const fmtPhone = (raw) => { const d = String(raw || '').replace(/\D/g, ''); const n = d.length === 11 && d.startsWith('1') ? d.slice(1) : d; return n.length === 10 ? `(${n.slice(0, 3)}) ${n.slice(3, 6)}-${n.slice(6)}` : String(raw || '').trim(); };
+
+  // ── Email to the call taker (feedback saved / a note posted) ──────────────
+  // The app calls this right after writing the review row or the comment row
+  // under RLS; the server only reads them back (service key) and sends through
+  // Resend. No email on file → { sent: false, reason: 'no_email' }, never 4xx.
+  function callTakerEmailHtml({ kind, managerName, caller, phone, whenText, locationName, review, comment, summary, jnUrl, appUrl }) {
+    const title = kind === 'comment' ? `${esc(managerName)} left you a note` : `${esc(managerName)} reviewed a call you took`;
+    const rows = [];
+    if (kind === 'comment' && comment) {
+      rows.push(`<p style="margin:0 0 12px;font-size:15px;line-height:22px;color:#0F172A;white-space:pre-wrap">${esc(comment.body)}</p>`);
+    } else if (review) {
+      const handled = review.call_handled == null ? null : review.call_handled ? 'Yes' : 'No';
+      if (handled) rows.push(`<p style="margin:0 0 6px;font-size:14px;line-height:20px;color:#0F172A"><strong>Handled properly:</strong> ${handled}</p>`);
+      if (review.call_handled === false && review.call_missed_reason) rows.push(`<p style="margin:0 0 6px;font-size:14px;line-height:20px;color:#0F172A"><strong>What should have happened:</strong> ${esc(review.call_missed_reason)}</p>`);
+      if (review.call_opportunity != null && !review.job_id) rows.push(`<p style="margin:0 0 6px;font-size:14px;line-height:20px;color:#0F172A"><strong>Opportunity:</strong> ${review.call_opportunity ? 'Yes' : 'No'}</p>`);
+      if (Array.isArray(review.call_issues) && review.call_issues.length) rows.push(`<p style="margin:0 0 6px;font-size:14px;line-height:20px;color:#0F172A"><strong>What went wrong:</strong> ${esc(review.call_issues.map((k) => String(k).replace(/_/g, ' ')).join(', '))}${review.call_issue_other ? ` — ${esc(review.call_issue_other)}` : ''}</p>`);
+      if (!rows.length) rows.push(`<p style="margin:0 0 6px;font-size:14px;line-height:20px;color:#0F172A">The call was reviewed in DryOps.</p>`);
+    }
+    const facts = [whenText, phone ? fmtPhone(phone) : null, locationName].filter(Boolean).map(esc).join(' · ');
+    return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#F1F5F9;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F1F5F9"><tr><td align="center" style="padding:32px 16px">
+<table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#FFFFFF;border-radius:12px;border:1px solid #E2E8F0">
+<tr><td style="padding:24px 28px 8px"><div style="font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#64748B">DryOps · Wash Your Hands</div>
+<h1 style="margin:8px 0 4px;font-size:20px;line-height:26px;color:#0F172A">${title}</h1>
+<div style="font-size:14px;line-height:20px;color:#475569"><strong style="color:#0F172A">${esc(caller || 'Unknown caller')}</strong>${facts ? ` · ${facts}` : ''}</div></td></tr>
+<tr><td style="padding:12px 28px 4px">${rows.join('')}</td></tr>
+${summary ? `<tr><td style="padding:8px 28px 4px"><div style="font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#64748B;margin-bottom:4px">Call summary</div><p style="margin:0;font-size:13px;line-height:19px;color:#475569">${esc(summary)}</p></td></tr>` : ''}
+<tr><td style="padding:16px 28px 24px">
+<a href="${esc(appUrl)}" style="display:inline-block;background:#0369A1;color:#FFFFFF;text-decoration:none;font-weight:700;font-size:14px;padding:11px 18px;border-radius:10px">Open in DryOps</a>
+${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#0369A1;text-decoration:none;font-weight:700;font-size:14px;padding:11px 6px">Open in JobNimbus</a>` : ''}
+<p style="margin:16px 0 0;font-size:12px;line-height:18px;color:#94A3B8">Sent because you were marked as the person who took this call. Reply to the manager directly, not to this email.</p>
+</td></tr></table></td></tr></table></body></html>`;
+  }
+
+  app.post('/wyh/calls/:callId/notify', requireAuth, async (req, res) => {
+    const callId = String(req.params.callId || '');
+    const kind = req.body && req.body.kind === 'comment' ? 'comment' : 'feedback';
+    const commentId = req.body && req.body.comment_id ? String(req.body.comment_id) : null;
+    if (!UUID_RE.test(callId) || (commentId && !UUID_RE.test(commentId))) return res.status(400).json({ error: 'Bad id' });
+    try {
+      const actor = await loadActor(req);
+      if (!actor) return res.status(403).json({ error: 'Profile not found' });
+      if (!['admin', 'owner', 'expansion_manager'].includes(actor.role)) return res.status(403).json({ error: 'Not allowed' });
+      const call = ((await sbGet(`calls?id=eq.${enc(callId)}&select=id,location_id,start_time,customer_name,customer_phone_number,call_summary,job_id`)) || [])[0];
+      if (!call) return res.status(404).json({ error: 'Call not found' });
+      if (actor.role === 'expansion_manager' && !actor.locs.includes(String(call.location_id))) return res.status(403).json({ error: 'Not your location' });
+      const review = ((await sbGet(`wyh_reviews?call_id=eq.${enc(callId)}&select=*`)) || [])[0] || null;
+      let to = review && review.call_taken_by_email ? String(review.call_taken_by_email).trim() : '';
+      if (!to && call.location_id) {
+        const pref = ((await sbGet(`wyh_location_prefs?location_id=eq.${enc(call.location_id)}&select=call_taker_email,call_taker_name,call_taker_jn_user_id`)) || [])[0];
+        // Only fall back to the location default when it is the same person named on the review.
+        if (pref && pref.call_taker_email && review && review.call_taken_by_jn_id && String(pref.call_taker_jn_user_id || '') === String(review.call_taken_by_jn_id)) to = String(pref.call_taker_email).trim();
+      }
+      if (!to || !EMAIL_RE.test(to)) return res.json({ sent: false, to: null, reason: 'no_email' });
+      let comment = null;
+      if (kind === 'comment') {
+        comment = commentId ? ((await sbGet(`wyh_call_comments?id=eq.${enc(commentId)}&select=*`)) || [])[0] : null;
+        if (!comment) return res.status(404).json({ error: 'Note not found' });
+      }
+      const loc = call.location_id ? ((await sbGet(`locations?id=eq.${enc(call.location_id)}&select=name,timezone`)) || [])[0] : null;
+      const job = call.job_id ? ((await sbGet(`jobs?id=eq.${enc(call.job_id)}&select=jn_id,name`)) || [])[0] : null;
+      const managerName = (kind === 'comment' ? (comment.author_name || actor.name) : (review && review.call_feedback_by) || actor.name) || 'A DryOps manager';
+      const caller = String(call.customer_name || '').replace(/\s+/g, ' ').trim().replace(/\b\w+/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+      const whenText = callWhen(call.start_time, loc && loc.timezone);
+      const subject = `Call review: ${caller || fmtPhone(call.customer_phone_number) || 'a call'} · ${whenText}${loc && loc.name ? ` (${loc.name})` : ''}`;
+      const html = callTakerEmailHtml({
+        kind, managerName, caller, phone: call.customer_phone_number, whenText, locationName: loc && loc.name, review, comment,
+        summary: call.call_summary, jnUrl: job && job.jn_id ? `https://app.jobnimbus.com/job/${enc(job.jn_id)}` : null,
+        appUrl: `${String(WEB_APP_URL || 'https://dryops.app').replace(/\/$/, '')}/wash-hands`,
+      });
+      const r = await sendEmail(to, subject, html);
+      if (!r.ok) { warn('notify email failed', r.error); return res.json({ sent: false, to, reason: r.error || 'email failed' }); }
+      return res.json({ sent: true, to, id: r.id || null });
+    } catch (err) {
+      warn('notify failed', err.message);
+      return res.status(502).json({ error: err.message });
+    }
+  });
 
   // "Mon 10/26, 2:15 PM" in the location's timezone (WYH dates are "Mon M/D").
   function callWhen(iso, tz) {
