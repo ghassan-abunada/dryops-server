@@ -79,6 +79,9 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
       if (!call) return res.status(404).json({ error: 'Call not found' });
       if (actor.role === 'expansion_manager' && !actor.locs.includes(String(call.location_id))) return res.status(403).json({ error: 'Not your location' });
       const review = ((await sbGet(`wyh_reviews?call_id=eq.${enc(callId)}&select=*`)) || [])[0] || null;
+      // Owner rule (2026-10-27): the call taker is emailed only when the review
+      // says the call was NOT handled properly — for feedback and for notes.
+      if (!review || review.call_handled !== false) return res.json({ sent: false, to: null, reason: 'handled_properly' });
       let to = review && review.call_taken_by_email ? String(review.call_taken_by_email).trim() : '';
       if (!to && call.location_id) {
         const pref = ((await sbGet(`wyh_location_prefs?location_id=eq.${enc(call.location_id)}&select=call_taker_email,call_taker_name,call_taker_jn_user_id`)) || [])[0];
