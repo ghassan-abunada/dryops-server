@@ -107,10 +107,11 @@
         "missed_reason": "Tech was on a job",
         "operator_feedback_given": true,
         "operator_response": "Will forward to cell",
-        "notes": "  "
+        "notes": "  ",
+        "operator_feedback": "Pick up every call, even on a job"
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Fri 10/23, 7:17 PM · (555) 867-5309 · Google\n\nAction Required:\n- Not walked — Other: Out of service area\n\nChecklist:\n[ ] Walked: No — Other: Out of service area\n[✓] File info: date of loss, category and cause present\nMissed call: called back · reason: Tech was on a job · feedback given to operator · response: Will forward to cell"
+    "expected": "WYH - Gus Abunada\nCall: Fri 10/23, 7:17 PM · (555) 867-5309 · Google\n\nAction Required:\n- Not walked — Other: Out of service area\n\nChecklist:\n[ ] Walked: No — Other: Out of service area\n[✓] File info: date of loss, category and cause present\nMissed call: called back · reason: Tech was on a job\n\nCoaching: feedback given\n- Feedback: Pick up every call, even on a job\n- Response: Will forward to cell"
   },
   {
     "name": "landed insurance, carrier missing, not tested (other), packout sold",
@@ -172,10 +173,13 @@
         "needs_follow_up": true,
         "follow_up_reason": "other",
         "follow_up_note": "was a concern",
-        "follow_up_resolved_at": "2026-10-27T15:00:00Z"
+        "follow_up_resolved_at": "2026-10-27T15:00:00Z",
+        "operator_feedback_given": true,
+        "operator_feedback": "Great call, keep offering the same-day inspection.",
+        "operator_response": "Thanks, will do."
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google\n\nClean.\n\nAction Required: none\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] Insurance: Yes — carrier: Allstate · claim #: C1\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present"
+    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google\n\nClean.\n\nAction Required: none\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] Insurance: Yes — carrier: Allstate · claim #: C1\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Great call, keep offering the same-day inspection.\n- Response: Thanks, will do."
   },
   {
     "name": "insurance pending with a note, needs a follow up (file incomplete) — submitted anyway",
@@ -225,5 +229,50 @@
       }
     },
     "expected": "WYH - Jane Doe\nCall: Tue 10/20, 9:05 AM · (555) 000-1111 · Plumber\n\nPartner argued about the quote.\n\nAction Required:\n- Follow up needed — Major concerns\n- Add photos: moisture readings, visible damage, wide room shots\n- Insurance pending\n\nChecklist:\n[✓] Walked: Yes\n[✓] Landed: Yes\n[ ] Photos: none\n[ ] Insurance: Pending\n[✓] File info: date of loss, category and cause present"
+  },
+  {
+    "name": "no coaching yet → action line; follow-up: not landed",
+    "input": {
+      "managerName": "Gus Abunada",
+      "callWhen": "Tue 10/27, 9:40 AM",
+      "callPhone": "5559876543",
+      "source": "Google",
+      "job": {},
+      "review": {
+        "call_handled": true,
+        "walked": "yes",
+        "landed": false,
+        "not_landed_reason": "quote",
+        "photo_moisture": true,
+        "photo_damage": true,
+        "photo_wide": true,
+        "info_sufficient": true,
+        "operator_feedback_given": false,
+        "needs_follow_up": true,
+        "follow_up_reason": "not_landed",
+        "follow_up_note": "Call the HO back Thursday"
+      }
+    },
+    "expected": "WYH - Gus Abunada\nCall: Tue 10/27, 9:40 AM · (555) 987-6543 · Google\n\nAction Required:\n- Follow up needed — Not landed: Call the HO back Thursday\n- Not landed — Gave HO a quote\n- Give the operator feedback\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[ ] Landed: No — Gave HO a quote\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] File info: date of loss, category and cause present\n\nCoaching: no feedback given"
+  },
+  {
+    "name": "waiting on someone; feedback given, no response yet",
+    "input": {
+      "managerName": "Jane Doe",
+      "callWhen": "Mon 10/26, 4:05 PM",
+      "callPhone": null,
+      "source": "Plumber",
+      "job": {},
+      "review": {
+        "walked": "no",
+        "walk_reason": "customer_cancelled",
+        "info_sufficient": true,
+        "operator_feedback_given": true,
+        "operator_feedback": "Offer a window before the HO hangs up",
+        "needs_follow_up": true,
+        "follow_up_reason": "waiting"
+      }
+    },
+    "expected": "WYH - Jane Doe\nCall: Mon 10/26, 4:05 PM · Plumber\n\nAction Required:\n- Follow up needed — Waiting on someone\n- Not walked — Customer cancelled\n\nChecklist:\n[ ] Walked: No — Customer cancelled\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Offer a window before the HO hangs up"
   }
 ]
