@@ -74,7 +74,10 @@ async function withRetry(fn, tries = 4) {
 // provider.classify(userText) → { parsed, usage: { input, output, thinking } }
 // `schema` is the caller's zod object; `systemPrompt` its instructions.
 // `thinkingEnv` names the env var holding the Gemini 3 thinking level.
-function geminiProvider(model, { schema: zodSchema, systemPrompt, thinkingEnv = 'COLLECTIONS_GEMINI_THINKING' }) {
+// `extra` on classify: { images: [{ mime, data(base64), caption }], systemPrompt }
+// — images become inline parts (WYH AI reads job photos); a per-call
+// systemPrompt overrides the provider's (house rules + lessons change per run).
+function geminiProvider(model, { schema: zodSchema, systemPrompt, thinkingEnv = 'COLLECTIONS_GEMINI_THINKING', maxOutputTokens = 2048 }) {
   if (!process.env.GEMINI_API_KEY) return null;
   const { GoogleGenAI } = require('@google/genai');
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -84,16 +87,22 @@ function geminiProvider(model, { schema: zodSchema, systemPrompt, thinkingEnv = 
   const thinkingConfig = /^gemini-3/.test(model) ? { thinkingLevel: level } : undefined;
   return {
     name: `gemini:${model}`,
-    async classify(userText) {
+    async classify(userText, extra = {}) {
+      const parts = [{ text: userText }];
+      for (const img of Array.isArray(extra.images) ? extra.images : []) {
+        if (!img || !img.data) continue;
+        if (img.caption) parts.push({ text: String(img.caption) });
+        parts.push({ inlineData: { mimeType: img.mime || 'image/jpeg', data: img.data } });
+      }
       const res = await ai.models.generateContent({
         model,
-        contents: [{ role: 'user', parts: [{ text: userText }] }],
+        contents: [{ role: 'user', parts }],
         config: {
-          systemInstruction: systemPrompt,
+          systemInstruction: extra.systemPrompt || systemPrompt,
           responseMimeType: 'application/json',
           responseJsonSchema: schema,
           temperature: 0,
-          maxOutputTokens: 2048,
+          maxOutputTokens,
           ...(thinkingConfig ? { thinkingConfig } : {}),
         },
       });
@@ -114,11 +123,12 @@ function anthropicProvider(model, anthropic, { schema: zodSchema, systemPrompt }
   const { zodOutputFormat } = require('@anthropic-ai/sdk/helpers/zod');
   return {
     name: `anthropic:${model}`,
-    async classify(userText) {
+    async classify(userText, extra = {}) {
+      // Images are not forwarded here (text-only fallback for the WYH reader).
       const r = await anthropic.messages.parse({
         model,
         max_tokens: 1024,
-        system: systemPrompt,
+        system: extra.systemPrompt || systemPrompt,
         output_config: { format: zodOutputFormat(zodSchema) }, // no `effort`: Haiku 4.5 rejects it
         messages: [{ role: 'user', content: userText }],
       });
@@ -130,10 +140,10 @@ function anthropicProvider(model, anthropic, { schema: zodSchema, systemPrompt }
 
 // spec = "gemini:<model>" | "anthropic:<model>". `envName` only labels the
 // error so a bad COLLECTIONS_MODEL / MONITOR_MODEL names itself.
-function makeProvider(spec, anthropic, { schema, systemPrompt, thinkingEnv, envName = 'COLLECTIONS_MODEL' }) {
+function makeProvider(spec, anthropic, { schema, systemPrompt, thinkingEnv, envName = 'COLLECTIONS_MODEL', maxOutputTokens }) {
   const [kind, ...rest] = String(spec || DEFAULT_SPEC).split(':');
   const model = rest.join(':');
-  const opts = { schema, systemPrompt, thinkingEnv };
+  const opts = { schema, systemPrompt, thinkingEnv, ...(maxOutputTokens ? { maxOutputTokens } : {}) };
   if (kind === 'gemini') return { provider: geminiProvider(model || 'gemini-3.1-flash-lite', opts), model: model || 'gemini-3.1-flash-lite', kind };
   if (kind === 'anthropic') return { provider: anthropicProvider(model || 'claude-haiku-4-5', anthropic, opts), model: model || 'claude-haiku-4-5', kind };
   throw new Error(`${envName}: unknown provider "${kind}" (use gemini:<model> or anthropic:<model>)`);
