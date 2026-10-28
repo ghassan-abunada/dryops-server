@@ -290,8 +290,15 @@ module.exports = function mountSms(app, deps) {
     if (!conv.customer_name && m.customer_name) patch.customer_name = m.customer_name;
     if (m.lead_status && m.lead_status !== conv.lead_status) patch.lead_status = m.lead_status;
     if (!conv.source && m.source) patch.source = m.source;
+    // Stored before the tracking number was assigned to a location in Settings →
+    // Call Tracking: adopt the location (and account / company) now.
+    if (!conv.location_id && trackingRow && trackingRow.location_id) {
+      patch.location_id = trackingRow.location_id;
+      if (!conv.callrail_account_id && trackingRow.callrail_account_id) patch.callrail_account_id = trackingRow.callrail_account_id;
+      if (!conv.callrail_company_id && trackingRow.callrail_company_id) patch.callrail_company_id = trackingRow.callrail_company_id;
+    }
     if (!conv.job_id) {
-      const job = m.job_id ? { id: m.job_id } : await matchJobByPhone(custNorm || conv.customer_phone_norm, conv.location_id).catch(() => null);
+      const job = m.job_id ? { id: m.job_id } : await matchJobByPhone(custNorm || conv.customer_phone_norm, patch.location_id || conv.location_id).catch(() => null);
       if (job) patch.job_id = job.id;
     }
     if (Object.keys(patch).length) conv = (await patchRow('sms_conversations', conv.id, patch)) || { ...conv, ...patch };
@@ -573,6 +580,10 @@ module.exports = function mountSms(app, deps) {
                 if (!conv.callrail_account_id) p.callrail_account_id = String(acct);
                 if (!conv.source && c.source) p.source = c.source;
                 if (!conv.customer_name && c.customer_name) p.customer_name = c.customer_name;
+                if (!conv.location_id && trackingRow && trackingRow.location_id) {
+                  p.location_id = trackingRow.location_id;
+                  if (!conv.callrail_company_id && trackingRow.callrail_company_id) p.callrail_company_id = trackingRow.callrail_company_id;
+                }
                 if (Object.keys(p).length) conv = (await patchRow('sms_conversations', conv.id, p)) || { ...conv, ...p };
               }
               // Full thread when CallRail says there is something newer than we hold.
