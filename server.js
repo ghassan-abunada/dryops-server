@@ -926,10 +926,12 @@ app.post('/webhooks/callrail/calls', async (req, res) => {
 // keys already on the integration are kept. dry_run defaults to TRUE — the
 // response shows what would change; send { dry_run: false } to apply.
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://dryops-server-production.up.railway.app').trim().replace(/\/+$/, '');
-const CALLRAIL_WEBHOOK_EVENTS = ['pre_call_webhook', 'post_call_webhook', 'post_outbound_call_webhook', 'updated_call_webhook'];
-function callrailWebhookUrl() {
-  return `${PUBLIC_BASE_URL}/webhooks/callrail/calls?token=${encodeURIComponent(CALLRAIL_WEBHOOK_TOKEN)}`;
-}
+// Texting (sms.js, 2026-10-28): the two SMS keys post to /webhooks/callrail/sms
+// instead, so every key has its own URL — webhookTargets() is the single map.
+const { webhookTargets: callrailWebhookTargets } = require('./sms');
+const CALLRAIL_WEBHOOK_EVENTS = ['pre_call_webhook', 'post_call_webhook', 'post_outbound_call_webhook', 'updated_call_webhook', 'sms_received_webhook', 'sms_sent_webhook'];
+function callrailWebhookUrls() { return callrailWebhookTargets(PUBLIC_BASE_URL, CALLRAIL_WEBHOOK_TOKEN); }
+function callrailWebhookUrl() { return callrailWebhookUrls().post_call_webhook; }
 async function callrailCompanies(acct) {
   const out = [];
   for (let page = 1; page <= 20; page++) {
@@ -948,12 +950,13 @@ async function callrailWebhookIntegration(acct, companyId) {
   return list.find(i => String(i.type || '').toLowerCase() === 'webhooks') || null;
 }
 // Per event: 'ok' (our URL, current token), 'stale' (our URL, old token) or 'missing'.
-function callrailWebhookCoverage(config, url) {
-  const base = url.split('?')[0];
+function callrailWebhookCoverage(config, urls) {
   const arr = (v) => (Array.isArray(v) ? v : v ? [v] : []).map(String);
   return Object.fromEntries(CALLRAIL_WEBHOOK_EVENTS.map(k => {
+    const target = urls[k];
+    const base = target.split('?')[0];
     const ours = arr(config && config[k]).filter(u => u.split('?')[0] === base);
-    return [k, ours.includes(url) ? 'ok' : ours.length ? 'stale' : 'missing'];
+    return [k, ours.includes(target) ? 'ok' : ours.length ? 'stale' : 'missing'];
   }));
 }
 app.get('/admin/callrail/webhooks', requireCallAccess, async (req, res) => {
@@ -961,6 +964,7 @@ app.get('/admin/callrail/webhooks', requireCallAccess, async (req, res) => {
   if (!CALLRAIL_WEBHOOK_TOKEN) return res.status(400).json({ error: 'CALLRAIL_WEBHOOK_TOKEN is not set' });
   try {
     const url = callrailWebhookUrl();
+    const urls = callrailWebhookUrls();
     const nameById = Object.fromEntries((await callrailAccounts()).map(a => [String(a.id), a.name]));
     const companies = [];
     for (const acct of CALLRAIL_ACCOUNT_IDS) {
@@ -973,7 +977,7 @@ app.get('/admin/callrail/webhooks', requireCallAccess, async (req, res) => {
           company_id: c.id, company: c.name, status: c.status || null,
           integration_id: integration ? integration.id : null,
           state: integration ? integration.state : null,
-          events: callrailWebhookCoverage(config, url),
+          events: callrailWebhookCoverage(config, urls),
           other_urls: Object.fromEntries(Object.entries(config).filter(([k]) => !CALLRAIL_WEBHOOK_EVENTS.includes(k))),
           error,
         });
@@ -986,8 +990,8 @@ app.get('/admin/callrail/webhooks', requireCallAccess, async (req, res) => {
 // Resolves { summary, results } — never throws for a single company; a
 // companies-list failure for an account is reported as one 'failed' entry.
 async function installCallrailWebhooks({ dryRun = true, only = null } = {}) {
-  const url = callrailWebhookUrl();
-  const base = url.split('?')[0];
+  const urls = callrailWebhookUrls();
+  const url = urls.post_call_webhook;
   const results = [];
   for (const acct of CALLRAIL_ACCOUNT_IDS) {
     let companies;
@@ -1003,9 +1007,11 @@ async function installCallrailWebhooks({ dryRun = true, only = null } = {}) {
         const config = { ...((existing && existing.config) || {}) };
         let changed = false;
         for (const k of CALLRAIL_WEBHOOK_EVENTS) {
+          const target = urls[k];
+          const base = target.split('?')[0];
           const cur = (Array.isArray(config[k]) ? config[k] : config[k] ? [config[k]] : []).map(String);
           // Replace any older URL of ours (e.g. rotated token), keep foreign URLs.
-          const next = [...cur.filter(u => u.split('?')[0] !== base), url];
+          const next = [...cur.filter(u => u.split('?')[0] !== base), target];
           if (cur.length !== next.length || cur.some((u, i) => u !== next[i])) { config[k] = next; changed = true; }
         }
         const wasInactive = !!(existing && existing.state && existing.state !== 'active');
@@ -6922,6 +6928,17 @@ require('./wyh')(app, {
   sendEmail, escapeHtml, WEB_APP_URL,
   // Signs the short-lived recording links the app's inline player streams from.
   RECORDING_SECRET: (process.env.WYH_RECORDING_SECRET || JN_WEBHOOK_TOKEN || '').trim(),
+});
+
+// ── Two-way texting through CallRail (see sms.js) ───────────────────────────
+// Inbound webhook, replies / new conversations from the app, per-thread sync,
+// backfill + 15-minute reconcile, Expo push, and a secondary contact on an
+// existing job (POST /jobs/:id/contacts).
+require('./sms')(app, {
+  SUPABASE_URL, SUPABASE_SERVICE_KEY, PUBLIC_BASE_URL,
+  requireAuth, requireCallAccess, callrailWebhookOk, loadActor: intake.loadActor,
+  sbGet, sbPatch, sbUpsert, jnSendJson, UUID_RE,
+  callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
 });
 
 // ── WYH AI reviewer (Wash Your Hands suggestions; see wyhAi.js) ──────────────
