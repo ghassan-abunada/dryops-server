@@ -37,6 +37,17 @@ function normPhone(v) {
   const d = String(v ?? '').replace(/\D/g, '');
   return d.length >= 10 ? d.slice(-10) : (d || null);
 }
+// Strict E.164 for what we hand CallRail (its send endpoint answers 404
+// "Could not locate tracking number" to bare 10-digit numbers). Bare US
+// numbers get +1; the server.js twin is the same function.
+function toE164(v) {
+  const raw = String(v ?? '').trim();
+  if (/^\+\d{8,15}$/.test(raw)) return raw;
+  const d = raw.replace(/\D/g, '');
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith('1')) return `+${d}`;
+  return null;
+}
 function previewOf(content, mediaUrls) {
   const t = String(content || '').replace(/\s+/g, ' ').trim();
   if (t) return t.slice(0, 160);
@@ -421,7 +432,9 @@ module.exports = function mountSms(app, deps) {
   async function sendText({ account, companyId, trackingNumber, customerPhone, content, mediaUrl }) {
     if (!CALLRAIL_API_KEY) return { ok: false, error: 'CallRail is not configured on the server' };
     if (!account) return { ok: false, error: 'This tracking number has no CallRail account on file. Re-assign it under Settings → Call Tracking.' };
-    const body = { company_id: companyId, tracking_number: normPhone(trackingNumber), customer_phone_number: normPhone(customerPhone), content };
+    const tracking = toE164(trackingNumber), customer = toE164(customerPhone);
+    if (!tracking || !customer) return { ok: false, error: 'This thread has a phone number CallRail cannot text (needs a full US/CA number).' };
+    const body = { company_id: companyId, tracking_number: tracking, customer_phone_number: customer, content };
     if (mediaUrl) body.media_url = mediaUrl;
     const r = await callrailApiWrite(account, 'POST', 'text-messages.json', body);
     if (!r.ok) return { ok: false, status: r.status, error: callrailSendError(r) };
@@ -689,6 +702,7 @@ module.exports = function mountSms(app, deps) {
 
 module.exports.webhookTargets = webhookTargets;
 module.exports.classifyTextDelivery = classifyTextDelivery;
+module.exports.toE164 = toE164;
 module.exports.rankJobs = rankJobs;
 module.exports.previewOf = previewOf;
 module.exports.validateContent = validateContent;
