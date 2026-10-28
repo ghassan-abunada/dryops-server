@@ -296,5 +296,63 @@
       }
     },
     "expected": "WYH - Gus Abunada\nCall: Tue 10/27, 1:10 PM · (555) 111-2222 · Google\n\nAction Required:\n- Not walked — Customer cancelled\n\nChecklist:\n[✓] Call handled properly\n[ ] Walked: No — Customer cancelled\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Offer a same-day window\n- Response: did not respond well"
+  },
+  {
+    "name": "message lead (Google LSA text): Text: head line with the reply time, no recording line",
+    "input": {
+      "managerName": "Gus Abunada",
+      "callWhen": "Tue 10/28, 1:10 PM",
+      "callPhone": "4695550123",
+      "source": "Google LSA",
+      "kind": "message",
+      "replyMinutes": 4,
+      "repliedBy": "Ali Zayyad",
+      "job": {
+        "insurer": "State Farm",
+        "claim_number": "CLM-9"
+      },
+      "review": {
+        "call_taken_by_name": "Ali Zayyad",
+        "call_recording_reviewed": true,
+        "call_handled": true,
+        "walked": "yes",
+        "landed": true,
+        "photo_moisture": true,
+        "photo_damage": true,
+        "photo_wide": true,
+        "insurance": true,
+        "has_carrier": true,
+        "has_claim": true,
+        "tested": true,
+        "packout_sold": true,
+        "info_sufficient": true,
+        "operator_feedback_given": false
+      }
+    },
+    "expected": "WYH - Gus Abunada\nText: Tue 10/28, 1:10 PM · (469) 555-0123 · Google LSA · replied in 4 min by Ali Zayyad\n\nAction Required:\n- Give the operator feedback\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] Insurance: Yes — carrier: State Farm · claim #: CLM-9\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present\n\nCoaching: no feedback given"
+  },
+  {
+    "name": "message lead with no reply yet",
+    "input": {
+      "managerName": "Gus Abunada",
+      "callWhen": "Tue 10/28, 1:10 PM",
+      "callPhone": "9725550188",
+      "source": "Google LSA",
+      "kind": "message",
+      "replyMinutes": null,
+      "repliedBy": null,
+      "job": {},
+      "review": {
+        "call_handled": false,
+        "call_missed_reason": "Nobody answered the text",
+        "walked": "no",
+        "walk_reason": "customer_cancelled",
+        "info_sufficient": true,
+        "operator_feedback_given": true,
+        "operator_feedback": "Answer LSA texts within 5 minutes",
+        "operator_responded": "yes"
+      }
+    },
+    "expected": "WYH - Gus Abunada\nText: Tue 10/28, 1:10 PM · (972) 555-0188 · Google LSA · no reply\n\nAction Required:\n- Call handling: Nobody answered the text\n- Not walked — Customer cancelled\n\nChecklist:\n[ ] Call handled properly — Nobody answered the text\n[ ] Walked: No — Customer cancelled\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Answer LSA texts within 5 minutes\n- Response: responded well"
   }
 ]
