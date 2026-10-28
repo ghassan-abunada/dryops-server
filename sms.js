@@ -26,6 +26,8 @@ const DEDUPE_WINDOW_MS = 2 * 60 * 1000;
 const PUSH_THROTTLE_MS = 2 * 60 * 1000;
 const RECONCILE_INTERVAL_MS = 15 * 60 * 1000;
 const RECONCILE_LOOKBACK_DAYS = 2;
+// CallRail keeps texts for 25 months; the first boot with an empty table pulls all of it.
+const FULL_BACKFILL_DAYS = 770;
 const SENDER_ROLES = ['admin', 'owner', 'expansion_manager'];
 const SEES_ALL = ['admin', 'owner', 'executive'];
 
@@ -531,6 +533,7 @@ module.exports = function mountSms(app, deps) {
 
   // List CallRail conversations changed in the window and store them (+ their messages).
   let pullRunning = false;
+  let lastPull = null;   // { tag, days, startedAt, finishedAt, stats }
   async function pullConversations({ days = RECONCILE_LOOKBACK_DAYS, tag = 'reconcile' } = {}) {
     if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return { skipped: true };
     if (pullRunning) return { skipped: true, busy: true };
@@ -582,16 +585,36 @@ module.exports = function mountSms(app, deps) {
         }
       }
       log(tag, JSON.stringify(stats), `${days}d`);
+      lastPull = { ...(lastPull || {}), tag, days, finishedAt: new Date().toISOString(), stats };
       return stats;
     } finally { pullRunning = false; }
   }
+  // First boot with nothing stored: backfill every text CallRail still holds
+  // (owner 2026-10-28: "a backfill of all callrail messages"), in the background.
+  async function initialBackfillIfEmpty() {
+    const any = await sbGet('sms_conversations?select=id&limit=1');
+    if (!Array.isArray(any) || any.length) return { skipped: true };
+    log('backfill-initial', 'no conversations stored yet — pulling the full CallRail window');
+    lastPull = { tag: 'backfill-initial', days: FULL_BACKFILL_DAYS, startedAt: new Date().toISOString(), finishedAt: null, stats: null };
+    return pullConversations({ days: FULL_BACKFILL_DAYS, tag: 'backfill-initial' });
+  }
+  app.get('/admin/sms/status', requireCallAccess, async (req, res) => {
+    try {
+      const [convs, msgs] = await Promise.all([
+        fetch(`${SUPABASE_URL}/rest/v1/sms_conversations?select=id`, { method: 'HEAD', headers: { ...SB_HEADERS, Prefer: 'count=exact' } }),
+        fetch(`${SUPABASE_URL}/rest/v1/sms_messages?select=id`, { method: 'HEAD', headers: { ...SB_HEADERS, Prefer: 'count=exact' } }),
+      ]);
+      const count = (r) => { const m = /\/(\d+)$/.exec(r.headers.get('content-range') || ''); return m ? Number(m[1]) : null; };
+      res.json({ ok: true, running: pullRunning, last_pull: lastPull, conversations: count(convs), messages: count(msgs), reconcile_minutes: RECONCILE_INTERVAL_MS / 60000 });
+    } catch (e) { res.status(502).json({ error: e.message }); }
+  });
   app.post('/admin/sms/backfill', requireCallAccess, async (req, res) => {
-    const days = Math.max(1, Math.min(Number((req.body && req.body.days) || 30), 365));
+    const days = Math.max(1, Math.min(Number((req.body && req.body.days) || 30), FULL_BACKFILL_DAYS));
     try { res.json({ ok: true, ...(await pullConversations({ days, tag: 'backfill' })) }); }
     catch (err) { res.status(502).json({ error: err.message }); }
   });
   if (SUPABASE_SERVICE_KEY && CALLRAIL_API_KEY && CALLRAIL_ACCOUNT_IDS.length) {
-    setTimeout(() => pullConversations().catch((e) => warn('reconcile failed', e.message)), 90 * 1000);
+    setTimeout(() => initialBackfillIfEmpty().then((r) => { if (r && r.skipped) return pullConversations(); }).catch((e) => warn('initial backfill failed', e.message)), 90 * 1000);
     setInterval(() => pullConversations().catch((e) => warn('reconcile failed', e.message)), RECONCILE_INTERVAL_MS);
   }
 
