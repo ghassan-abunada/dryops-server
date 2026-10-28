@@ -78,3 +78,12 @@ test('callrailSendError: rate limit, opt-out and registration read as plain sent
   assert.match(callrailSendError({ status: 422, json: { errors: ['Company is not registered for texting'] } }), /registered for texting/);
   assert.match(callrailSendError({ status: 500, json: null, text: 'boom' }), /rejected the text \(500\): boom/);
 });
+
+test('toE164: CallRail send gets full E.164 numbers, never bare digits', () => {
+  const { toE164 } = require('../sms');
+  assert.equal(toE164('+14803728411'), '+14803728411');
+  assert.equal(toE164('4803728411'), '+14803728411');
+  assert.equal(toE164('(480) 372-8411'), '+14803728411');
+  assert.equal(toE164('14803728411'), '+14803728411');
+  assert.equal(toE164('12345'), null);
+});

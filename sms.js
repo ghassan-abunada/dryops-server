@@ -13,6 +13,7 @@
 //   POST /sms/conversations                { location_id, tracking_number_id, customer_phone, customer_name?, job_id?, content }
 //   POST /sms/conversations/:id/sync       pull the full CallRail history for one thread
 //   POST /admin/sms/backfill               { days } (admin/owner/executive)
+//   GET  /admin/texting/status             backfill / reconcile progress + stored counts (the Twilio ETA-text status keeps /admin/sms/status)
 //   POST /jobs/:id/contacts                add a secondary contact to an existing JN job
 //   POST /me/push-token                    { token, platform }
 //
@@ -35,6 +36,17 @@ const SEES_ALL = ['admin', 'owner', 'executive'];
 function normPhone(v) {
   const d = String(v ?? '').replace(/\D/g, '');
   return d.length >= 10 ? d.slice(-10) : (d || null);
+}
+// Strict E.164 for what we hand CallRail (its send endpoint answers 404
+// "Could not locate tracking number" to bare 10-digit numbers). Bare US
+// numbers get +1; the server.js twin is the same function.
+function toE164(v) {
+  const raw = String(v ?? '').trim();
+  if (/^\+\d{8,15}$/.test(raw)) return raw;
+  const d = raw.replace(/\D/g, '');
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith('1')) return `+${d}`;
+  return null;
 }
 function previewOf(content, mediaUrls) {
   const t = String(content || '').replace(/\s+/g, ' ').trim();
@@ -289,8 +301,15 @@ module.exports = function mountSms(app, deps) {
     if (!conv.customer_name && m.customer_name) patch.customer_name = m.customer_name;
     if (m.lead_status && m.lead_status !== conv.lead_status) patch.lead_status = m.lead_status;
     if (!conv.source && m.source) patch.source = m.source;
+    // Stored before the tracking number was assigned to a location in Settings →
+    // Call Tracking: adopt the location (and account / company) now.
+    if (!conv.location_id && trackingRow && trackingRow.location_id) {
+      patch.location_id = trackingRow.location_id;
+      if (!conv.callrail_account_id && trackingRow.callrail_account_id) patch.callrail_account_id = trackingRow.callrail_account_id;
+      if (!conv.callrail_company_id && trackingRow.callrail_company_id) patch.callrail_company_id = trackingRow.callrail_company_id;
+    }
     if (!conv.job_id) {
-      const job = m.job_id ? { id: m.job_id } : await matchJobByPhone(custNorm || conv.customer_phone_norm, conv.location_id).catch(() => null);
+      const job = m.job_id ? { id: m.job_id } : await matchJobByPhone(custNorm || conv.customer_phone_norm, patch.location_id || conv.location_id).catch(() => null);
       if (job) patch.job_id = job.id;
     }
     if (Object.keys(patch).length) conv = (await patchRow('sms_conversations', conv.id, patch)) || { ...conv, ...patch };
@@ -413,7 +432,9 @@ module.exports = function mountSms(app, deps) {
   async function sendText({ account, companyId, trackingNumber, customerPhone, content, mediaUrl }) {
     if (!CALLRAIL_API_KEY) return { ok: false, error: 'CallRail is not configured on the server' };
     if (!account) return { ok: false, error: 'This tracking number has no CallRail account on file. Re-assign it under Settings → Call Tracking.' };
-    const body = { company_id: companyId, tracking_number: normPhone(trackingNumber), customer_phone_number: normPhone(customerPhone), content };
+    const tracking = toE164(trackingNumber), customer = toE164(customerPhone);
+    if (!tracking || !customer) return { ok: false, error: 'This thread has a phone number CallRail cannot text (needs a full US/CA number).' };
+    const body = { company_id: companyId, tracking_number: tracking, customer_phone_number: customer, content };
     if (mediaUrl) body.media_url = mediaUrl;
     const r = await callrailApiWrite(account, 'POST', 'text-messages.json', body);
     if (!r.ok) return { ok: false, status: r.status, error: callrailSendError(r) };
@@ -572,6 +593,10 @@ module.exports = function mountSms(app, deps) {
                 if (!conv.callrail_account_id) p.callrail_account_id = String(acct);
                 if (!conv.source && c.source) p.source = c.source;
                 if (!conv.customer_name && c.customer_name) p.customer_name = c.customer_name;
+                if (!conv.location_id && trackingRow && trackingRow.location_id) {
+                  p.location_id = trackingRow.location_id;
+                  if (!conv.callrail_company_id && trackingRow.callrail_company_id) p.callrail_company_id = trackingRow.callrail_company_id;
+                }
                 if (Object.keys(p).length) conv = (await patchRow('sms_conversations', conv.id, p)) || { ...conv, ...p };
               }
               // Full thread when CallRail says there is something newer than we hold.
@@ -598,7 +623,7 @@ module.exports = function mountSms(app, deps) {
     lastPull = { tag: 'backfill-initial', days: FULL_BACKFILL_DAYS, startedAt: new Date().toISOString(), finishedAt: null, stats: null };
     return pullConversations({ days: FULL_BACKFILL_DAYS, tag: 'backfill-initial' });
   }
-  app.get('/admin/sms/status', requireCallAccess, async (req, res) => {
+  app.get('/admin/texting/status', requireCallAccess, async (req, res) => {
     try {
       const [convs, msgs] = await Promise.all([
         fetch(`${SUPABASE_URL}/rest/v1/sms_conversations?select=id`, { method: 'HEAD', headers: { ...SB_HEADERS, Prefer: 'count=exact' } }),
@@ -677,6 +702,7 @@ module.exports = function mountSms(app, deps) {
 
 module.exports.webhookTargets = webhookTargets;
 module.exports.classifyTextDelivery = classifyTextDelivery;
+module.exports.toE164 = toE164;
 module.exports.rankJobs = rankJobs;
 module.exports.previewOf = previewOf;
 module.exports.validateContent = validateContent;
