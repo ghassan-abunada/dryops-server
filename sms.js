@@ -145,6 +145,39 @@ module.exports = function mountSms(app, deps) {
     trackingCache = { at: Date.now(), byNorm };
     return byNorm;
   }
+  // CallRail tracker names → location_tracking_numbers.label (the app shows the
+  // name wherever a number is picked). Hourly, and after an assignment lands.
+  let labelsAt = 0;
+  async function refreshTrackingLabels(force = false) {
+    if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return { updated: 0 };
+    if (!force && Date.now() - labelsAt < 60 * 60 * 1000) return { updated: 0, skipped: true };
+    labelsAt = Date.now();
+    const rows = (await sbGet('location_tracking_numbers?select=id,phone_norm,label&active=eq.true')) || [];
+    const byNorm = new Map(rows.map((r) => [String(r.phone_norm), r]));
+    let updated = 0;
+    for (const acct of CALLRAIL_ACCOUNT_IDS) {
+      for (let page = 1; page <= 20; page++) {
+        const r = await callrailApi(acct, `trackers.json?per_page=250&page=${page}`);
+        if (!r.ok) { warn('trackers', acct, r.status); break; }
+        const list = (r.json && (r.json.trackers || r.json.data)) || [];
+        for (const t of list) {
+          const name = String(t.name || '').trim();
+          const nums = Array.isArray(t.tracking_numbers) ? t.tracking_numbers : (t.tracking_number ? [t.tracking_number] : []);
+          for (const n of nums) {
+            const row = byNorm.get(normPhone(n) || '');
+            if (row && name && row.label !== name) { await sbPatch('location_tracking_numbers', `id=eq.${enc(row.id)}`, { label: name }).catch(() => {}); row.label = name; updated++; }
+          }
+        }
+        if (list.length < 250) break;
+      }
+    }
+    if (updated) log('tracker labels', updated);
+    return { updated };
+  }
+  app.post('/admin/callrail/tracker-labels', requireCallAccess, async (req, res) => {
+    try { res.json({ ok: true, ...(await refreshTrackingLabels(true)) }); } catch (e) { res.status(502).json({ error: e.message }); }
+  });
+
   // Which CallRail account owns a tracking number (stored on the row; else try each).
   async function accountFor(trackingRow, convRow) {
     if (convRow && convRow.callrail_account_id) return String(convRow.callrail_account_id);
@@ -504,6 +537,7 @@ module.exports = function mountSms(app, deps) {
     pullRunning = true;
     const stats = { conversations: 0, messages: 0, errors: 0 };
     try {
+      await refreshTrackingLabels().catch((e) => warn('labels', e.message));
       const byNorm = await trackingNumbers(true);
       const end = new Date(Date.now() + 86400 * 1000).toISOString().slice(0, 10);
       const start = new Date(Date.now() - days * 86400 * 1000).toISOString().slice(0, 10);
