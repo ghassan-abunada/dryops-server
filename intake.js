@@ -373,6 +373,7 @@ module.exports = function mountIntake(app, deps) {
     if (body.lead.lead_type && !LEAD_TYPES.includes(body.lead.lead_type)) return bad('lead.lead_type', 'Invalid lead type');
     if (body.sales_rep_profile_id && !UUID_RE.test(String(body.sales_rep_profile_id))) return bad('sales_rep_profile_id', 'Invalid sales rep');
     if (body.referring_job_id && !UUID_RE.test(String(body.referring_job_id))) return bad('referring_job_id', 'Invalid referring job');
+    if (body.sms_conversation_id && !UUID_RE.test(String(body.sms_conversation_id))) return bad('sms_conversation_id', 'Invalid text conversation');
     const d = body.details || {};
     if (body.record_type === 'Mitigation') {
       if (!clean(d.cause_of_damage)) return bad('details.cause_of_damage', 'Cause of damage is required');
@@ -692,6 +693,8 @@ module.exports = function mountIntake(app, deps) {
         });
         for (const ct of contacts) await sbInsert('job_contacts', ct).catch((e) => warn(rid, 'job_contacts insert', e.message));
         if (row.callrail_call_id) await sbPatch('calls', `callrail_id=eq.${enc(row.callrail_call_id)}`, { job_id: jobId }).catch(() => {});
+        // Job created from a text thread (Messages → New job): link the conversation and name the texter.
+        if (body.sms_conversation_id) await sbPatch('sms_conversations', `id=eq.${enc(body.sms_conversation_id)}`, { job_id: jobId, customer_name: contactDisplayName || null }).catch((e) => warn(rid, 'sms link', e.message));
       } else warnings.push('LOCAL_UPSERT_FAILED');
     } catch (err) { warn(rid, 'local upsert failed', err.message); warnings.push('LOCAL_UPSERT_FAILED'); }
     step('local', { jobId });
