@@ -12,7 +12,7 @@
 //   POST /sms/conversations/:id/reply      { content, media_url? }
 //   POST /sms/conversations                { location_id, tracking_number_id, customer_phone, customer_name?, job_id?, content }
 //   POST /sms/conversations/:id/sync       pull the full CallRail history for one thread
-//   POST /admin/sms/backfill               { days } (admin/owner/executive)
+//   POST /admin/sms/backfill               { days } (admin/owner/executive; default 90, max 770, paced)
 //   GET  /admin/texting/status             backfill / reconcile progress + stored counts (the Twilio ETA-text status keeps /admin/sms/status)
 //   POST /jobs/:id/contacts                add a secondary contact to an existing JN job
 //   POST /me/push-token                    { token, platform }
@@ -27,8 +27,14 @@ const DEDUPE_WINDOW_MS = 2 * 60 * 1000;
 const PUSH_THROTTLE_MS = 2 * 60 * 1000;
 const RECONCILE_INTERVAL_MS = 15 * 60 * 1000;
 const RECONCILE_LOOKBACK_DAYS = 2;
+// Pacing (owner 2026-10-28 after the unpaced 25-month pull starved the
+// database of disk IO and took the app down): one thread at a time with a
+// pause between messages, threads and pages. ~80 database calls a minute.
+const PACE_MS = { message: 150, conversation: 600, page: 3000 };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // CallRail keeps texts for 25 months; the first boot with an empty table pulls all of it.
-const FULL_BACKFILL_DAYS = 770;
+const BACKFILL_DAYS = 90;          // boot pull + default for POST /admin/sms/backfill (owner: "90 days is fine")
+const MAX_BACKFILL_DAYS = 770;     // CallRail keeps 25 months; an explicit admin ask may go that far, paced
 const SENDER_ROLES = ['admin', 'owner', 'expansion_manager'];
 const SEES_ALL = ['admin', 'owner', 'executive'];
 
@@ -231,11 +237,11 @@ module.exports = function mountSms(app, deps) {
    * classifyTextDelivery (+ optional sent_by / sent_by_name / job_id /
    * customer_name / source). Returns { conversation, message, inserted }.
    */
-  async function ingestMessage(m, { trackingRow: trackingRowIn, notify = true } = {}) {
+  async function ingestMessage(m, { trackingRow: trackingRowIn, notify = true, conv: convIn = null, knownIds = null, skipJobMatch = false } = {}) {
     const trackingNorm = normPhone(m.tracking);
     const custNorm = normPhone(m.customer);
     const trackingRow = trackingRowIn || (trackingNorm ? (await trackingNumbers()).get(trackingNorm) : null) || null;
-    let conv = await findConversation({ callrailConversationId: m.callrail_conversation_id, trackingNorm, custNorm });
+    let conv = convIn || await findConversation({ callrailConversationId: m.callrail_conversation_id, trackingNorm, custNorm });
     const now = new Date().toISOString();
     if (!conv) {
       conv = await sbInsertRow('sms_conversations', {
@@ -254,10 +260,15 @@ module.exports = function mountSms(app, deps) {
       });
     }
 
-    // Dedupe: already stored by CallRail id?
+    // Dedupe: already stored by CallRail id? (a sync hands us the thread's
+    // stored ids in one read, so no per-message lookup there)
     if (m.callrail_message_id) {
-      const dup = await sbGet(`sms_messages?callrail_message_id=eq.${enc(m.callrail_message_id)}&select=id&limit=1`);
-      if (Array.isArray(dup) && dup[0]) return { conversation: conv, message: dup[0], inserted: false };
+      if (knownIds) {
+        if (knownIds.has(String(m.callrail_message_id))) return { conversation: conv, message: null, inserted: false };
+      } else {
+        const dup = await sbGet(`sms_messages?callrail_message_id=eq.${enc(m.callrail_message_id)}&select=id&limit=1`);
+        if (Array.isArray(dup) && dup[0]) return { conversation: conv, message: dup[0], inserted: false };
+      }
     }
     let message = null;
     // Our own send confirmed by CallRail's sent-webhook: attach the id instead of a second row.
@@ -308,7 +319,7 @@ module.exports = function mountSms(app, deps) {
       if (!conv.callrail_account_id && trackingRow.callrail_account_id) patch.callrail_account_id = trackingRow.callrail_account_id;
       if (!conv.callrail_company_id && trackingRow.callrail_company_id) patch.callrail_company_id = trackingRow.callrail_company_id;
     }
-    if (!conv.job_id) {
+    if (!conv.job_id && (m.job_id || !skipJobMatch)) {
       const job = m.job_id ? { id: m.job_id } : await matchJobByPhone(custNorm || conv.customer_phone_norm, patch.location_id || conv.location_id).catch(() => null);
       if (job) patch.job_id = job.id;
     }
@@ -530,10 +541,19 @@ module.exports = function mountSms(app, deps) {
     if (!r.ok || !r.json) return { synced: 0, error: `CallRail ${r.status}` };
     const j = r.json;
     const msgs = (Array.isArray(j.messages) ? j.messages : []).slice().sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+    const stored = (await sbGet(`sms_messages?conversation_id=eq.${enc(conv.id)}&select=callrail_message_id&limit=2000`)) || [];
+    const knownIds = new Set(stored.map((r) => String(r.callrail_message_id || '')).filter(Boolean));
+    const fresh = msgs.filter((x) => x.id == null || !knownIds.has(String(x.id)));
     let synced = 0;
-    for (const x of msgs) {
-      const out = await ingestMessage({ ...mapCallrailMessage(x, conv, conv.callrail_conversation_id), source: j.source || null, lead_status: j.lead_status || null, customer_name: j.customer_name || null }, { notify: false });
+    // One job match per thread (not one per message), and only when something is new.
+    let jobId = conv.job_id || null;
+    if (!jobId && fresh.length) { const job = await matchJobByPhone(conv.customer_phone_norm, conv.location_id).catch(() => null); jobId = job ? job.id : null; }
+    for (const x of fresh) {
+      const out = await ingestMessage({ ...mapCallrailMessage(x, conv, conv.callrail_conversation_id), source: j.source || null, lead_status: j.lead_status || null, customer_name: j.customer_name || null, job_id: !conv.job_id && jobId ? jobId : null },
+        { notify: false, conv, knownIds, skipJobMatch: true });
       if (out.inserted) synced++;
+      if (out.conversation) conv = out.conversation;
+      await sleep(PACE_MS.message);
     }
     const patch = {};
     if (j.source && !conv.source) patch.source = j.source;
@@ -605,8 +625,10 @@ module.exports = function mountSms(app, deps) {
                 stats.messages += s.synced || 0;
               }
             } catch (e) { stats.errors++; warn(tag, 'conversation', e.message); }
+            await sleep(PACE_MS.conversation);
           }
           if (list.length < 250) break;
+          await sleep(PACE_MS.page);
         }
       }
       log(tag, JSON.stringify(stats), `${days}d`);
@@ -614,14 +636,12 @@ module.exports = function mountSms(app, deps) {
       return stats;
     } finally { pullRunning = false; }
   }
-  // First boot with nothing stored: backfill every text CallRail still holds
-  // (owner 2026-10-28: "a backfill of all callrail messages"), in the background.
-  async function initialBackfillIfEmpty() {
-    const any = await sbGet('sms_conversations?select=id&limit=1');
-    if (!Array.isArray(any) || any.length) return { skipped: true };
-    log('backfill-initial', 'no conversations stored yet — pulling the full CallRail window');
-    lastPull = { tag: 'backfill-initial', days: FULL_BACKFILL_DAYS, startedAt: new Date().toISOString(), finishedAt: null, stats: null };
-    return pullConversations({ days: FULL_BACKFILL_DAYS, tag: 'backfill-initial' });
+  // Every boot: a paced 90-day pull in the background (idempotent — threads
+  // we already hold cost one read each, only new messages are written), then
+  // the 15-minute 2-day reconcile keeps up.
+  async function bootPull() {
+    lastPull = { tag: 'backfill-boot', days: BACKFILL_DAYS, startedAt: new Date().toISOString(), finishedAt: null, stats: null };
+    return pullConversations({ days: BACKFILL_DAYS, tag: 'backfill-boot' });
   }
   app.get('/admin/texting/status', requireCallAccess, async (req, res) => {
     try {
@@ -634,12 +654,12 @@ module.exports = function mountSms(app, deps) {
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
   app.post('/admin/sms/backfill', requireCallAccess, async (req, res) => {
-    const days = Math.max(1, Math.min(Number((req.body && req.body.days) || 30), FULL_BACKFILL_DAYS));
+    const days = Math.max(1, Math.min(Number((req.body && req.body.days) || BACKFILL_DAYS), MAX_BACKFILL_DAYS));
     try { res.json({ ok: true, ...(await pullConversations({ days, tag: 'backfill' })) }); }
     catch (err) { res.status(502).json({ error: err.message }); }
   });
   if (SUPABASE_SERVICE_KEY && CALLRAIL_API_KEY && CALLRAIL_ACCOUNT_IDS.length) {
-    setTimeout(() => initialBackfillIfEmpty().then((r) => { if (r && r.skipped) return pullConversations(); }).catch((e) => warn('initial backfill failed', e.message)), 90 * 1000);
+    setTimeout(() => bootPull().catch((e) => warn('boot pull failed', e.message)), 90 * 1000);
     setInterval(() => pullConversations().catch((e) => warn('reconcile failed', e.message)), RECONCILE_INTERVAL_MS);
   }
 
