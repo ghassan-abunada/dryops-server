@@ -36,7 +36,8 @@ const NOT_LANDED_LABEL = { quote: 'Gave HO a quote', no_damage: 'No damage found
 const NOT_TESTED_LABEL = { refused: 'HO/adjuster refused', results_provided: 'Results provided', other: 'Other' };
 const NO_PO_LABEL = { small_area: 'Small area', empty_rooms: 'Empty rooms', content_manipulation: 'Content manipulation requested', other: 'Other' };
 const WALK_REASON_LABEL = { customer_cancelled: 'Customer cancelled', scheduled_later: 'Scheduled later', other: 'Other' };
-const FOLLOW_UP_LABEL = { major_concerns: 'Major concerns', file_incomplete: 'File incomplete', other: 'Other' };
+const OPERATOR_RESPONDED_LABEL = { yes: 'responded well', no: 'did not respond well', pending: 'no response yet (follow up)' };
+const FOLLOW_UP_LABEL = { waiting: 'Waiting on someone', not_landed: 'Not landed', major_concerns: 'Major concerns', file_incomplete: 'File incomplete', other: 'Other' };
 // "Outside of home" dropped 2026-10-26 (owner); the column stays, ignored.
 const PHOTO_LABELS = [
   { key: 'photo_moisture', label: 'moisture readings' },
@@ -147,13 +148,20 @@ function buildWyhNote(i) {
       actions.push('Add date of loss, category and cause to the file');
     }
   }
-  if (r.called_back != null || r.missed_reason || r.operator_feedback_given != null || r.operator_response) {
+  if (r.called_back != null || r.missed_reason) {
     const parts = [];
     if (r.called_back != null) parts.push(r.called_back ? 'called back' : 'not called back');
     if (r.missed_reason) parts.push(`reason: ${String(r.missed_reason).trim()}`);
-    if (r.operator_feedback_given != null) parts.push(r.operator_feedback_given ? 'feedback given to operator' : 'no feedback given');
-    if (r.operator_response) parts.push(`response: ${String(r.operator_response).trim()}`);
     check.push(`Missed call: ${parts.join(' · ')}`);
+  }
+  // Coaching (every review type): did the operator get feedback, what, and how they took it.
+  const coaching = [];
+  if (r.operator_feedback_given != null) {
+    coaching.push(r.operator_feedback_given ? 'Coaching: feedback given' : 'Coaching: no feedback given');
+    if (r.operator_feedback_given && String(r.operator_feedback || '').trim()) coaching.push(`- Feedback: ${String(r.operator_feedback || '').trim()}`);
+    if (r.operator_feedback_given && r.operator_responded && OPERATOR_RESPONDED_LABEL[r.operator_responded]) coaching.push(`- Response: ${OPERATOR_RESPONDED_LABEL[r.operator_responded]}`);
+    else if (r.operator_feedback_given && String(r.operator_response || '').trim()) coaching.push(`- Response: ${String(r.operator_response || '').trim()}`);
+    if (!r.operator_feedback_given) actions.push('Give the operator feedback');
   }
 
   // "Needs a follow up" leads Action Required: the file comes back at the end of the week.
@@ -171,6 +179,7 @@ function buildWyhNote(i) {
   if (actions.length) { out.push('Action Required:'); for (const a of actions) out.push(`- ${a}`); }
   else out.push('Action Required: none');
   if (check.length) { out.push(''); out.push('Checklist:'); out.push(...check); }
+  if (coaching.length) { out.push(''); out.push(...coaching); }
   return out.join('\n');
 }
 
