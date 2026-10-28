@@ -48,6 +48,14 @@ const PHOTO_LABELS = [
 const other = (note) => (note && String(note).trim() ? `: ${String(note).trim()}` : '');
 const followUpReasonLabel = (r) => (r && FOLLOW_UP_LABEL[r]) || '';
 
+/** "replied in 4 min by Ali" / "replied in 2 h 10 min" / "no reply" for the Text: line (twin of lib/wyh.ts). */
+function replyPhrase(minutes, by) {
+  if (minutes == null) return 'no reply';
+  const span = minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60} min` : ''}`;
+  const who = String(by || '').trim();
+  return `replied in ${span}${who ? ` by ${who}` : ''}`;
+}
+
 function buildWyhNote(i) {
   const r = i.review;
   // Owner rule: a checkmark, never an x.
@@ -58,8 +66,13 @@ function buildWyhNote(i) {
 
   head.push(`WYH - ${String(i.managerName || '').trim()}`);
   const takenBy = String(r.call_taken_by_name || '').trim();
-  head.push(`Call: ${[i.callWhen, fmtPhone(i.callPhone) || null, i.source, takenBy ? `taken by ${takenBy}` : null].filter(Boolean).join(' · ')}`);
-  if (r.call_recording_reviewed) head.push('Call recording reviewed');
+  if (i.kind === 'message') {
+    // A Google LSA text lead: when it came in, who answered and how fast.
+    head.push(`Text: ${[i.callWhen, fmtPhone(i.callPhone) || null, i.source, replyPhrase(i.replyMinutes, i.repliedBy || takenBy || null)].filter(Boolean).join(' · ')}`);
+  } else {
+    head.push(`Call: ${[i.callWhen, fmtPhone(i.callPhone) || null, i.source, takenBy ? `taken by ${takenBy}` : null].filter(Boolean).join(' · ')}`);
+    if (r.call_recording_reviewed) head.push('Call recording reviewed');
+  }
 
   if (r.call_handled != null) {
     const why = String(r.call_missed_reason || '').trim();
@@ -183,4 +196,4 @@ function buildWyhNote(i) {
   return out.join('\n');
 }
 
-module.exports = { buildWyhNote, fmtPhone, fmtMonD, fmtWindow };
+module.exports = { replyPhrase, buildWyhNote, fmtPhone, fmtMonD, fmtWindow };
