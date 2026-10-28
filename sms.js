@@ -232,7 +232,7 @@ module.exports = function mountSms(app, deps) {
         media_urls: Array.isArray(m.media_urls) ? m.media_urls : [],
         status: m.status || (m.direction === 'inbound' ? 'received' : 'sent'),
         sent_by: m.sent_by || null,
-        sent_by_name: m.direction === 'outbound' ? (m.sent_by_name || 'CallRail') : null,
+        sent_by_name: m.direction === 'outbound' ? (m.sent_by_name || null) : null,   // unknown until attributeSender names the CallRail user
         created_at: m.created_at || now,
       });
       inserted = true;
@@ -248,7 +248,7 @@ module.exports = function mountSms(app, deps) {
     } else {
       if (!conv.last_outbound_at || at > conv.last_outbound_at) patch.last_outbound_at = at;
       const firstIn = conv.first_inbound_at || patch.first_inbound_at;
-      if (firstIn && at >= firstIn && (!conv.first_reply_at || at < conv.first_reply_at)) { patch.first_reply_at = at; patch.first_reply_by_name = m.sent_by_name || 'CallRail'; }
+      if (firstIn && at >= firstIn && (!conv.first_reply_at || at < conv.first_reply_at)) { patch.first_reply_at = at; patch.first_reply_by_name = m.sent_by_name || null; }
     }
     if (!conv.callrail_conversation_id && m.callrail_conversation_id) patch.callrail_conversation_id = m.callrail_conversation_id;
     if (!conv.customer_name && m.customer_name) patch.customer_name = m.customer_name;
@@ -270,7 +270,25 @@ module.exports = function mountSms(app, deps) {
       }).catch(() => {});
     }
     if (inserted && m.direction === 'inbound' && notify) pushInbound(conv, message).catch((e) => warn('push', e.message));
+    // A text typed in CallRail's own inbox arrives without its sender; the
+    // conversation record names the user (owner 2026-10-28: show the person, never "CallRail").
+    if (inserted && m.direction === 'outbound' && !m.sent_by_name && m.callrail_message_id) {
+      attributeSender(conv, message).catch((e) => warn('attribute sender', e.message));
+    }
     return { conversation: conv, message, inserted };
+  }
+
+  async function attributeSender(conv, message) {
+    const facts = await fetchConversationFacts(conv);
+    if (!facts) return;
+    const hit = facts.messages.find((x) => String(x.id) === String(message.callrail_message_id));
+    const name = hit && hit.user && hit.user.name ? String(hit.user.name).trim() : '';
+    if (!name) return;
+    await patchRow('sms_messages', message.id, { sent_by_name: name });
+    const fresh = await loadConversation(conv.id);
+    if (fresh && fresh.first_reply_at && !fresh.first_reply_by_name && fresh.first_reply_at === message.created_at) {
+      await patchRow('sms_conversations', conv.id, { first_reply_by_name: name });
+    }
   }
 
   async function fetchConversationFacts(conv) {
@@ -446,7 +464,7 @@ module.exports = function mountSms(app, deps) {
       callrail_message_id: x.id != null ? String(x.id) : null, callrail_conversation_id: callrailConversationId,
       content: x.content != null ? String(x.content) : '', message_type: String(x.type || '').toLowerCase() === 'mms' || media.length ? 'mms' : 'sms', media_urls: media,
       created_at: toISO(x.created_at) || new Date().toISOString(), status: x.status || null,
-      sent_by_name: direction === 'outbound' ? ((x.user && x.user.name) || 'CallRail') : null,
+      sent_by_name: direction === 'outbound' ? ((x.user && x.user.name) || null) : null,
     };
   }
   async function syncConversation(conv) {
