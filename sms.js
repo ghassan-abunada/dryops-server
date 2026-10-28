@@ -173,7 +173,7 @@ module.exports = function mountSms(app, deps) {
     if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return { updated: 0 };
     if (!force && Date.now() - labelsAt < 60 * 60 * 1000) return { updated: 0, skipped: true };
     labelsAt = Date.now();
-    const rows = (await sbGet('location_tracking_numbers?select=id,phone_norm,label&active=eq.true')) || [];
+    const rows = (await sbGet('location_tracking_numbers?select=id,phone_norm,label,callrail_company_id,callrail_account_id&active=eq.true')) || [];
     const byNorm = new Map(rows.map((r) => [String(r.phone_norm), r]));
     let updated = 0;
     for (const acct of CALLRAIL_ACCOUNT_IDS) {
@@ -183,16 +183,23 @@ module.exports = function mountSms(app, deps) {
         const list = (r.json && (r.json.trackers || r.json.data)) || [];
         for (const t of list) {
           const name = String(t.name || '').trim();
+          const companyId = (t.company && t.company.id != null) ? String(t.company.id) : (t.company_id != null ? String(t.company_id) : null);
           const nums = Array.isArray(t.tracking_numbers) ? t.tracking_numbers : (t.tracking_number ? [t.tracking_number] : []);
           for (const n of nums) {
             const row = byNorm.get(normPhone(n) || '');
-            if (row && name && row.label !== name) { await sbPatch('location_tracking_numbers', `id=eq.${enc(row.id)}`, { label: name }).catch(() => {}); row.label = name; updated++; }
+            if (!row) continue;
+            const patch = {};
+            if (name && row.label !== name) patch.label = name;
+            // Numbers move between CallRail companies; a stale id makes CallRail 404 a send.
+            if (companyId && row.callrail_company_id !== companyId) patch.callrail_company_id = companyId;
+            if (row.callrail_account_id !== String(acct)) patch.callrail_account_id = String(acct);
+            if (Object.keys(patch).length) { await sbPatch('location_tracking_numbers', `id=eq.${enc(row.id)}`, patch).catch(() => {}); Object.assign(row, patch); updated++; }
           }
         }
         if (list.length < 250) break;
       }
     }
-    if (updated) log('tracker labels', updated);
+    if (updated) log('tracker labels/companies', updated);
     return { updated };
   }
   app.post('/admin/callrail/tracker-labels', requireCallAccess, async (req, res) => {
@@ -523,9 +530,18 @@ module.exports = function mountSms(app, deps) {
         if (!canSee(actor, job[0].location_id)) return res.status(403).json({ error: 'Job outside your locations' });
         jobId = job[0].id;
       }
-      const account = await accountFor(trackingRow, null);
+      let account = await accountFor(trackingRow, null);
       if (!trackingRow.callrail_company_id) return res.status(400).json({ error: 'This tracking number has no CallRail company on file. Re-assign it under Settings → Call Tracking.' });
-      const sent = await sendText({ account, companyId: trackingRow.callrail_company_id, trackingNumber: trackingRow.phone_number, customerPhone: custNorm, content: v.content });
+      let sent = await sendText({ account, companyId: trackingRow.callrail_company_id, trackingNumber: trackingRow.phone_number, customerPhone: custNorm, content: v.content });
+      if (!sent.ok && sent.status === 404) {
+        // The row's company may be stale (numbers move between CallRail companies): refresh from CallRail and try once more.
+        await refreshTrackingLabels(true).catch(() => {});
+        const fresh = (await trackingNumbers(true)).get(trackingRow.phone_norm);
+        if (fresh && (fresh.callrail_company_id !== trackingRow.callrail_company_id || fresh.callrail_account_id !== trackingRow.callrail_account_id)) {
+          account = await accountFor(fresh, null);
+          sent = await sendText({ account, companyId: fresh.callrail_company_id, trackingNumber: fresh.phone_number, customerPhone: custNorm, content: v.content });
+        }
+      }
       if (!sent.ok) return res.status(sent.status === 429 ? 429 : 502).json({ error: sent.error });
       const { conversation, message } = await ingestMessage({
         direction: 'outbound', tracking: trackingRow.phone_number, customer: custNorm,
