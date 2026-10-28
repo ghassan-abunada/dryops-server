@@ -13,6 +13,7 @@
 //   POST /sms/conversations                { location_id, tracking_number_id, customer_phone, customer_name?, job_id?, content }
 //   POST /sms/conversations/:id/sync       pull the full CallRail history for one thread
 //   POST /admin/sms/backfill               { days } (admin/owner/executive)
+//   GET  /admin/texting/status             backfill / reconcile progress + stored counts (the Twilio ETA-text status keeps /admin/sms/status)
 //   POST /jobs/:id/contacts                add a secondary contact to an existing JN job
 //   POST /me/push-token                    { token, platform }
 //
@@ -598,7 +599,7 @@ module.exports = function mountSms(app, deps) {
     lastPull = { tag: 'backfill-initial', days: FULL_BACKFILL_DAYS, startedAt: new Date().toISOString(), finishedAt: null, stats: null };
     return pullConversations({ days: FULL_BACKFILL_DAYS, tag: 'backfill-initial' });
   }
-  app.get('/admin/sms/status', requireCallAccess, async (req, res) => {
+  app.get('/admin/texting/status', requireCallAccess, async (req, res) => {
     try {
       const [convs, msgs] = await Promise.all([
         fetch(`${SUPABASE_URL}/rest/v1/sms_conversations?select=id`, { method: 'HEAD', headers: { ...SB_HEADERS, Prefer: 'count=exact' } }),
