@@ -127,6 +127,7 @@ function callrailSendError(r) {
   const msg = (r.json && (r.json.error || r.json.message || (Array.isArray(r.json.errors) ? r.json.errors.join('; ') : null))) || r.text || '';
   if (r.status === 422 && /opt|stop|unsubscrib/i.test(msg)) return 'This number has opted out of texts.';
   if (r.status === 422 && /regist/i.test(msg)) return 'This CallRail account is not registered for texting yet (TCR). Finish registration in CallRail first.';
+  if (r.status === 404 && /locate tracking number/i.test(msg)) return 'CallRail cannot text from this number: it is not text-enabled in this company, or this thread (e.g. a Google Local Services message) cannot be answered by SMS. Check the number under CallRail → Numbers → Texting.';
   return `CallRail rejected the text (${r.status})${msg ? `: ${String(msg).slice(0, 200)}` : ''}`;
 }
 
@@ -440,15 +441,31 @@ module.exports = function mountSms(app, deps) {
   }
 
   // ── Send ──────────────────────────────────────────────────────────────────
-  async function sendText({ account, companyId, trackingNumber, customerPhone, content, mediaUrl }) {
+  async function sendText({ account, companyId, altCompanyId = null, trackingNumber, customerPhone, content, mediaUrl, hasConversation = false }) {
     if (!CALLRAIL_API_KEY) return { ok: false, error: 'CallRail is not configured on the server' };
     if (!account) return { ok: false, error: 'This tracking number has no CallRail account on file. Re-assign it under Settings → Call Tracking.' };
     const tracking = toE164(trackingNumber), customer = toE164(customerPhone);
     if (!tracking || !customer) return { ok: false, error: 'This thread has a phone number CallRail cannot text (needs a full US/CA number).' };
-    const body = { company_id: companyId, tracking_number: tracking, customer_phone_number: customer, content };
-    if (mediaUrl) body.media_url = mediaUrl;
-    const r = await callrailApiWrite(account, 'POST', 'text-messages.json', body);
-    if (!r.ok) return { ok: false, status: r.status, error: callrailSendError(r) };
+    // CallRail answers 404 "Could not locate tracking number or related
+    // conversation" when the number is not in that company (numbers move
+    // between companies; our row may be stale) or when it wants to find the
+    // conversation itself. Try: as asked → without the number (an existing
+    // conversation is enough) → the other company id we know.
+    const attempts = [{ company_id: companyId, tracking_number: tracking }];
+    if (hasConversation) attempts.push({ company_id: companyId });
+    if (altCompanyId && altCompanyId !== companyId) {
+      attempts.push({ company_id: altCompanyId, tracking_number: tracking });
+      if (hasConversation) attempts.push({ company_id: altCompanyId });
+    }
+    let r = null;
+    for (const a of attempts) {
+      const body = { ...a, customer_phone_number: customer, content };
+      if (mediaUrl) body.media_url = mediaUrl;
+      r = await callrailApiWrite(account, 'POST', 'text-messages.json', body);
+      if (r.ok || r.status !== 404) break;
+      warn('send 404', JSON.stringify({ company: a.company_id, tracking: a.tracking_number || '(omitted)', customer }), r.text);
+    }
+    if (!r.ok) return { ok: false, status: r.status, error: callrailSendError(r), tried: attempts.length };
     const j = r.json || {};
     // The 201 body is not documented in detail; keep whatever ids come back.
     const msgs = Array.isArray(j.messages) ? j.messages : (Array.isArray(j.recent_messages) ? j.recent_messages : []);
@@ -470,7 +487,7 @@ module.exports = function mountSms(app, deps) {
       const account = await accountFor(trackingRow, conv);
       const companyId = conv.callrail_company_id || (trackingRow && trackingRow.callrail_company_id);
       if (!companyId) return res.status(400).json({ error: 'This tracking number has no CallRail company on file. Re-assign it under Settings → Call Tracking.' });
-      const sent = await sendText({ account, companyId, trackingNumber: conv.tracking_phone_number, customerPhone: conv.customer_phone_number, content: v.content, mediaUrl });
+      const sent = await sendText({ account, companyId, altCompanyId: (trackingRow && trackingRow.callrail_company_id) || null, trackingNumber: conv.tracking_phone_number, customerPhone: conv.customer_phone_number, content: v.content, mediaUrl, hasConversation: !!conv.callrail_conversation_id });
       if (!sent.ok) return res.status(sent.status === 429 ? 429 : 502).json({ error: sent.error });
       const { conversation, message } = await ingestMessage({
         direction: 'outbound', tracking: conv.tracking_phone_number, customer: conv.customer_phone_number,
