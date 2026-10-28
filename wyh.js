@@ -175,20 +175,28 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
       if (actor.role === 'expansion_manager' && !actor.locs.includes(String(review.location_id))) return res.status(403).json({ error: 'Not your location' });
       if (!review.job_id) return res.status(400).json({ error: 'Link a JobNimbus job to this call first' });
 
-      const call = ((await sbGet(`calls?id=eq.${enc(review.call_id)}&select=id,start_time,customer_phone_number,source,is_google_ads`)) || [])[0];
+      // A Google LSA text lead reviews a conversation instead of a call (wyh_reviews.conversation_id).
+      const conv = review.conversation_id ? ((await sbGet(`sms_conversations?id=eq.${enc(review.conversation_id)}&select=id,first_inbound_at,first_reply_at,first_reply_by_name,customer_phone_number,source`)) || [])[0] : null;
+      const call = review.call_id ? ((await sbGet(`calls?id=eq.${enc(review.call_id)}&select=id,start_time,customer_phone_number,source,is_google_ads`)) || [])[0] : null;
       const job = ((await sbGet(`jobs?id=eq.${enc(review.job_id)}&select=id,jn_id,name,lead_type,insurer,claim_number,jn_location_id,location_id`)) || [])[0];
       if (!job || !job.jn_id) return res.status(400).json({ error: 'The linked job has no JobNimbus id' });
       const loc = job.location_id ? ((await sbGet(`locations?id=eq.${enc(job.location_id)}&select=timezone`)) || [])[0] : null;
 
       const managerName = String(review.reviewer_name || actor.name || '').trim() || 'DryOps';
-      const source = job.lead_type || (call && call.is_google_ads ? 'Google' : (call && call.source) || 'CallRail');
+      const source = conv ? (/local services/i.test(conv.source || '') ? 'Google LSA' : (conv.source || 'Text'))
+        : (job.lead_type || (call && call.is_google_ads ? 'Google' : (call && call.source) || 'CallRail'));
+      const replyMinutes = conv && conv.first_reply_at && conv.first_inbound_at
+        ? Math.max(0, Math.round((new Date(conv.first_reply_at) - new Date(conv.first_inbound_at)) / 60000)) : null;
       const text = buildWyhNote({
         managerName,
-        callWhen: callWhen(call && call.start_time, loc && loc.timezone),
-        callPhone: call ? call.customer_phone_number : null,
+        callWhen: callWhen(conv ? conv.first_inbound_at : (call && call.start_time), loc && loc.timezone),
+        callPhone: conv ? conv.customer_phone_number : (call ? call.customer_phone_number : null),
         source,
         review,
         job: { insurer: job.insurer, claim_number: job.claim_number },
+        kind: conv ? 'message' : 'call',
+        replyMinutes,
+        repliedBy: conv ? conv.first_reply_by_name : null,
       });
       const mentions = await ownerMentions(job.jn_id);
       const r = await jnAddNote(job.jn_id, text, { mentions, jnLocationId: job.jn_location_id, createdBy: actor.jn_user_id });
