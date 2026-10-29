@@ -258,7 +258,7 @@ function mountWyhAi(app, deps) {
   }
 
   // ── Scope ──────────────────────────────────────────────────────────────────
-  const CALL_COLS = 'id,callrail_id,start_time,answered,voicemail,duration,customer_name,customer_phone_number,customer_phone_norm,tags,call_summary,location_id,job_id';
+  const CALL_COLS = 'id,callrail_id,start_time,answered,voicemail,duration,customer_name,customer_phone_number,customer_phone_norm,tags,call_summary,location_id,job_id,job_linked_at';
   // No `cause` column on jobs (prod 2026-10-27): the cause of loss comes from
   // the notes; `loss_type` (water / fire…) is the closest mirrored field.
   const JOB_COLS = 'id,jn_id,number,name,client_name,status,stage,insurance_type,insurer,claim_number,tested,date_loss,cat,loss_type,lead_type,sales_rep,jn_created,location_id,address,client_phone_norm';
@@ -287,6 +287,9 @@ function mountWyhAi(app, deps) {
         const j = jobs.get(c.job_id);
         if (!j || !j.jn_id) continue;
         if (r && r.status === 'complete') continue;
+        // Another location landed this caller (same number rang several locations):
+        // not this call's job unless a manager linked it by hand (app add_wyh_landed_elsewhere.sql).
+        if (j.location_id && j.location_id !== c.location_id && !c.job_linked_at) continue;
         if (j.jn_created && daysBetween(c.start_time, j.jn_created) > EXISTING_JOB_DAYS) continue; // repeat call on an old job
         targets.push({ call: c, job: j, loc: locs.get(c.location_id), kind: 'wyh' });
       } else if (c.answered === true && !c.voicemail && new Date(c.start_time).getTime() >= nojobSince) {
