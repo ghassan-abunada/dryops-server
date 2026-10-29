@@ -12,6 +12,7 @@
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const { buildWyhNote } = require('./wyhNote');
+const callAccess = require('./callAccess');
 
 const RECORDING_TTL_MS = 2 * 60 * 60 * 1000;
 
@@ -222,9 +223,11 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
     try {
       const actor = await loadActor(req);
       if (!actor) return res.status(403).json({ error: 'Profile not found' });
-      const call = ((await sbGet(`calls?callrail_id=eq.${enc(id)}&select=id,location_id,duration,recording_url,call_summary`)) || [])[0];
+      const call = ((await sbGet(`calls?callrail_id=eq.${enc(id)}&select=id,location_id,tracking_phone_number,duration,recording_url,call_summary`)) || [])[0];
       if (!call) return res.status(404).json({ error: 'Call not found' });
-      if (!SEES_ALL.includes(actor.role) && !actor.locs.includes(String(call.location_id))) return res.status(403).json({ error: 'Not your location' });
+      if (!SEES_ALL.includes(actor.role) && !actor.locs.includes(String(call.location_id)) && !(await managerSeesTrackingNumber(actor, call))) {
+        return res.status(403).json({ error: 'Not your location' });
+      }
       // The AI call summary (CallRail Conversation Intelligence) is only mirrored
       // for job-linked calls by the intake sweep; fetch it on demand here and
       // remember it so the next open is instant.
@@ -246,6 +249,18 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
       });
     } catch (err) { return res.status(502).json({ error: err.message }); }
   });
+
+  // Settings → Call Tracking (owner decision 2026-10-29): an expansion manager
+  // may also play a call whose tracking number is unassigned or assigned to one
+  // of their locations (callAccess.js). Other roles keep the location rule.
+  async function managerSeesTrackingNumber(actor, call) {
+    if (actor.role !== callAccess.MANAGER_ROLE) return false;
+    const n = callAccess.phoneNorm(call.tracking_phone_number);
+    if (!n) return false;
+    const rows = await sbGet(`location_tracking_numbers?phone_norm=eq.${enc(n)}&active=eq.true&select=phone_norm,location_id`);
+    if (!Array.isArray(rows)) return false; // fail closed
+    return callAccess.numberVisibleTo(n, callAccess.assignmentsByNorm(rows), actor.locs);
+  }
 
   // Resolve the recording URL (+ AI summary) for a call across the configured CallRail accounts.
   async function findCallDetails(callrailId) {
