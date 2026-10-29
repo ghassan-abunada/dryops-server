@@ -354,5 +354,34 @@
       }
     },
     "expected": "WYH - Gus Abunada\nText: Tue 10/28, 1:10 PM · (972) 555-0188 · Google LSA · no reply\n\nAction Required:\n- Call handling: Nobody answered the text\n- Not walked — Customer cancelled\n\nChecklist:\n[ ] Call handled properly — Nobody answered the text\n[ ] Walked: No — Customer cancelled\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Answer LSA texts within 5 minutes\n- Response: responded well"
+  },
+  {
+    "name": "job lead (plumber referral typed into JobNimbus, no call or text): Job: head line, no call questions",
+    "input": {
+      "managerName": "Gus Abunada",
+      "callWhen": "Tue 10/27, 9:05 AM",
+      "callPhone": "5559876543",
+      "source": "Plumber",
+      "kind": "job",
+      "job": {
+        "insurer": "Allstate",
+        "claim_number": null
+      },
+      "review": {
+        "walked": "yes",
+        "landed": true,
+        "photo_moisture": true,
+        "photo_damage": true,
+        "photo_wide": true,
+        "insurance": true,
+        "has_carrier": true,
+        "has_claim": false,
+        "tested": true,
+        "packout_sold": true,
+        "info_sufficient": true,
+        "operator_feedback_given": false
+      }
+    },
+    "expected": "WYH - Gus Abunada\nJob: Tue 10/27, 9:05 AM · (555) 987-6543 · Plumber · created in JobNimbus\n\nAction Required:\n- Add claim number to the file\n- Give the operator feedback\n\nChecklist:\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[ ] Insurance: Yes — carrier: Allstate · claim #: missing\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present\n\nCoaching: no feedback given"
   }
 ]
