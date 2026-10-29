@@ -12,6 +12,7 @@
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const { buildWyhNote } = require('./wyhNote');
+const callAccess = require('./callAccess');
 
 const RECORDING_TTL_MS = 2 * 60 * 60 * 1000;
 
@@ -178,7 +179,9 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
       // A Google LSA text lead reviews a conversation instead of a call (wyh_reviews.conversation_id).
       const conv = review.conversation_id ? ((await sbGet(`sms_conversations?id=eq.${enc(review.conversation_id)}&select=id,first_inbound_at,first_reply_at,first_reply_by_name,customer_phone_number,source`)) || [])[0] : null;
       const call = review.call_id ? ((await sbGet(`calls?id=eq.${enc(review.call_id)}&select=id,start_time,customer_phone_number,source,is_google_ads`)) || [])[0] : null;
-      const job = ((await sbGet(`jobs?id=eq.${enc(review.job_id)}&select=id,jn_id,name,lead_type,insurer,claim_number,jn_location_id,location_id`)) || [])[0];
+      // A job lead (wyh_reviews.lead_job_id): a JobNimbus job with no call or text behind it.
+      const jobLead = !!review.lead_job_id;
+      const job = ((await sbGet(`jobs?id=eq.${enc(review.job_id)}&select=id,jn_id,name,lead_type,insurer,claim_number,jn_location_id,location_id,jn_created,client_phone`)) || [])[0];
       if (!job || !job.jn_id) return res.status(400).json({ error: 'The linked job has no JobNimbus id' });
       const loc = job.location_id ? ((await sbGet(`locations?id=eq.${enc(job.location_id)}&select=timezone`)) || [])[0] : null;
 
@@ -189,12 +192,12 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
         ? Math.max(0, Math.round((new Date(conv.first_reply_at) - new Date(conv.first_inbound_at)) / 60000)) : null;
       const text = buildWyhNote({
         managerName,
-        callWhen: callWhen(conv ? conv.first_inbound_at : (call && call.start_time), loc && loc.timezone),
-        callPhone: conv ? conv.customer_phone_number : (call ? call.customer_phone_number : null),
-        source,
+        callWhen: callWhen(conv ? conv.first_inbound_at : jobLead ? job.jn_created : (call && call.start_time), loc && loc.timezone),
+        callPhone: conv ? conv.customer_phone_number : jobLead ? job.client_phone : (call ? call.customer_phone_number : null),
+        source: jobLead ? (job.lead_type || 'No lead type') : source,
         review,
         job: { insurer: job.insurer, claim_number: job.claim_number },
-        kind: conv ? 'message' : 'call',
+        kind: conv ? 'message' : jobLead ? 'job' : 'call',
         replyMinutes,
         repliedBy: conv ? conv.first_reply_by_name : null,
       });
@@ -220,9 +223,11 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
     try {
       const actor = await loadActor(req);
       if (!actor) return res.status(403).json({ error: 'Profile not found' });
-      const call = ((await sbGet(`calls?callrail_id=eq.${enc(id)}&select=id,location_id,duration,recording_url,call_summary`)) || [])[0];
+      const call = ((await sbGet(`calls?callrail_id=eq.${enc(id)}&select=id,location_id,tracking_phone_number,duration,recording_url,call_summary`)) || [])[0];
       if (!call) return res.status(404).json({ error: 'Call not found' });
-      if (!SEES_ALL.includes(actor.role) && !actor.locs.includes(String(call.location_id))) return res.status(403).json({ error: 'Not your location' });
+      if (!SEES_ALL.includes(actor.role) && !actor.locs.includes(String(call.location_id)) && !(await managerSeesTrackingNumber(actor, call))) {
+        return res.status(403).json({ error: 'Not your location' });
+      }
       // The AI call summary (CallRail Conversation Intelligence) is only mirrored
       // for job-linked calls by the intake sweep; fetch it on demand here and
       // remember it so the next open is instant.
@@ -244,6 +249,18 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
       });
     } catch (err) { return res.status(502).json({ error: err.message }); }
   });
+
+  // Settings → Call Tracking (owner decision 2026-10-29): an expansion manager
+  // may also play a call whose tracking number is unassigned or assigned to one
+  // of their locations (callAccess.js). Other roles keep the location rule.
+  async function managerSeesTrackingNumber(actor, call) {
+    if (actor.role !== callAccess.MANAGER_ROLE) return false;
+    const n = callAccess.phoneNorm(call.tracking_phone_number);
+    if (!n) return false;
+    const rows = await sbGet(`location_tracking_numbers?phone_norm=eq.${enc(n)}&active=eq.true&select=phone_norm,location_id`);
+    if (!Array.isArray(rows)) return false; // fail closed
+    return callAccess.numberVisibleTo(n, callAccess.assignmentsByNorm(rows), actor.locs);
+  }
 
   // Resolve the recording URL (+ AI summary) for a call across the configured CallRail accounts.
   async function findCallDetails(callrailId) {

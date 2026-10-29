@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
+const callAccess = require('./callAccess');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -164,23 +165,31 @@ async function requireStrictAdmin(req, res, next) {
 
 // Like requireAdmin but also allows the executive role — used ONLY for the
 // CallRail endpoints (executives manage call tracking; they get no other writes).
-async function requireCallAccess(req, res, next) {
-  return requireAuth(req, res, async () => {
-    try {
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${req.userId}&select=role`, {
-        headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
-      });
-      if (!r.ok) return res.status(403).json({ error: 'Access required' });
-      const rows = await r.json();
-      const role = Array.isArray(rows) && rows[0] ? rows[0].role : null;
-      if (!['admin', 'owner', 'executive'].includes(role)) return res.status(403).json({ error: 'Access required' });
-      next();
-    } catch (err) {
-      console.error('[call-access check error]', err.message);
-      res.status(502).json({ error: 'Role verification failed' });
-    }
-  });
+// The verified role is left on req.callRole for handlers that scope by it.
+function callAccessFor(roles) {
+  return async function (req, res, next) {
+    return requireAuth(req, res, async () => {
+      try {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${req.userId}&select=role`, {
+          headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+        });
+        if (!r.ok) return res.status(403).json({ error: 'Access required' });
+        const rows = await r.json();
+        const role = Array.isArray(rows) && rows[0] ? rows[0].role : null;
+        if (!roles.includes(role)) return res.status(403).json({ error: 'Access required' });
+        req.callRole = role;
+        next();
+      } catch (err) {
+        console.error('[call-access check error]', err.message);
+        res.status(502).json({ error: 'Role verification failed' });
+      }
+    });
+  };
 }
+const requireCallAccess = callAccessFor(['admin', 'owner', 'executive']);
+// Settings → Call Tracking read access: expansion managers too (owner decision
+// 2026-10-29), scoped to their locations' + unassigned numbers by the handler.
+const requireCallViewAccess = callAccessFor(['admin', 'owner', 'executive', callAccess.MANAGER_ROLE]);
 
 // ── JobNimbus API proxy (avoids CORS) ─────────────────────────────────────────
 // EXCEPTION (deliberate, per owner decision 2026-07-02): the drying-log web
@@ -1114,7 +1123,9 @@ app.get('/admin/callrail/diag', async (req, res) => {
 
 // List CallRail tracking numbers (flattened from trackers), for the admin
 // assignment UI. The app fetches current assignments + suggestions itself.
-app.get('/admin/callrail/numbers', requireCallAccess, async (req, res) => {
+// Expansion managers get only numbers that are unassigned or assigned to one of
+// their locations (callAccess.js); same response shape.
+app.get('/admin/callrail/numbers', requireCallViewAccess, async (req, res) => {
   if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return res.status(400).json({ error: 'CallRail is not configured on the server' });
   try {
     const nameById = Object.fromEntries((await callrailAccounts()).map(a => [a.id, a.name]));
@@ -1142,6 +1153,15 @@ app.get('/admin/callrail/numbers', requireCallAccess, async (req, res) => {
         const totalPages = r.json && (r.json.total_pages || r.json.pages);
         if (trackers.length < 250 || (totalPages && page >= totalPages)) break;
       }
+    }
+    if (req.callRole === callAccess.MANAGER_ROLE) {
+      const actor = await intake.loadActor(req);
+      if (!actor) return res.status(403).json({ error: 'Profile not found' });
+      // Fail closed: without the assignment list we can't tell what's foreign.
+      const rows = await sbGet('location_tracking_numbers?active=eq.true&select=phone_norm,location_id');
+      if (!Array.isArray(rows)) return res.status(502).json({ error: 'Could not load tracking number assignments' });
+      const assigned = callAccess.assignmentsByNorm(rows);
+      return res.json({ ok: true, numbers: numbers.filter(n => callAccess.numberVisibleTo(n.tracking_phone_number, assigned, actor.locs)) });
     }
     return res.json({ ok: true, numbers });
   } catch (err) {
@@ -3415,6 +3435,44 @@ app.delete('/admin/users/:id', requireAuth, requireStrictAdmin, async (req, res)
     res.json({ ok: true });
   } catch (err) {
     console.error('[delete user error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ── Self-service account deletion (App Store guideline 5.1.1(v)) ─────────────
+// Any signed-in user may delete their OWN account. Refused for the last admin
+// so a company can't lock itself out. Referral partners: their encrypted
+// W-9/bank secrets are erased and the lead_source row is unlinked (kept, since
+// referrals/payouts are the company's records). profiles cascades from
+// auth.users. Live tokens die with the sessions delete + auth-cache purge.
+app.delete('/me', requireAuth, async (req, res) => {
+  const uid = req.userId;
+  try {
+    const prof = await sbGet(`profiles?id=eq.${uid}&select=role`);
+    const role = prof && prof[0] ? prof[0].role : null;
+    if (role === 'admin') {
+      const admins = await sbGet(`profiles?role=eq.admin&id=neq.${uid}&select=id&limit=1`);
+      if (!Array.isArray(admins) || admins.length === 0) {
+        return res.status(409).json({ error: 'You are the only admin. Make someone else an admin before deleting your account.' });
+      }
+    }
+    if (role === 'lead_source') {
+      const links = await sbGet(`lead_sources?user_id=eq.${uid}&select=id`);
+      for (const ls of Array.isArray(links) ? links : []) {
+        await sbAdmin('DELETE', `/rest/v1/lead_source_secure?lead_source_id=eq.${ls.id}`).catch(() => {});
+        await sbAdmin('PATCH', `/rest/v1/lead_sources?id=eq.${ls.id}`, { user_id: null, status: 'invited' }, 'return=minimal').catch(() => {});
+      }
+      leadSourceCache.delete(uid);
+    }
+    try { await gotrueAdmin('DELETE', `users/${uid}/sessions`); } catch { /* best effort */ }
+    const { ok, status, body } = await gotrueAdmin('DELETE', `users/${uid}`);
+    if (!ok) return res.status(status).json({ error: (body && (body.msg || body.message)) || 'delete failed' });
+    try { await sbAdmin('DELETE', `/rest/v1/profiles?id=eq.${uid}`); } catch { /* cascade already handled it */ }
+    for (const [token, entry] of authCache) if (entry.userId === uid) authCache.delete(token);
+    console.log('[self-delete]', uid, role);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[self-delete error]', err.message);
     res.status(502).json({ error: err.message });
   }
 });

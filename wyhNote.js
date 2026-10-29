@@ -66,7 +66,10 @@ function buildWyhNote(i) {
 
   head.push(`WYH - ${String(i.managerName || '').trim()}`);
   const takenBy = String(r.call_taken_by_name || '').trim();
-  if (i.kind === 'message') {
+  if (i.kind === 'job') {
+    // A job that came in with no call or text (a referral typed into JobNimbus).
+    head.push(`Job: ${[i.callWhen, fmtPhone(i.callPhone) || null, i.source, 'created in JobNimbus'].filter(Boolean).join(' · ')}`);
+  } else if (i.kind === 'message') {
     // A Google LSA text lead: when it came in, who answered and how fast.
     head.push(`Text: ${[i.callWhen, fmtPhone(i.callPhone) || null, i.source, replyPhrase(i.replyMinutes, i.repliedBy || takenBy || null)].filter(Boolean).join(' · ')}`);
   } else {
