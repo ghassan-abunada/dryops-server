@@ -39,6 +39,26 @@ function typeTag(recordType) {
   return ' (' + (TYPE_TAG[recordType] || recordType) + ')';
 }
 
+// Absolute link base for the owner / master links the WIP pages show for
+// copying. The dryops.app web front proxies /wip and /wip/* here and sends
+// `x-dryops-public-base: https://dryops.app`, so copied links point at the
+// public domain rather than the Railway hostname. The header is trusted only
+// when it is a bare https origin (no path beyond '/', no query, hash or
+// credentials) so a client cannot inject an arbitrary link base; anything else
+// falls back to the request's own protocol + host.
+function publicBase(req) {
+  const raw = String((req.get && req.get('x-dryops-public-base')) || '').trim();
+  if (raw && !/[?#@\s]/.test(raw)) {
+    try {
+      const u = new URL(raw);
+      if (u.protocol === 'https:' && u.hostname && u.pathname === '/' && !u.search && !u.hash && !u.username && !u.password) {
+        return u.origin;
+      }
+    } catch { /* malformed header: ignore */ }
+  }
+  return `${req.protocol}://${req.get('host')}`;
+}
+
 const DASH = require('./wipDash');
 const PDF = require('./wipPdf');
 
@@ -622,7 +642,7 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
 
   // ── Master page ─────────────────────────────────────────────────────────────
   const ctx = { esc, json, q, help, whole, money };
-  function originOf(req) { return `${req.protocol}://${req.get('host')}`; }
+  const originOf = publicBase;
   function titleFor(req) { return req.wip.manager ? req.wip.manager.name : 'all locations'; }
 
   app.get('/wip/master/:master', resolveMaster, async (req, res) => {
@@ -1075,3 +1095,4 @@ Be conservative: silence is "not_yet". Never invent amounts or dates. reason: on
   });
   return { weeklyReviewTick, chicagoNow, weeklyReview, upcomingWeek, lastWeek, chicagoMidnightIso, loadDashboard, reviewRuns };
 };
+module.exports.publicBase = publicBase;
