@@ -2,6 +2,7 @@ const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
 const callAccess = require('./callAccess');
+const jnScope = require('./jnScope');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -202,7 +203,52 @@ function jnapiAuth(req, res, next) {
   return requireAuth(req, res, next);
 }
 
-app.use('/jnapi', jnapiAuth, async (req, res) => {
+// Demo profiles (profiles.is_demo — the App Review account) only reach JN jobs
+// in their own locations, through the calls the app makes (jnScope.js).
+// Everyone else passes through unchanged for now.
+// select=* so a deploy ahead of the is_demo migration still resolves (is_demo
+// is then undefined → pass-through). Cached like authCache.
+const jnScopeCache = new Map(); // userId → { p, expiresAt }
+async function loadJnScopeProfile(userId) {
+  const hit = jnScopeCache.get(userId);
+  if (hit && hit.expiresAt > Date.now()) return hit.p;
+  const rows = await sbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=*`);
+  const p = rows && rows[0] ? { is_demo: rows[0].is_demo === true, location_id: rows[0].location_id, location_ids: rows[0].location_ids } : null;
+  if (p) {
+    if (jnScopeCache.size >= AUTH_CACHE_MAX) jnScopeCache.delete(jnScopeCache.keys().next().value);
+    jnScopeCache.set(userId, { p, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+  }
+  return p;
+}
+async function jnapiScope(req, res, next) {
+  if (!req.userId) return next(); // the open GET /jobs search above
+  try {
+    const p = await loadJnScopeProfile(req.userId);
+    if (!p) return res.status(403).json({ error: 'Profile not found' });
+    if (!p.is_demo) return next();
+    const ids = jnScope.jnRequestJobIds(req.method, req.path, req.query, req.body);
+    if (!ids) return res.status(403).json({ error: 'Not available on this account' });
+    const rows = await sbGet(`jobs?jn_id=in.(${ids.map(encodeURIComponent).join(',')})&select=jn_id,location_id`);
+    if (!jnScope.jobsInScope(ids, rows, jnScope.profileLocationIds(p))) return res.status(403).json({ error: 'Not available on this account' });
+    next();
+  } catch (err) {
+    console.error('[jnapi scope error]', err.message);
+    res.status(502).json({ error: 'Access check failed' });
+  }
+}
+async function jnfilesScope(req, res, next) {
+  try {
+    const p = await loadJnScopeProfile(req.userId);
+    if (!p) return res.status(403).json({ error: 'Profile not found' });
+    if (p.is_demo) return res.status(403).json({ error: 'Not available on this account' });
+    next();
+  } catch (err) {
+    console.error('[jnfiles scope error]', err.message);
+    res.status(502).json({ error: 'Access check failed' });
+  }
+}
+
+app.use('/jnapi', jnapiAuth, jnapiScope, async (req, res) => {
   const url = `${JN_BASE}${req.path}${req.url.includes('?') ? '?' + req.url.split('?')[1] : ''}`;
   console.log('[JN]', req.method, url);
   const hasBody = ['PUT', 'POST', 'PATCH'].includes(req.method) && req.body && Object.keys(req.body).length > 0;
@@ -3098,7 +3144,7 @@ app.get('/jnphoto/:jnid', async (req, res) => {
 });
 
 // ── JobNimbus Files API proxy (presigned URL upload) ──────────────────────────
-app.use('/jnfiles', requireAuth, async (req, res) => {
+app.use('/jnfiles', requireAuth, jnfilesScope, async (req, res) => {
   const url = `https://api.jobnimbus.com/files/v1${req.path}`;
   console.log('[JN files]', req.method, url);
   try {
