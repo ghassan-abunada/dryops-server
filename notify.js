@@ -68,14 +68,20 @@ async function deliver(channel, msg) {
 }
 
 // Active channels for a location (plus company-wide ones with location_id
-// null) subscribed to ANY of `events`.
+// null) subscribed to ANY of `events`. A Demo location (the App Review
+// account's, location_type 'Demo') never reaches company-wide channels.
 async function loadChannels(sbGet, events, locationId) {
   const evs = (Array.isArray(events) ? events : [events]).filter(Boolean);
   if (!evs.length) return [];
   const evFilter = evs.length === 1 ? `events.cs.{${evs[0]}}` : `or(${evs.map((e) => `events.cs.{${e}}`).join(',')})`;
   const locFilter = locationId ? `or(location_id.is.null,location_id.eq.${encodeURIComponent(String(locationId))})` : 'location_id.is.null';
   const rows = await sbGet(`notification_channels?active=eq.true&and=(${evFilter},${locFilter})&select=id,kind,name,config,location_id`);
-  return Array.isArray(rows) ? rows : [];
+  if (!Array.isArray(rows)) return [];
+  if (locationId && rows.some((r) => r.location_id == null)) {
+    const loc = await sbGet(`locations?id=eq.${encodeURIComponent(String(locationId))}&select=location_type`);
+    if (Array.isArray(loc) && loc[0] && loc[0].location_type === 'Demo') return rows.filter((r) => r.location_id != null);
+  }
+  return rows;
 }
 
 // Fan out one message; failures are logged, never thrown.
