@@ -131,6 +131,17 @@ function callrailSendError(r) {
   return `CallRail rejected the text (${r.status})${msg ? `: ${String(msg).slice(0, 200)}` : ''}`;
 }
 
+// Push goes only to people assigned to the text's location (owner 2026-10-30) —
+// admins and owners included, even though the inbox shows them every location.
+function assignedLocations(p) {
+  if (Array.isArray(p.location_ids) && p.location_ids.length) return p.location_ids.map(String);
+  return p.location_id ? [String(p.location_id)] : [];
+}
+function pushRecipientIds(profiles, locationId) {
+  if (!locationId) return [];
+  return (profiles || []).filter((p) => assignedLocations(p).includes(String(locationId))).map((p) => String(p.id));
+}
+
 module.exports = function mountSms(app, deps) {
   const {
     SUPABASE_URL, SUPABASE_SERVICE_KEY, PUBLIC_BASE_URL,
@@ -380,10 +391,8 @@ module.exports = function mountSms(app, deps) {
     const last = pushRecent.get(conv.id) || 0;
     if (Date.now() - last < PUSH_THROTTLE_MS) return;
     pushRecent.set(conv.id, Date.now());
-    const profiles = (await sbGet(`profiles?select=id,role,location_id,location_ids&role=in.(admin,owner,expansion_manager)`)) || [];
-    const ids = profiles.filter((p) => p.role === 'admin' || p.role === 'owner'
-      || (Array.isArray(p.location_ids) && p.location_ids.length ? p.location_ids.map(String) : (p.location_id ? [String(p.location_id)] : [])).includes(String(conv.location_id)))
-      .map((p) => String(p.id));
+    const profiles = (await sbGet(`profiles?select=id,role,location_id,location_ids&role=in.(${SENDER_ROLES.join(',')})`)) || [];
+    const ids = pushRecipientIds(profiles, conv.location_id);
     if (!ids.length) return;
     const tokens = (await sbGet(`push_tokens?select=token,profile_id&profile_id=in.(${ids.map(enc).join(',')})`)) || [];
     if (!tokens.length) return;
@@ -758,6 +767,7 @@ module.exports.classifyTextDelivery = classifyTextDelivery;
 module.exports.toE164 = toE164;
 module.exports.rankJobs = rankJobs;
 module.exports.previewOf = previewOf;
+module.exports.pushRecipientIds = pushRecipientIds;
 module.exports.validateContent = validateContent;
 module.exports.callrailSendError = callrailSendError;
 module.exports.CONTENT_MAX = CONTENT_MAX;
