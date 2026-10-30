@@ -1,7 +1,7 @@
 // Two-way texting: the pure parts of sms.js. Run: npm test
 const test = require('node:test');
 const assert = require('node:assert');
-const { webhookTargets, classifyTextDelivery, rankJobs, previewOf, validateContent, callrailSendError, CONTENT_MAX } = require('../sms');
+const { webhookTargets, classifyTextDelivery, rankJobs, previewOf, validateContent, callrailSendError, pushRecipientIds, CONTENT_MAX } = require('../sms');
 
 test('webhookTargets: calls keep the calls route, texts go to the sms route with the event in the query', () => {
   const t = webhookTargets('https://dryops-server-production.up.railway.app/', 'a b');
@@ -86,4 +86,17 @@ test('toE164: CallRail send gets full E.164 numbers, never bare digits', () => {
   assert.equal(toE164('(480) 372-8411'), '+14803728411');
   assert.equal(toE164('14803728411'), '+14803728411');
   assert.equal(toE164('12345'), null);
+});
+
+test('pushRecipientIds: only people assigned to the location, admins and owners included', () => {
+  const profiles = [
+    { id: 'a1', role: 'admin', location_ids: ['L1', 'L2'] },
+    { id: 'a2', role: 'admin', location_ids: [], location_id: null },
+    { id: 'o1', role: 'owner', location_ids: ['L3'] },
+    { id: 'm1', role: 'expansion_manager', location_ids: [], location_id: 'L1' },
+  ];
+  assert.deepEqual(pushRecipientIds(profiles, 'L1'), ['a1', 'm1']);
+  assert.deepEqual(pushRecipientIds(profiles, 'L3'), ['o1']);
+  assert.deepEqual(pushRecipientIds(profiles, 'L9'), []);
+  assert.deepEqual(pushRecipientIds(profiles, null), []);
 });
