@@ -7082,6 +7082,12 @@ require('./leadLinks')(app, {
   makeRateLimiter: require('./homeowner').makeRateLimiter, clientIp: require('./homeowner').clientIp,
 });
 
+// Estimate approval from the customer's private link (DryOps /e/<token>; see estimates.js).
+require('./estimates')(app, {
+  sbGet, sbInsert, sbPatch, WEB_APP_URL,
+  makeRateLimiter: require('./homeowner').makeRateLimiter, clientIp: require('./homeowner').clientIp,
+});
+
 // Testing job from a testing work order (JN automation webhook → Testing job
 // on the ATS location with the standing owners; see testingJobs.js).
 require('./testingJobs')(app, {
