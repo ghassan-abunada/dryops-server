@@ -21,6 +21,7 @@
 // local US/CA numbers only, texting registration (TCR) required; CallRail adds
 // opt-out wording to the first text when we leave it out.
 const crypto = require('crypto');
+const { makeSummarizer, prepare: prepareSummary } = require('./pushSummary');
 
 const CONTENT_MAX = 140;
 const DEDUPE_WINDOW_MS = 2 * 60 * 1000;
@@ -147,8 +148,9 @@ module.exports = function mountSms(app, deps) {
     SUPABASE_URL, SUPABASE_SERVICE_KEY, PUBLIC_BASE_URL,
     requireAuth, requireCallAccess, callrailWebhookOk, loadActor,
     sbGet, sbPatch, sbUpsert, jnSendJson, UUID_RE,
-    callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
+    callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, anthropic,
   } = deps;
+  const summarizeForPush = deps.summarizeForPush || makeSummarizer({ anthropic });
   const enc = encodeURIComponent;
   const log = (...a) => console.log('[sms]', ...a);
   const warn = (...a) => console.warn('[sms]', ...a);
@@ -388,6 +390,8 @@ module.exports = function mountSms(app, deps) {
   const pushRecent = new Map(); // conversation id → last push ms
   async function pushInbound(conv, message) {
     if (!conv || !conv.location_id) return;
+    // Google's "Replies to this number…" relay notice is not the customer talking.
+    if (prepareSummary({ content: message && message.content }).skip) return;
     const last = pushRecent.get(conv.id) || 0;
     if (Date.now() - last < PUSH_THROTTLE_MS) return;
     pushRecent.set(conv.id, Date.now());
@@ -396,8 +400,13 @@ module.exports = function mountSms(app, deps) {
     if (!ids.length) return;
     const tokens = (await sbGet(`push_tokens?select=token,profile_id&profile_id=in.(${ids.map(enc).join(',')})`)) || [];
     if (!tokens.length) return;
-    const title = conv.customer_name || fmtPhone(conv.customer_phone_number) || 'New text';
-    const body = previewOf(message && message.content, message && message.media_urls) || 'New text message';
+    // Lock-screen summary (pushSummary.js): LSA template parsed, long texts summarised by a small model.
+    const sum = await summarizeForPush({
+      customerName: conv.customer_name, phoneLabel: fmtPhone(conv.customer_phone_number),
+      content: message && message.content, mediaUrls: message && message.media_urls,
+    });
+    if (!sum) return;
+    const { title, body } = sum;
     const messages = tokens.map((t) => ({ to: t.token, title, body, sound: 'default', data: { conversation_id: conv.id, url: `/messages/${conv.id}` } }));
     for (let i = 0; i < messages.length; i += 100) {
       const r = await fetch('https://exp.host/--/api/v2/push/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(messages.slice(i, i + 100)) });
