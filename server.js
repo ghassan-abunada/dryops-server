@@ -7045,6 +7045,11 @@ require('./sms')(app, {
   callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
 });
 
+// ── @Mentions → DryOps notifications (see mentions.js) ──────────────────────
+// Reads every new JobNimbus activity once a minute, matches "@FirstLast" to
+// DryOps profiles (profiles.jn_user_id), records `mentions` and pushes.
+require('./mentions')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAdmin, sbGet, sbInsert, jnGetJson, jnFetchAccountUsers });
+
 // ── WYH AI reviewer (Wash Your Hands suggestions; see wyhAi.js) ──────────────
 // Mounted after intake: it borrows intake.loadActor like the WYH module.
 // Reads each Ready-for-WYH call's JobNimbus notes, fields and photos plus the
