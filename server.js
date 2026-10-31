@@ -7042,7 +7042,7 @@ require('./sms')(app, {
   SUPABASE_URL, SUPABASE_SERVICE_KEY, PUBLIC_BASE_URL,
   requireAuth, requireCallAccess, callrailWebhookOk, loadActor: intake.loadActor,
   sbGet, sbPatch, sbUpsert, jnSendJson, UUID_RE,
-  callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
+  callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, anthropic: wipAnthropic,
 });
 
 // ── @Mentions → DryOps notifications (see mentions.js) ──────────────────────
