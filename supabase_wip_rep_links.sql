@@ -1,7 +1,7 @@
 -- WIP sales-rep links: /wip/rep/<token> shows one person's in-progress jobs
 -- (jobs.sales_rep, the JobNimbus sales rep) across the locations listed, so
 -- reps fill in job values for the jobs they sold. Run once in the SQL editor;
--- it prints the three links at the end. Safe to re-run.
+-- it prints the links at the end. Safe to re-run.
 
 create extension if not exists pgcrypto;
 
@@ -23,7 +23,7 @@ select r.name, array[
   'ce1131b7-4b5f-4fb2-8e47-4090a8c1c752',
   'a9af3819-a638-4a26-b690-12b791405343',
   'c4fbcdcb-befb-4224-b0f3-715d8d1aa153']::uuid[]
-from (values ('Tarik Sabbah'), ('Colt Smith'), ('Ali Zayyad')) r(name)
+from (values ('Tarik Sabbah'), ('Colt Smith'), ('Ali Zayyad'), ('Gus Abunada')) r(name)
 on conflict (rep_name) do nothing;
 
 -- The links to send:
