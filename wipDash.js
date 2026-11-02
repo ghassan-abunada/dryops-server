@@ -50,7 +50,7 @@ const CSS = `
     table.t thead{display:none}table.t tr{display:block;padding:10px 0;border-bottom:1px solid var(--line)}table.t tr:last-child{border-bottom:0}
     table.t td{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 14px;border:0;white-space:normal;min-width:0}table.t td::before{content:attr(data-l);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:var(--mut);flex:none}
     table.t td.r{text-align:right}table.t td>div{min-width:0}table.t td:first-child::before{content:none}table.t td.a::before{content:none}
-    .big{font-size:16px}.bankcell input{width:132px}
+    .big{font-size:16px}table.t td{flex-wrap:wrap}.bankcell{flex:none}.bankcell input{flex:none;width:132px}table.t td.r>.sm{flex-basis:100%;text-align:right;margin-top:0}
     .acts{flex-wrap:wrap;justify-content:flex-start}
   }
   @media(min-width:900px){.panels{grid-template-columns:1fr 1fr}.admin{grid-template-columns:380px 1fr}}
