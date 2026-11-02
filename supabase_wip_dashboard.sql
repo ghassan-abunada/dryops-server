@@ -61,9 +61,20 @@ select e.location_id, e.key::uuid, e.amount, e.updated_by, e.updated_at
    and not exists (select 1 from public.wip_job_estimates x
                     where x.location_id = e.location_id and x.job_id = e.key::uuid);
 
--- 4. Snapshots remember which manager generated a combined report.
+-- 4. Snapshots remember which manager generated a combined report and who sent it.
 alter table public.wip_snapshots
-  add column if not exists manager_id uuid references public.wip_managers(id) on delete set null;
+  add column if not exists manager_id uuid references public.wip_managers(id) on delete set null,
+  add column if not exists generated_by text;
+
+-- 5. Owner form v2: an In Progress job can also be "paying this week"
+--    (out-of-pocket) without leaving In Progress, and the Saturday review
+--    keeps what it found in its own columns instead of the owner's note.
+alter table public.wip_entries
+  add column if not exists collect_amount numeric(12,2),
+  add column if not exists ai_decision text check (ai_decision in ('collecting', 'not_yet', 'received')),
+  add column if not exists ai_amount numeric(12,2),
+  add column if not exists ai_reason text,
+  add column if not exists ai_at timestamptz;
 
 -- Your admin link:
 select 'https://dryops-server-production.up.railway.app/wip/admin/' || admin_token as admin_link

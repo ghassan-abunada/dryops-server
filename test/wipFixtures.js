@@ -12,7 +12,7 @@ const TOKENS = { master: 'mastertoken-0123456789abcdef', admin: 'admintoken-0012
 const jid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const J = Object.fromEntries(Array.from({ length: 12 }, (_, i) => ['j' + (i + 1), jid(i + 1)]));
 function job(id, loc, number, name, status, stage, extra = {}) {
-  return { id, location_id: loc, jn_id: 'jn' + id, number, name, status, stage, record_type: 'Mitigation', jn_created: '2026-09-01T00:00:00Z', approved_invoice_total: null, approved_invoice_due: null, last_invoice_date: null, ...extra };
+  return { id, location_id: loc, jn_id: 'jn' + id, number, name, status, stage, record_type: 'Mitigation', insurance_type: 'Insurance', jn_created: '2026-09-01T00:00:00Z', approved_invoice_total: null, approved_invoice_due: null, last_invoice_date: null, ...extra };
 }
 
 // lastWeek = { start, end } ISO dates; payments/invoices are seeded inside it.
@@ -44,7 +44,7 @@ function seed(lastWeek) {
       job(J.j1, LOC.a1, '1001', 'Alice Johnson (A1 - DAL - MIT)', 'Invoiced', 'Account Receivable', { approved_invoice_total: 5000, approved_invoice_due: 1234.57, last_invoice_date: '2026-10-10' }),
       job(J.j2, LOC.a1, '1002', 'Bob Reyes', 'Attorney', 'Account Receivable', { record_type: 'Contents', approved_invoice_total: 9000, approved_invoice_due: 9000 }),
       job(J.j3, LOC.a1, '1003', 'Cara Lee', 'In Progress', 'In Production'),
-      job(J.j4, LOC.a1, '1004', 'Dan Smith', 'Work Complete', 'In Production'),
+      job(J.j4, LOC.a1, '1004', 'Dan Smith', 'Work Complete', 'In Production', { insurance_type: 'Out of Pocket' }),
       job(J.j5, LOC.a1, '1005', 'Eve Park', 'Lead', null),
       job(J.j6, LOC.a1, '1006', 'Finn Moore', 'Invoice Created', 'In Production', { approved_invoice_total: 7200, approved_invoice_due: 7200, last_invoice_date: '2026-10-15' }),
       job(J.j7, LOC.a1, '1007', 'Gia Torres', 'Paid & Closed', 'Completed', { approved_invoice_total: 3100, approved_invoice_due: 0, last_invoice_date: '2026-09-20' }),
@@ -54,12 +54,12 @@ function seed(lastWeek) {
       job(J.j11, LOC.hr, '3002', 'Kai Olsen', 'Invoiced', 'Account Receivable', { approved_invoice_total: 1500, approved_invoice_due: 1500 }),
     ],
     wip_entries: [
-      { id: 'e1', location_id: LOC.a1, key: J.j1, custom_name: null, category: 'collecting', amount: null, note: '', updated_by: 'Sam', updated_at: '2026-10-23T12:00:00Z' },
+      { id: 'e1', location_id: LOC.a1, key: J.j1, custom_name: null, category: 'collecting', amount: null, note: '', updated_by: 'Sam', updated_at: '2026-10-23T12:00:00Z', ai_decision: 'collecting', ai_amount: 1234.57, ai_reason: 'Carrier mailed the check Oct 9; expected by Oct 29.', ai_at: '2026-10-24T11:05:00Z' },
       { id: 'e2', location_id: LOC.a1, key: J.j3, custom_name: null, category: 'in_progress', amount: 8000, note: 'drying', updated_by: 'Sam', updated_at: '2026-10-23T12:00:00Z' },
       // j6 was valued while In Progress, now invoiced: must NOT count as In Progress any more.
       { id: 'e3', location_id: LOC.a1, key: J.j6, custom_name: null, category: 'in_progress', amount: 6000, note: '', updated_by: 'Sam', updated_at: '2026-10-09T12:00:00Z' },
       { id: 'e4', location_id: LOC.aff, key: J.j8, custom_name: null, category: 'in_progress', amount: 12000, note: '', updated_by: 'Ana', updated_at: '2026-10-23T12:00:00Z' },
-      { id: 'e5', location_id: LOC.aff, key: J.j9, custom_name: null, category: 'collecting', amount: 2600, note: 'check mailed 10/5', updated_by: 'ai-review', updated_at: '2026-10-24T11:00:00Z' },
+      { id: 'e5', location_id: LOC.aff, key: J.j9, custom_name: null, category: 'collecting', amount: 2600, note: '', updated_by: 'ai-review', updated_at: '2026-10-24T11:00:00Z', ai_decision: 'collecting', ai_amount: 2600, ai_reason: 'Check mailed Oct 5, due by Oct 24.', ai_at: '2026-10-24T11:00:00Z' },
     ],
     wip_job_estimates: [
       { id: 's1', location_id: LOC.a1, job_id: J.j6, amount: 6000, entered_by: 'Sam', entered_at: '2026-10-09T12:00:00Z' },
@@ -81,7 +81,7 @@ function seed(lastWeek) {
     ],
     wip_snapshots: [
       // Forecast saved the Saturday before last week: A1 said $4,000 would come in.
-      { id: 'n1', location_id: LOC.a1, generated_at: new Date(new Date(lastWeek.start + 'T12:00:00Z').getTime() - 2 * 86400000).toISOString(), in_progress_total: 20000, collecting_total: 4000, body: '…' },
+      { id: 'n1', location_id: LOC.a1, generated_at: new Date(new Date(lastWeek.start + 'T12:00:00Z').getTime() - 2 * 86400000).toISOString(), in_progress_total: 20000, collecting_total: 4000, body: '…', generated_by: 'Sam' },
       { id: 'n2', location_id: LOC.hr, generated_at: new Date(new Date(lastWeek.start + 'T12:00:00Z').getTime() - 1 * 86400000).toISOString(), in_progress_total: 5000, collecting_total: 0, body: '…' },
     ],
     wip_reviews: [
@@ -185,6 +185,9 @@ function makeStore(lastWeek) {
         if (dup) { Object.assign(dup, it, { id: dup.id }); out.push(dup); continue; }
         if (path === 'wip_pool' && !it.token) it.token = 'minted-' + it.id + '-0123456789';
         if (path === 'wip_managers' && it.active === undefined) it.active = true;
+        if (path === 'wip_reviews' && !it.reviewed_at) it.reviewed_at = new Date().toISOString();
+        if (path === 'wip_snapshots' && !it.generated_at) it.generated_at = new Date().toISOString();
+        if (path === 'wip_job_estimates' && !it.entered_at) it.entered_at = new Date().toISOString();
         rows.push(it); out.push(it);
       }
       return /return=minimal/.test(prefer) ? ok(undefined, 201) : ok(out, 201);

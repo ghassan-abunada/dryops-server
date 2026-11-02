@@ -40,6 +40,7 @@ function typeTag(recordType) {
 }
 
 const DASH = require('./wipDash');
+const OWNER = require('./wipOwner');
 const PDF = require('./wipPdf');
 
 // deps: jnGet(pathAndQuery) → parsed JobNimbus JSON; anthropic → an SDK client
@@ -161,14 +162,26 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
     return String(n || '').replace(/\s*\([^()]*\b(MIT|CON|REB|TST|ABT|PO|PB)\b[^()]*\)\s*$/i, '').trim();
   }
 
+  // wip_entries with the dashboard columns (collect_amount, ai_*); falls back
+  // to the base columns until supabase_wip_dashboard.sql has run.
+  const ENTRY_COLS = 'key,custom_name,category,amount,note,updated_by,updated_at';
+  const ENTRY_COLS_V2 = ENTRY_COLS + ',collect_amount,ai_decision,ai_amount,ai_reason,ai_at';
+  let entryColsV2 = true;
+  async function sbGetEntries(locId) {
+    if (entryColsV2) {
+      try { return await sbGet(`wip_entries?location_id=eq.${locId}&select=${ENTRY_COLS_V2}`); }
+      catch (err) { if (!/collect_amount|ai_decision|ai_amount|ai_reason|ai_at|42703/.test(err.message)) throw err; entryColsV2 = false; }
+    }
+    return sbGet(`wip_entries?location_id=eq.${locId}&select=${ENTRY_COLS}`);
+  }
   async function loadLocation(pool) {
     const locId = pool.location_id;
     // Per-job balances come from the JobNimbus job rollup (approved invoices
     // only), the same columns DryOps' Stats / Collections read.
     const [jobs, entries, arRpc, logo] = await Promise.all([
       sbGet(`jobs?location_id=eq.${locId}&or=(stage.is.null,stage.not.in.(Completed,Lost))&name=not.ilike.*test%20dummy*`
-        + `&select=id,jn_id,number,name,status,stage,record_type,jn_created,approved_invoice_total,approved_invoice_due&order=jn_created.asc`),
-      sbGet(`wip_entries?location_id=eq.${locId}&select=key,custom_name,category,amount,note,updated_by,updated_at`),
+        + `&select=id,jn_id,number,name,status,stage,record_type,insurance_type,jn_created,approved_invoice_total,approved_invoice_due&order=jn_created.asc`),
+      sbGetEntries(locId),
       // Total AR — identical to the Dashboard's Open AR card for this location.
       sbRpc('open_ar_total', { p_location_ids: [String(locId)] }),
       logoFor(pool),
@@ -189,16 +202,24 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
       // been invoiced on them (Invoice Created already carries an invoice).
       const invoiced = Number(j.approved_invoice_total || 0) > 0;
       let category = null, amount = e && e.amount != null ? Number(e.amount) : null;
-      if (group === 'ar') { category = e && e.category === 'collecting' ? 'collecting' : null; if (category !== 'collecting') amount = null; }
+      let collectAmount = e && e.collect_amount != null ? Number(e.collect_amount) : null;
+      if (group === 'ar') { category = e && e.category === 'collecting' ? 'collecting' : null; if (category !== 'collecting') amount = null; collectAmount = null; }
       else if (group === 'in_progress') category = e ? (e.category === 'in_progress' ? 'in_progress' : null) : 'in_progress';
       else if (e && e.category === 'in_progress' && !invoiced) category = 'in_progress';
-      else amount = null;
+      else { amount = null; collectAmount = null; }
+      if (category !== 'in_progress') collectAmount = null;
+      const ownerTouched = !!(e && e.updated_by && !/^(ai-review|seed)/.test(e.updated_by));
+      // "lit": the Saturday review decided this row after the owner last touched it (or the owner never has).
+      const lit = !!(e && e.ai_at && (!ownerTouched || String(e.ai_at) > String(e.updated_at || '')));
       return {
         key: j.id, name: cleanName(j.name) + typeTag(j.record_type), number: j.number, status: j.status, stage: j.stage,
-        record_type: j.record_type, created: j.jn_created ? j.jn_created.slice(0, 10) : null,
+        record_type: j.record_type, oop: !!j.insurance_type && j.insurance_type !== 'Insurance',
+        created: j.jn_created ? j.jn_created.slice(0, 10) : null,
         due: j.approved_invoice_due != null ? money2(j.approved_invoice_due) : null,
         inv_total: j.approved_invoice_total != null ? money2(j.approved_invoice_total) : null,
-        group, category, amount,
+        group, category, amount, collect_amount: collectAmount,
+        ai_decision: (e && e.ai_decision) || null, ai_amount: e && e.ai_amount != null ? Number(e.ai_amount) : null,
+        ai_reason: (e && e.ai_reason) || null, ai_at: (e && e.ai_at) || null, lit, answered: ownerTouched,
         note: (e && e.note) || '', custom: false, jn_id: j.jn_id,
         updated_by: (e && e.updated_by) || null,
       };
@@ -206,11 +227,13 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
     for (const e of entries) {
       if (!e.key.startsWith('custom:')) continue;
       rows.push({ key: e.key, name: e.custom_name || '(unnamed)', number: null, status: 'Added by owner', stage: null,
-        record_type: null, created: e.updated_at ? e.updated_at.slice(0, 10) : null, due: null, inv_total: null,
-        group: 'custom', category: e.category, amount: e.amount != null ? Number(e.amount) : null, note: e.note || '', custom: true });
+        record_type: null, oop: false, created: e.updated_at ? String(e.updated_at).slice(0, 10) : null, due: null, inv_total: null,
+        group: 'custom', category: e.category, amount: e.amount != null ? Number(e.amount) : null, collect_amount: null,
+        ai_decision: null, ai_amount: null, ai_reason: null, ai_at: null, lit: false, answered: true, note: e.note || '', custom: true });
     }
-    const lastUpdate = entries.reduce((m, e) => (e.updated_at > m ? e.updated_at : m), '');
-    const lastBy = entries.filter(e => e.updated_at === lastUpdate).map(e => e.updated_by).find(Boolean) || '';
+    const owned = entries.filter(e => e.updated_by && !/^(ai-review|seed)/.test(e.updated_by));
+    const lastUpdate = owned.reduce((m, e) => (String(e.updated_at || '') > m ? String(e.updated_at) : m), '');
+    const lastBy = owned.filter(e => String(e.updated_at) === lastUpdate).map(e => e.updated_by).find(Boolean) || '';
     // Total AR = open_ar_total(location): sum(jobs.approved_invoice_due) over
     // Invoice Created / Invoiced / Pending Payment(s) jobs — the DryOps number.
     const arTotal = money2(arRpc || 0);
@@ -231,36 +254,64 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
   }
   function whole(v) { return '$' + Math.round(Number(v || 0)).toLocaleString('en-US'); }
 
+  // In Progress = every counted job; Collecting = confirmed invoiced rows plus
+  // In Progress jobs the owner marked "paying this week" (out-of-pocket).
   function reportLists(data) {
     const inProg = data.rows.filter(r => r.category === 'in_progress');
     const coll = data.rows.filter(r => r.category === 'collecting')
-      .map(r => ({ ...r, amount: r.amount != null ? r.amount : r.due }))
+      .map(r => ({ ...r, amount: r.amount != null ? r.amount : r.due, why: r.ai_reason || '' }))
+      .concat(data.rows.filter(r => r.category === 'in_progress' && r.collect_amount != null)
+        .map(r => ({ ...r, amount: r.collect_amount, why: r.oop ? 'out of pocket' : '' })))
       .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0));
-    const ipTotal = inProg.reduce((s, r) => s + Number(r.amount || 0), 0);
-    const cTotal = coll.reduce((s, r) => s + Number(r.amount || 0), 0);
+    const ipTotal = money2(inProg.reduce((s, r) => s + Number(r.amount || 0), 0));
+    const cTotal = money2(coll.reduce((s, r) => s + Number(r.amount || 0), 0));
     return { inProg, coll, ipTotal, cTotal };
   }
+  function weekOf(now = new Date()) {
+    const w = upcomingWeek(now);
+    const d = new Date(w.start + 'T12:00:00Z');
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  }
+  // The text owners send. Four numbers first, then the two lists.
   function sectionText(data) {
     const { inProg, coll, ipTotal, cTotal } = reportLists(data);
-    const lines = [data.label.toUpperCase(), '', `In Progress — ${whole(ipTotal)}`];
-    inProg.forEach((r, i) => lines.push(`${i + 1}. ${r.name} —${r.amount != null ? ' ' + money(r.amount, true) : ''}${r.note ? ' (' + r.note + ')' : ''}`));
+    const lines = [
+      `${data.label.toUpperCase()} · WEEK OF ${weekOf().toUpperCase()}`,
+      `In Progress · ${inProg.length} job${inProg.length === 1 ? '' : 's'} · ${whole(ipTotal)}`,
+      `Collecting this week · ${coll.length} · ${whole(cTotal)}`,
+      `AR ${whole(data.arTotal)} · Bank ${data.bank ? whole(data.bank.balance) : 'not entered'}`,
+      '', 'IN PROGRESS',
+    ];
+    inProg.forEach(r => lines.push(`${r.name} — ${r.amount != null ? money(r.amount, true) : 'no number yet'}${r.oop ? ' · OOP' : ''}${r.collect_amount != null ? ' · paying this week ' + money(r.collect_amount, true) : ''}${r.note ? ' · ' + r.note : ''}`));
     if (!inProg.length) lines.push('(none)');
-    lines.push('', `Collecting — ${whole(cTotal)}`);
-    coll.forEach((r, i) => lines.push(`${i + 1}. ${r.name} — ${money(r.amount)}${r.note ? ' (' + r.note + ')' : ''}`));
+    lines.push('', 'COLLECTING THIS WEEK');
+    coll.forEach(r => lines.push(`${r.name} — ${money(r.amount)}${r.why ? ' · ' + r.why : ''}${r.note ? ' · ' + r.note : ''}`));
     if (!coll.length) lines.push('(none)');
-    lines.push('', `Total AR — ${whole(data.arTotal)}`, bankLine(data.bank));
-    return { text: lines.join('\n'), ipTotal, cTotal, arTotal: data.arTotal, bank: data.bank };
+    return { text: lines.join('\n'), ipTotal, cTotal, arTotal: data.arTotal, bank: data.bank, ipCount: inProg.length, cCount: coll.length };
   }
   function today() { return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' }); }
-  function reportHeader(title) { return [`WIP REPORT — ${title} — ${today()}`, '='.repeat(40), ''].join('\n'); }
+  function reportHeader(title) { return [`WIP — ${title} — ${today()}`, ''].join('\n'); }
 
-  async function saveSnapshot(locationId, body, ip, c, managerId) {
+  async function saveSnapshot(locationId, body, ip, c, managerId, by) {
     const row = { location_id: locationId, body, in_progress_total: ip, collecting_total: c };
-    if (managerId) {
-      try { return await sbWrite('POST', 'wip_snapshots', { ...row, manager_id: managerId }, 'return=minimal'); }
-      catch (err) { if (!/manager_id/.test(err.message)) throw err; } // column not migrated yet
+    const extra = {}; if (managerId) extra.manager_id = managerId; if (by) extra.generated_by = String(by).slice(0, 80);
+    if (Object.keys(extra).length) {
+      try { return await sbWrite('POST', 'wip_snapshots', { ...row, ...extra }, 'return=minimal'); }
+      catch (err) { if (!/manager_id|generated_by|42703/.test(err.message)) throw err; } // columns not migrated yet
     }
     await sbWrite('POST', 'wip_snapshots', row, 'return=minimal');
+  }
+  // Null-safe date formatting for anything that came back from the database.
+  function when(iso, opts = {}) {
+    if (!iso) return '';
+    const d = new Date(iso); if (isNaN(d.getTime())) return '';
+    const f = { timeZone: 'America/Chicago', month: 'short', day: 'numeric' };
+    if (opts.time !== false) { f.hour = 'numeric'; f.minute = '2-digit'; }
+    return d.toLocaleString('en-US', f);
+  }
+  function errorPage(res, err, tag) {
+    console.error(`[wip ${tag}]`, err && err.message);
+    res.status(502).send(page('Something went wrong', `<div class="card"><b>We couldn't load this page.</b><div class="sub" style="margin-top:6px">Try again in a minute. If it keeps happening, send this to the office.</div><details style="margin-top:10px"><summary class="meta" style="cursor:pointer">Technical detail</summary><pre>${esc(err && err.message)}</pre></details><div class="actions" style="margin-top:12px"><a class="btn" href="">Try again</a></div></div>`));
   }
 
   // ── HTML shell ──────────────────────────────────────────────────────────────
@@ -272,49 +323,68 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
   // Mobile-first: one column, big tap targets, a sticky top bar and a fixed
   // bottom action bar; desktop just gets a wider column.
   const CSS = `
-  :root{--bg:#f3f5f2;--card:#fff;--ink:#1c2321;--mut:#5f6b66;--line:#dde3dd;--acc:#1b6e5a;--acc2:#0f4c3a;--danger:#b3261e;--ip:#2457a3;--col:#1b6e5a;--top:56px}
-  *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
-  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.4 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-tap-highlight-color:transparent;overscroll-behavior-y:none}
-  .top{position:sticky;top:0;z-index:5;background:rgba(243,245,242,.92);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-bottom:1px solid var(--line);padding:calc(10px + env(safe-area-inset-top)) 16px 10px;display:flex;align-items:center;gap:10px;min-height:var(--top)}
-  .top h1{font-size:18px;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .wrap{max-width:720px;margin:0 auto;padding:14px 16px calc(92px + env(safe-area-inset-bottom))}
-  h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:0}
-  .sub{color:var(--mut);font-size:13px}.meta{color:var(--mut);font-size:12.5px}.nm{font-weight:600;font-size:16px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:10px}
-  .tot{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0 0 14px}
-  .tot .card{margin:0;padding:12px 14px}.tot b{font-size:22px;display:block;font-variant-numeric:tabular-nums}.tot span{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
-  details.sec{margin:16px 0 0}details.sec>summary{list-style:none;display:flex;align-items:center;gap:8px;padding:10px 2px;cursor:pointer;user-select:none}
+  :root{--bg:#F1F5F9;--card:#fff;--ink:#0F172A;--ink2:#334155;--mut:#475569;--faint:#94A3B8;--line:#E2E8F0;--acc:#0369A1;--acc2:#075985;--wash:#DBEAFE;--navy:#1C2333;--navy2:#232B3E;--hdr:#F1F5F9;--hdrsub:#7B90A8;--danger:#DC2626;--ip:#2563EB;--col:#16A34A;--amber:#D97706;--amberbg:#FFFBEB;--amberline:#F5D08A;--top:56px}
+  *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}[hidden]{display:none!important}
+  body{margin:0;background:var(--bg);color:var(--ink);font:600 15px/1.4 -apple-system,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-tap-highlight-color:transparent;overscroll-behavior-y:none}
+  ::selection{background:var(--wash);color:var(--ink)}::placeholder{color:var(--mut);opacity:.85;font-weight:500}
+  .top{position:sticky;top:0;z-index:5;background:var(--navy);color:var(--hdr);padding:calc(10px + env(safe-area-inset-top)) 16px 10px;display:flex;align-items:center;gap:10px;min-height:var(--top)}
+  .top h1{font-size:18px;font-weight:800;letter-spacing:-.2px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .top .ttl{flex:1;min-width:0}.top .sub{font-size:12px;color:var(--hdrsub);font-weight:600}
+  .top .btn.ghost{background:rgba(255,255,255,.15);border-color:transparent;color:var(--hdr)}
+  .steps{display:flex;gap:4px;width:84px;flex:none}.steps span{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.18)}.steps span.on{background:#38BDF8}
+  .wrap{max-width:720px;margin:0 auto;padding:14px 16px calc(96px + env(safe-area-inset-bottom))}
+  h2{font-size:20px;font-weight:800;letter-spacing:-.2px;color:var(--ink);margin:4px 0 2px;display:flex;align-items:center}
+  h3{font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--ink2);margin:0;font-weight:800}
+  .lead{color:var(--ink2);font-size:13px;font-weight:600;margin:0 0 12px}
+  .sub{color:var(--ink2);font-size:13px;font-weight:600}.meta{color:var(--mut);font-size:12px;font-weight:600}.nm{font-weight:700;font-size:15px;color:var(--ink)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:10px}
+  details.sec{margin:14px 0 0}details.sec>summary{list-style:none;display:flex;align-items:center;gap:8px;padding:10px 2px;cursor:pointer;user-select:none;min-height:44px}
   details.sec>summary::-webkit-details-marker{display:none}details.sec>summary::after{content:"›";margin-left:auto;color:var(--mut);font-size:20px;transform:rotate(90deg);transition:transform .15s}
-  details.sec[open]>summary::after{transform:rotate(-90deg)}.count{background:#e6ebe6;color:var(--mut);border-radius:999px;padding:1px 8px;font-size:12px}
-  .job{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:10px}
-  .job.is-ip{border-left:4px solid var(--ip)}.job.is-col{border-left:4px solid var(--col)}
-  .job-head{margin-bottom:10px}.job-head .meta{margin-top:2px}
-  input[type=text],input[type=number],select,textarea{font:inherit;font-size:16px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;min-width:0;width:100%}
-  input.nm{font-weight:600}
-  .seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}
-  .seg button{flex:1;font:inherit;font-size:14px;font-weight:600;min-height:44px;padding:0 6px;border:0;background:#fff;color:var(--mut);cursor:pointer;white-space:nowrap}
-  .seg button+button{border-left:1px solid var(--line)}.seg button.on-ip{background:var(--ip);color:#fff}.seg button.on-col{background:var(--col);color:#fff}.seg button.on-off{background:#e9ecea;color:var(--ink)}
-  .amt-row{display:flex;align-items:center;gap:8px;margin-top:10px}.amt-row .pre{color:var(--mut);font-weight:600}
-  input.amt{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}input.nt{margin-top:8px;font-size:14px;padding:8px 12px}
-  .btn{font:inherit;font-size:15px;font-weight:600;min-height:44px;padding:0 16px;border-radius:12px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}
-  .btn.ghost{background:#fff;color:var(--acc)}.btn.small{min-height:38px;padding:0 12px;font-size:14px}.btn.danger{border-color:var(--danger);color:var(--danger);background:#fff}.btn.icon{padding:0 12px}
-  .btn:disabled{opacity:.6}
+  details.sec[open]>summary::after{transform:rotate(-90deg)}.count{background:#E2E8F0;color:var(--ink2);border-radius:999px;padding:1px 8px;font-size:12px;font-weight:700}
+  .job{position:relative;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px 12px 18px;margin-bottom:10px;transition:background-color .15s,border-color .15s}
+  .job::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;border-radius:12px 0 0 12px;background:var(--line)}
+  .job.is-ip::before{background:var(--ip)}.job.is-col::before{background:var(--col)}
+  .job.need{background:var(--amberbg);border-color:var(--amberline)}.job.need::before{background:var(--amber)}
+  .job.lit{background:var(--amberbg);border-color:var(--amberline)}.job.maybe::before{background:var(--amber)}
+  .job.off{opacity:.7}
+  .job-head{margin-bottom:8px}.job-head .meta{margin-top:2px}
+  .says{margin-top:6px;font-size:13px;color:var(--ink2);font-weight:600;background:var(--bg);border-radius:8px;padding:6px 10px}
+  .tag{display:inline-block;margin-left:6px;padding:2px 7px;border-radius:5px;background:rgba(148,163,184,.18);color:var(--ink2);font:800 10px/1.3 inherit;letter-spacing:.3px;text-transform:uppercase;vertical-align:middle}
+  .tag.oop{background:rgba(234,88,12,.12);color:#EA580C}
+  input[type=text],input[type=number],input[type=email],select,textarea{font:inherit;font-size:16px;font-weight:600;color:var(--ink);padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);min-width:0;width:100%;min-height:44px}
+  input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible,a.btn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  input.nm{font-weight:700}
+  .amt-row{display:flex;align-items:center;gap:8px;margin-top:8px}.amt-row .pre{color:var(--mut);font-weight:800}
+  input.amt{text-align:right;font-variant-numeric:tabular-nums;font-weight:700;font-size:17px}input.nt{margin-top:8px;font-size:14px;padding:8px 12px;min-height:40px}
+  .sw{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);font-size:13px;color:var(--ink2);cursor:pointer;min-height:44px}
+  .sw input{position:absolute;opacity:0;width:0;height:0}.tog{width:44px;height:26px;border-radius:999px;background:var(--line);position:relative;flex:none;transition:background-color .15s}
+  .tog::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(2,8,23,.2);transition:transform .15s}
+  .sw input:checked+.tog{background:var(--acc)}.sw input:checked+.tog::after{transform:translateX(18px)}
+  .rowbtns{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center}
+  .btn{font:inherit;font-size:15px;font-weight:700;min-height:44px;padding:0 16px;border-radius:10px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;transition:background-color .15s}
+  .btn:hover{background:var(--acc2)}.btn.ghost{background:#fff;color:var(--ink2);border-color:var(--line)}.btn.ghost:hover{background:var(--bg);border-color:var(--acc);color:var(--acc)}
+  .btn.small{min-height:36px;padding:0 12px;font-size:13px;border-radius:9px}.btn.danger{border-color:var(--danger);color:var(--danger);background:#fff}
+  .btn.on{background:var(--col);border-color:var(--col);color:#fff}.btn.ghost.on{background:var(--bg);color:var(--ink);border-color:var(--ink2)}
+  .btn:disabled{opacity:.55}
   .actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
   .bar{position:fixed;left:0;right:0;bottom:0;z-index:6;background:rgba(255,255,255,.96);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-top:1px solid var(--line);padding:10px 16px calc(10px + env(safe-area-inset-bottom));display:flex;gap:8px;align-items:center}
-  .bar .status{flex:1;font-size:13px;color:var(--mut);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.status.ok{color:var(--acc)}.status.err{color:var(--danger)}
-  pre{background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px;white-space:pre-wrap;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;margin:8px 0 0}
+  .bar .status{flex:1;min-width:0;display:flex;flex-direction:column}.bar .status b{font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--mut)}.bar .status span{font-size:15px;font-weight:800;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .savenote{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));transform:translateX(-50%) translateY(10px);z-index:7;background:var(--ink);color:#fff;font-size:13px;font-weight:700;padding:8px 14px;border-radius:999px;opacity:0;pointer-events:none;transition:opacity .15s,transform .15s}
+  .savenote.ok,.savenote.err{opacity:1;transform:translateX(-50%) translateY(0)}.savenote.err{background:var(--danger);pointer-events:auto;cursor:pointer}
+  pre{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:12px;white-space:pre-wrap;font:600 13px/1.5 inherit;margin:8px 0 0;color:var(--ink)}
+  pre.preview{font:600 14px/1.55 inherit}
   .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  .sheet{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.35);display:none;align-items:flex-end;justify-content:center}.sheet.open{display:flex}
+  .sheet{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.4);display:none;align-items:flex-end;justify-content:center}.sheet.open{display:flex}
   .sheet>div{background:#fff;border-radius:18px 18px 0 0;padding:16px 16px calc(16px + env(safe-area-inset-bottom));width:100%;max-width:720px;max-height:85vh;overflow:auto}
-  .sheet textarea{height:180px;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;margin:10px 0}
+  .sheet textarea{height:180px;font:600 13px/1.45 inherit;margin:10px 0}
   .list{border-top:1px solid var(--line)}.list>div{padding:10px 0;border-bottom:1px solid var(--line)}
-  .steps ol{margin:8px 0 10px;padding-left:22px}.steps li{margin:6px 0;line-height:1.4}
-  .lbl{display:block;font-size:13px;font-weight:600;color:var(--mut);margin:14px 0 6px;text-transform:uppercase;letter-spacing:.05em}
-  .q{font:inherit;font-size:12px;font-weight:700;line-height:1;width:20px;height:20px;padding:0;border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--mut);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-left:6px;flex:none;text-transform:none;letter-spacing:0}
+  .lbl{display:block;font-size:11px;font-weight:800;color:var(--mut);margin:0 0 6px;text-transform:uppercase;letter-spacing:.5px}
+  .need-txt{color:#9a6210;font-weight:700}
+  .q{font:inherit;font-size:12px;font-weight:800;line-height:1;width:28px;height:28px;padding:0;border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--ink2);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-left:8px;flex:none;text-transform:none;letter-spacing:0;position:relative}
+  .q::after{content:"";position:absolute;inset:-8px}
   .q.on{background:var(--acc);border-color:var(--acc);color:#fff}
-  .help{display:none;color:var(--mut);font-size:13px;line-height:1.4;margin:6px 0 0}.help.on{display:block}
-  details.sec .help{margin:-2px 2px 10px}
-  .job.need{border-color:#e0b04a;background:#fffbf0}.need-txt{color:#9a6210;font-weight:600}
+  .help{display:none;color:var(--ink2);font-size:13px;font-weight:600;line-height:1.45;margin:6px 0 10px;background:var(--wash);border-radius:10px;padding:8px 12px}.help.on{display:block}
+  details.sec .help{margin:0 2px 10px}
   @media(min-width:600px){.actions{grid-template-columns:repeat(4,1fr)}}
   ` + DASH.CSS;
   const ICON = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#1b6e5a"/><text x="32" y="41" font-family="-apple-system,Helvetica,Arial" font-weight="700" font-size="22" text-anchor="middle" fill="#fff">WIP</text></svg>');
@@ -344,92 +414,26 @@ document.addEventListener('click',e=>{const q=e.target.closest('.q[data-help]');
 
   // ── Owner page ──────────────────────────────────────────────────────────────
   app.get('/wip/:token', async (req, res, next) => {
-    if (req.params.token === 'master') return next();
+    if (req.params.token === 'master' || req.params.token === 'admin') return next();
     try {
       const pool = await poolByToken(req.params.token);
-      if (!pool) return res.status(404).send(page('Not found', '<p>This WIP link is not valid. Ask for a fresh link.</p>'));
-      const data = await loadLocation(pool);
-      const textUrl = `/wip/${esc(pool.token)}/text`;
-      const topbar = `<div class="top">${data.logo ? `<img class="logo" src="${esc(data.logo)}" alt="">` : ''}<h1>${esc(data.label)}${data.logo ? '' : ' · WIP'}</h1><button class="btn small" data-share="${textUrl}" data-share-title="${esc(data.label)} WIP">Share</button></div>`;
-      const body = `
-<div class="card steps"><b>About 5 minutes${q('steps')}</b>
-${help('steps', 'Everything saves by itself as you type. Tap the ? next to any heading if you are not sure what it means. When you are finished, tap "Done — send it" at the bottom.')}
-<ol>
-<li>Type your <b>name</b>.</li>
-<li><b>In Progress:</b> what each job is worth.</li>
-<li><b>Collecting:</b> what you expect to get paid this week.</li>
-<li><b>Bank Balance:</b> today's balance.</li>
-</ol></div>
-<label class="lbl" for="who">Your name</label>
-<input type="text" id="who" placeholder="Type your name" autocomplete="name">
-<div class="tot" style="margin-top:14px"><div class="card"><span>In Progress</span>${q('ip')}<b id="t-ip">$0</b><div class="meta" id="n-ip"></div>${help('ip', 'Jobs we are working on right now. Type what each one is worth — a rough guess is fine.')}</div>
-<div class="card"><span>Collecting</span>${q('col')}<b id="t-col">$0</b><div class="meta" id="n-col"></div>${help('col', 'Invoices that are sent and unpaid. Type how much you expect to actually get paid this week.')}</div>
-<div class="card"><span>AR</span>${q('ar')}<b>${whole(data.arTotal)}</b>${help('ar', 'Everything customers and carriers still owe us on invoiced jobs. Comes from JobNimbus — the same number as the DryOps dashboard.')}</div>
-<div class="card"><span>Bank Balance</span>${q('bank')}<div class="amt-row" style="margin-top:4px"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" id="bank" value="${data.bank ? esc(data.bank.balance) : ''}" placeholder="type it here"></div>
-<div class="meta" id="bank-meta">${data.bank && data.bank.at ? `entered ${esc(new Date(data.bank.at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' }))}${data.bank.by ? ' by ' + esc(data.bank.by) : ''}` : '<span class="need-txt">please type today\'s balance</span>'}</div>${help('bank', "Today's balance in the bank account. Type it in — it is not pulled from anywhere.")}</div></div>
-<div id="sections"></div>
-<div class="bar"><div class="status" id="status">Loaded</div><a class="btn ghost small" href="/wip/${esc(pool.token)}/pdf" target="_blank">PDF</a><button class="btn ghost small" id="add-btn">+ Add a job</button><button class="btn" data-share="${textUrl}" data-share-title="${esc(data.label)} WIP">Done — send it</button></div>
-<div class="sheet" id="add-sheet"><div><b>Add a job that isn't on the list</b><div class="sub" style="margin-top:6px">Only for jobs that aren't in JobNimbus yet.</div><div class="actions" style="margin-top:12px"><button class="btn" onclick="addCustom('in_progress')">In Progress</button><button class="btn ghost" onclick="addCustom('collecting')">Collecting</button></div></div></div>`;
-      const script = `
-const TOKEN=${json(pool.token)};let ROWS=${json(data.rows)};
-const GROUPS=[
-['in_progress','In Progress',true,'Jobs we are working on. Type what each one is worth — a rough guess is fine. Not working on it? Tap "hide it".'],
-['ar','Collecting',true,'Invoices that are sent and unpaid. Type how much you expect to actually get paid THIS WEEK. Leave blank if nothing yet.'],
-['billing','Not invoiced yet',false,'Finished jobs that have not been sent to insurance. You can usually skip these — type a value only if you want one counted as In Progress.'],
-['other','On hold',false,'Leads and jobs on hold. You can usually skip these.'],
-['custom','Added by you',true,'Jobs that are not in JobNimbus yet. Type the name and what it is worth.'],
-['hidden','Hidden',false,'Not counted. Tap "count it" to put a job back.']];
-// Where a card is shown: in-progress jobs the owner hid go to "Hidden".
-function viewGroup(r){return r.group==='in_progress'&&!r.category?'hidden':r.group}
-// Bucket follows the section: invoiced jobs count as Collecting only when an
-// amount is entered; other non-production jobs count as In Progress when valued.
-function deriveCategory(r){if(r.group==='ar')return r.amount!=null?'collecting':null;if(r.group==='billing'||r.group==='other')return r.amount!=null?'in_progress':null;return r.category}
-for(const r of ROWS){if(r.group==='ar'&&r.category==='collecting'&&r.amount==null&&r.due!=null)r.amount=r.due}
-const who=document.getElementById('who');try{who.value=localStorage.getItem('wip_who')||''}catch(e){}
-who.addEventListener('change',()=>{try{localStorage.setItem('wip_who',who.value)}catch(e){}});
-const OPEN={};try{Object.assign(OPEN,JSON.parse(localStorage.getItem('wip_open')||'{}'))}catch(e){}
-function fmt(n){return '$'+Math.round(n||0).toLocaleString('en-US')}
-function amtOf(r){if(r.category==='collecting')return r.amount!=null?r.amount:(r.due||0);return r.amount||0}
-function totals(){let ip=0,c=0,ni=0,nc=0,need=0;for(const r of ROWS){if(r.category==='in_progress'){ip+=Number(r.amount||0);ni++;if(r.amount==null)need++}if(r.category==='collecting'){c+=Number(amtOf(r));nc++}}
-document.getElementById('t-ip').textContent=fmt(ip);document.getElementById('t-col').textContent=fmt(c);
-document.getElementById('n-ip').innerHTML=ni+' job'+(ni===1?'':'s')+(need?' · <span class="need-txt">'+need+' still need a number</span>':ni?' · all have numbers ✓':'');
-document.getElementById('n-col').textContent=nc?nc+' invoice'+(nc===1?'':'s'):'nothing entered yet'}
-function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function cardClass(r){return 'job '+(r.category==='in_progress'?'is-ip':r.category==='collecting'?'is-col':'')}
-function cardNeeds(r){return viewGroup(r)==='in_progress'&&r.category==='in_progress'&&r.amount==null}
-function jobCard(r){const vg=viewGroup(r);const ph=vg==='ar'?'How much this week?':vg==='billing'||vg==='other'?'Leave blank, or type a value':vg==='custom'&&r.category==='collecting'?'How much this week?':'What is this job worth?';
-const link=vg==='in_progress'&&!r.custom?' · <a href="#" data-hide="'+esc(r.key)+'">not working on this? hide it</a>':vg==='hidden'?' · <a href="#" data-restore="'+esc(r.key)+'">count it</a>':r.custom?' · <a href="#" data-del="'+esc(r.key)+'">remove</a>':'';
-return '<div class="'+cardClass(r)+(cardNeeds(r)?' need':'')+'" data-card="'+esc(r.key)+'"><div class="job-head">'+(r.custom?'<input type="text" class="nm" value="'+esc(r.name)+'" data-k="'+esc(r.key)+'" data-f="custom_name" placeholder="Customer name">':'<div class="nm">'+esc(r.name)+'</div>')
-+'<div class="meta">'+(r.number?'#'+esc(r.number)+' · ':'')+esc(r.status)+(r.record_type&&r.record_type!=='Mitigation'?' · '+esc(r.record_type):'')+(r.created?' · started '+esc(r.created):'')+(r.due!=null?' · <b>they owe '+fmt(r.due)+'</b>':'')+link+'</div></div>'
-+(vg==='hidden'?'':'<div class="amt-row"><span class="pre">$</span><input type="number" inputmode="decimal" step="0.01" class="amt" data-k="'+esc(r.key)+'" data-f="amount" value="'+(r.amount!=null?r.amount:'')+'" placeholder="'+esc(ph)+'"></div>'
-+(r.note?'<input type="text" class="nt" data-k="'+esc(r.key)+'" data-f="note" value="'+esc(r.note)+'" placeholder="Note">':'<a href="#" class="meta" data-note="'+esc(r.key)+'" style="display:inline-block;margin-top:8px">+ add a note</a>'))+'</div>'}
-function render(){const host=document.getElementById('sections');host.innerHTML='';
-for(const [g,title,dflt,hint] of GROUPS){const rows=ROWS.filter(r=>viewGroup(r)===g);if(!rows.length)continue;
-const open=OPEN[g]!==undefined?OPEN[g]:dflt;
-const sec=document.createElement('details');sec.className='sec';sec.open=open;sec.dataset.g=g;
-sec.innerHTML='<summary><h2>'+esc(title)+'</h2><button type="button" class="q" data-help="sec-'+g+'" aria-label="What is this?" aria-expanded="false">?</button><span class="count">'+rows.length+'</span></summary><div class="help" id="help-sec-'+g+'">'+esc(hint)+'</div>'+rows.map(jobCard).join('');
-sec.addEventListener('toggle',()=>{OPEN[g]=sec.open;try{localStorage.setItem('wip_open',JSON.stringify(OPEN))}catch(e){}});
-host.appendChild(sec)}totals()}
-const bankEl=document.getElementById('bank');let bankTimer=null;
-bankEl.addEventListener('input',()=>{clearTimeout(bankTimer);st.textContent='Saving…';st.className='status';bankTimer=setTimeout(async()=>{try{const r=await fetch('/wip/'+TOKEN+'/bank',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({balance:bankEl.value===''?null:Number(bankEl.value),updated_by:who.value||null})});if(!r.ok)throw new Error(await r.text());
-document.getElementById('bank-meta').textContent=bankEl.value===''?'not entered yet':'as of today'+(who.value?' · '+who.value:'');st.textContent='Saved ✓ '+new Date().toLocaleTimeString();st.className='status ok'}catch(e){st.textContent='Save failed — '+e.message;st.className='status err'}},700)});
-document.getElementById('add-btn').onclick=()=>document.getElementById('add-sheet').classList.add('open');
-document.getElementById('add-sheet').addEventListener('click',e=>{if(e.target.id==='add-sheet')e.target.classList.remove('open')});
-const dirty=new Map();let timer=null;const st=document.getElementById('status');
-function queue(key){const r=ROWS.find(x=>x.key===key);dirty.set(key,{key,category:r.category,amount:r.amount,note:r.note,custom_name:r.custom?r.name:undefined});st.textContent='Saving…';st.className='status';clearTimeout(timer);timer=setTimeout(flush,700)}
-async function flush(){const entries=[...dirty.values()];dirty.clear();if(!entries.length)return;
-try{const r=await fetch('/wip/'+TOKEN+'/entries',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entries,updated_by:who.value||null})});if(!r.ok)throw new Error(await r.text());st.textContent='Saved ✓ '+new Date().toLocaleTimeString();st.className='status ok'}catch(e){st.textContent='Save failed — '+e.message;st.className='status err';entries.forEach(x=>dirty.set(x.key,x))}}
-document.addEventListener('click',e=>{const n=e.target.closest('a[data-note]');if(n){e.preventDefault();const inp=document.createElement('input');inp.type='text';inp.className='nt';inp.dataset.k=n.dataset.note;inp.dataset.f='note';inp.placeholder='Note';n.replaceWith(inp);inp.focus();return}
-const h=e.target.closest('a[data-hide],a[data-restore]');if(h){e.preventDefault();const key=h.dataset.hide||h.dataset.restore;const r=ROWS.find(x=>x.key===key);r.category=h.dataset.hide?null:'in_progress';if(h.dataset.hide)OPEN.hidden=true;render();queue(r.key);return}
-const d=e.target.closest('a[data-del]');if(d){e.preventDefault();if(!confirm('Remove this line?'))return;fetch('/wip/'+TOKEN+'/entries/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:d.dataset.del})}).then(()=>{ROWS=ROWS.filter(x=>x.key!==d.dataset.del);render()})}});
-document.addEventListener('input',e=>{const i=e.target;if(!i.dataset||!i.dataset.f)return;const r=ROWS.find(x=>x.key===i.dataset.k);if(!r)return;
-if(i.dataset.f==='amount'){r.amount=i.value===''?null:Number(i.value);r.category=deriveCategory(r);const card=i.closest('[data-card]');if(card)card.className=cardClass(r)+(cardNeeds(r)?' need':'');totals()}else if(i.dataset.f==='note'){r.note=i.value}else if(i.dataset.f==='custom_name'){r.name=i.value}queue(r.key)});
-function addCustom(cat){document.getElementById('add-sheet').classList.remove('open');const key='custom:'+crypto.randomUUID();ROWS.push({key,name:'',number:null,status:'Added by you',created:null,due:null,group:'custom',category:cat,amount:null,note:'',custom:true});OPEN.custom=true;render();queue(key);
-const el=document.querySelector('input[data-k="'+key+'"][data-f="custom_name"]');if(el){el.scrollIntoView({block:'center'});el.focus()}}
-window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
+      if (!pool) return res.status(404).send(page('Not found', '<div class="card"><b>This WIP link is not valid.</b><div class="sub" style="margin-top:6px">Ask the office for a fresh link.</div></div>'));
+      const [data, lastSent] = await Promise.all([loadLocation(pool), lastSnapshot(pool.location_id)]);
+      const { body, script, topbar } = OWNER.renderOwner(ctx, {
+        token: pool.token, label: data.label, logo: data.logo, rows: data.rows, bank: data.bank,
+        bankWhen: data.bank ? when(data.bank.at, { time: false }) : '', weekLabel: weekOf(),
+        lastSent: lastSent ? when(lastSent.generated_at) + (lastSent.generated_by ? ' by ' + lastSent.generated_by : '') : null,
+      });
       res.send(page(`${data.label} WIP`, body, script, topbar, { icon: data.logo || null }));
-    } catch (err) { console.error('[wip owner]', err.message); res.status(502).send(page('Error', `<p>${esc(err.message)}</p>`)); }
+    } catch (err) { errorPage(res, err, 'owner'); }
   });
+  async function lastSnapshot(locationId) {
+    try { return (await sbGet(`wip_snapshots?location_id=eq.${locationId}&select=generated_at,generated_by&order=generated_at.desc&limit=1`))[0] || null; }
+    catch (err) {
+      if (!/generated_by|42703/.test(err.message)) throw err;
+      return (await sbGet(`wip_snapshots?location_id=eq.${locationId}&select=generated_at&order=generated_at.desc&limit=1`))[0] || null;
+    }
+  }
 
   app.post('/wip/:token/entries', async (req, res) => {
     try {
@@ -441,17 +445,27 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
         key: String(e.key || '').slice(0, 80),
         category: e.category === 'in_progress' || e.category === 'collecting' ? e.category : null,
         amount: e.amount === null || e.amount === undefined || e.amount === '' || isNaN(Number(e.amount)) ? null : Math.round(Number(e.amount) * 100) / 100,
+        collect_amount: e.collect_amount === null || e.collect_amount === undefined || e.collect_amount === '' || isNaN(Number(e.collect_amount)) ? null : Math.round(Number(e.collect_amount) * 100) / 100,
         note: e.note ? String(e.note).slice(0, 300) : null,
         custom_name: e.custom_name !== undefined ? String(e.custom_name || '').slice(0, 120) : undefined,
         updated_by: b.updated_by ? String(b.updated_by).slice(0, 80) : null,
         updated_at: new Date().toISOString(),
       })).filter(r => r.key && (r.key.startsWith('custom:') || /^[0-9a-f-]{36}$/.test(r.key)));
       for (const r of rows) if (r.custom_name === undefined) delete r.custom_name;
-      if (rows.length) await sbWrite('POST', 'wip_entries?on_conflict=location_id,key', rows, 'resolution=merge-duplicates,return=minimal');
+      if (rows.length) await upsertEntries(rows);
       const recorded = await recordEstimates(pool.location_id, rows);
       res.json({ ok: true, saved: rows.length, estimates: recorded });
     } catch (err) { console.error('[wip save]', err.message); res.status(502).json({ error: err.message }); }
   });
+  // Upsert owner rows; drops collect_amount when the column is not migrated yet.
+  async function upsertEntries(rows) {
+    try { await sbWrite('POST', 'wip_entries?on_conflict=location_id,key', rows, 'resolution=merge-duplicates,return=minimal'); }
+    catch (err) {
+      if (!/collect_amount|42703/.test(err.message)) throw err;
+      entryColsV2 = false;
+      await sbWrite('POST', 'wip_entries?on_conflict=location_id,key', rows.map(({ collect_amount, ...r }) => r), 'resolution=merge-duplicates,return=minimal');
+    }
+  }
   // Append-only history of "what is this job worth" (wip_job_estimates) so the
   // guess survives the entry being reused once the job is invoiced. Never fails
   // the owner's save.
@@ -504,10 +518,10 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
       if (!pool) return res.status(404).type('text/plain').send('Invalid link');
       const data = await loadLocation(pool);
       const s = sectionText(data);
-      const text = reportHeader(data.label.toUpperCase()) + s.text + '\n';
-      await saveSnapshot(pool.location_id, text, s.ipTotal, s.cTotal);
+      const text = s.text + '\n';
+      if (!req.query.preview) await saveSnapshot(pool.location_id, text, s.ipTotal, s.cTotal, null, req.query.by);
       res.type('text/plain; charset=utf-8').send(text);
-    } catch (err) { res.status(502).type('text/plain').send(err.message); }
+    } catch (err) { console.error('[wip text]', err.message); res.status(502).type('text/plain').send('Could not build the report right now. Try again in a minute.'); }
   });
   app.get('/wip/:token/pdf', async (req, res, next) => {
     if (req.params.token === 'master') return next();
@@ -575,6 +589,15 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
       byLoc: Object.values(byLocMap).sort((a, b) => b.n - a.n),
     };
   }
+  // Newest snapshot per location (the last time the owner sent, or the Saturday run saved).
+  async function lastSnapshots(ids) {
+    const q = `wip_snapshots?location_id=in.(${ids.join(',')})&generated_at=gte.${new Date(Date.now() - 21 * 86400000).toISOString()}&order=generated_at.desc&limit=500`;
+    try { return await sbGet(`${q}&select=location_id,generated_at,generated_by`); }
+    catch (err) {
+      if (!/generated_by|42703/.test(err.message)) throw err;
+      return sbGet(`${q}&select=location_id,generated_at`);
+    }
+  }
   async function loadDashboard(pools, now = new Date()) {
     const week = upcomingWeek(now), lw = lastWeek(now);
     const ids = pools.map(p => p.location_id), idList = ids.join(',');
@@ -582,17 +605,19 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
     // Forecast = the last report saved in the 7 days before last Monday (Monday itself allowed).
     const fcFrom = new Date(new Date(startIso).getTime() - 7 * 86400000).toISOString(), fcTo = new Date(new Date(startIso).getTime() + 86400000).toISOString();
     const poolsById = Object.fromEntries(pools.map(p => [p.location_id, { ...p, label: p.label || (p.locations && p.locations.name) || 'Location' }]));
-    const [datas, pays, invs, snaps, reviews, accuracy] = await Promise.all([
+    const [datas, pays, invs, snaps, reviews, accuracy, sent] = await Promise.all([
       Promise.all(pools.map(p => loadLocation(p))),
       ids.length ? sbGetAll(`payments?location_id=in.(${idList})&jn_created=gte.${startIso}&jn_created=lt.${endIso}&or=(method_id.is.null,method_id.neq.-1)&select=location_id,amount`) : [],
       ids.length ? sbGetAll(`invoices?location_id=in.(${idList})&jn_created=gte.${startIso}&jn_created=lt.${endIso}&select=location_id,total`) : [],
       ids.length ? sbGet(`wip_snapshots?location_id=in.(${idList})&generated_at=gte.${fcFrom}&generated_at=lt.${fcTo}&select=location_id,collecting_total,generated_at&order=generated_at.desc`) : [],
       ids.length ? sbGet(`wip_reviews?location_id=in.(${idList})&select=location_id,reviewed_at,jobs_reviewed,applied,result->>trigger&order=reviewed_at.desc&limit=500`) : [],
       loadAccuracy(ids, poolsById),
+      ids.length ? lastSnapshots(ids) : [],
     ]);
     const collected = sumBy(pays, 'location_id', 'amount'), invoiced = sumBy(invs, 'location_id', 'total');
     const forecast = {}; for (const sn of snaps) if (!(sn.location_id in forecast)) forecast[sn.location_id] = sn.collecting_total != null ? Number(sn.collecting_total) : null;
     const lastReview = {}; for (const r of reviews) if (!(r.location_id in lastReview)) lastReview[r.location_id] = r;
+    const lastSent = {}; for (const sn of sent) if (!(sn.location_id in lastSent)) lastSent[sn.location_id] = sn;
     const locations = datas.map(data => {
       const p = data.pool, s = sectionText(data), lists = reportLists(data);
       const counted = data.rows.filter(r => r.group === 'in_progress' && !r.custom && r.category === 'in_progress');
@@ -602,7 +627,8 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
         ipTotal: money2(lists.ipTotal), cTotal: money2(lists.cTotal), arTotal: data.arTotal, bank: data.bank,
         collected: money2(collected[p.location_id] || 0), invoiced: money2(invoiced[p.location_id] || 0),
         forecast: p.location_id in forecast ? forecast[p.location_id] : null,
-        ipCount: counted.length, wcCount: wc.length,
+        ipCount: counted.length, wcCount: wc.length, cCount: lists.coll.length,
+        lastSent: lastSent[p.location_id] || null,
         ipMissing: counted.filter(r => r.amount == null && r.status !== 'Work Complete').length, wcMissing: wc.filter(r => r.amount == null).length,
         lastUpdate: data.lastUpdate, lastBy: data.lastBy, lastReview: lastReview[p.location_id] || null, text: s.text,
       };
@@ -621,7 +647,7 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
   }
 
   // ── Master page ─────────────────────────────────────────────────────────────
-  const ctx = { esc, json, q, help, whole, money };
+  const ctx = { esc, json, q, help, whole, money, when };
   function originOf(req) { return `${req.protocol}://${req.get('host')}`; }
   function titleFor(req) { return req.wip.manager ? req.wip.manager.name : 'all locations'; }
 
@@ -631,31 +657,31 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
       const dash = await loadDashboard(pools);
       const options = req.wip.scope === 'all'
         ? (await sbGetAll('locations?select=id,name&order=name.asc')).filter(l => !pools.some(p => p.location_id === l.id)) : [];
+      const lastVisit = req.wip.manager ? req.wip.manager.last_opened_at : null;
       if (req.wip.manager) sbWrite('PATCH', `wip_managers?id=eq.${req.wip.manager.id}`, { last_opened_at: new Date().toISOString() }, 'return=minimal').catch(() => {});
       const { body, script, topbar } = DASH.renderMaster(ctx, {
-        token: req.params.master, scope: req.wip.scope, manager: req.wip.manager, title: titleFor(req), origin: originOf(req), today: today(),
-        week: dash.week, lastWeek: dash.lastWeek, locations: dash.locations, totals: dash.totals, accuracy: dash.accuracy,
+        token: req.params.master, scope: req.wip.scope, manager: req.wip.manager, title: titleFor(req), origin: originOf(req), today: when(new Date(), { time: false }),
+        week: dash.week, lastWeek: dash.lastWeek, locations: dash.locations, totals: dash.totals, accuracy: dash.accuracy, lastVisit,
         options, weeklyReview, anthropic: !!anthropic,
       });
       res.send(page(`WIP · ${titleFor(req)}`, body, script, topbar, { wide: true }));
-    } catch (err) { console.error('[wip master]', err.message); res.status(502).send(page('Error', `<p>${esc(err.message)}</p>`)); }
+    } catch (err) { errorPage(res, err, 'master'); }
   });
 
   app.get('/wip/master/:master/text', resolveMaster, async (req, res) => {
     try {
       const pool = await poolsFor(req);
-      const parts = []; let ip = 0, c = 0, ar = 0, bank = 0, bankMissing = 0;
+      const parts = []; let ip = 0, c = 0;
       for (const p of pool) {
         const data = await loadLocation(p);
         const s = sectionText(data);
-        ip += s.ipTotal; c += s.cTotal; ar += data.arTotal; parts.push(s.text);
-        if (data.bank) bank += data.bank.balance; else bankMissing++;
+        ip += s.ipTotal; c += s.cTotal; parts.push(s.text);
       }
-      const text = reportHeader(titleFor(req).toUpperCase()) + parts.join('\n\n\n') + '\n\n\n' + '='.repeat(40)
-        + `\nIN PROGRESS — TOTAL: ${whole(ip)}\nCOLLECTING — TOTAL: ${whole(c)}\nTOTAL AR: ${whole(ar)}\nBANK BALANCES: ${whole(bank)}${bankMissing ? ` (${bankMissing} not entered)` : ''}\n`;
-      await saveSnapshot(null, text, ip, c, req.wip.manager ? req.wip.manager.id : null);
+      // Each location stands on its own: no grand totals across locations.
+      const text = reportHeader(titleFor(req).toUpperCase()) + parts.join('\n\n' + '—'.repeat(24) + '\n\n') + '\n';
+      await saveSnapshot(null, text, ip, c, req.wip.manager ? req.wip.manager.id : null, titleFor(req));
       res.type('text/plain; charset=utf-8').send(text);
-    } catch (err) { res.status(502).type('text/plain').send(err.message); }
+    } catch (err) { console.error('[wip text]', err.message); res.status(502).type('text/plain').send('Could not build the report right now. Try again in a minute.'); }
   });
 
   // ── PDFs ────────────────────────────────────────────────────────────────────
@@ -755,8 +781,8 @@ window.addEventListener('beforeunload',()=>{if(dirty.size)flush()});render();`;
       const { body, script, topbar } = DASH.renderAdmin(ctx, { token: req.params.admin, masterToken: await masterToken(), origin: originOf(req), selected: String(req.query.m || '') || null, ...a });
       res.send(page('WIP · managers', body, script, topbar, { wide: true }));
     } catch (err) {
-      console.error('[wip admin]', err.message);
-      res.status(isMissingTable(err) ? 404 : 502).send(page('Error', isMissingTable(err) ? '<p>Run <b>supabase_wip_dashboard.sql</b> in Supabase first — the manager tables are missing.</p>' : `<p>${esc(err.message)}</p>`));
+      if (isMissingTable(err)) return res.status(404).send(page('Not set up', '<div class="card"><b>Run supabase_wip_dashboard.sql in Supabase first.</b><div class="sub" style="margin-top:6px">The manager tables are missing.</div></div>'));
+      errorPage(res, err, 'admin');
     }
   });
   app.post('/wip/admin/:admin/managers', requireAdmin, async (req, res) => {
@@ -922,23 +948,22 @@ Be conservative: silence is "not_yet". Never invent amounts or dates. reason: on
     const decided = Object.fromEntries(response.parsed_output.jobs.map(d => [d.job_number, d]));
 
     progress('saving');
-    const writes = []; const results = []; const skippedOwner = [];
+    const writes = []; const aiOnly = []; const results = []; const skippedOwner = [];
+    const nowIso = new Date().toISOString();
     for (const r of ar) {
-      const d = decided[r.number] || { decision: 'not_yet', amount: null, reason: 'no decision returned' };
+      const d = decided[r.number];
+      if (!d) { results.push({ job_number: r.number, name: r.name, decision: 'not_yet', amount: null, reason: 'The notes gave no clear answer.', owner_set: false }); continue; }
       const ownerSet = !!(r.updated_by && !/^(ai-review|seed)/.test(r.updated_by));
       let amount = d.decision === 'collecting' ? (d.amount != null ? Math.round(d.amount * 100) / 100 : r.due) : null;
       if (amount != null && r.due != null && amount > r.due) amount = r.due;
-      results.push({ job_number: r.number, name: r.name, decision: d.decision, amount: d.decision === 'collecting' ? amount : d.amount, reason: d.reason.slice(0, 160), owner_set: ownerSet });
-      if (ownerSet) { skippedOwner.push(r.number); continue; }
-      writes.push({
-        location_id: pool.location_id, key: r.key,
-        category: d.decision === 'collecting' ? 'collecting' : null,
-        amount,
-        note: d.decision === 'received' ? `received per notes — post the payment in JobNimbus (${d.reason.slice(0, 90)})` : d.reason.slice(0, 140),
-        updated_by: 'ai-review', updated_at: new Date().toISOString(),
-      });
+      const reason = d.decision === 'received' ? `Received per the notes — post the payment in JobNimbus. ${d.reason}`.slice(0, 200) : d.reason.slice(0, 200);
+      results.push({ job_number: r.number, name: r.name, decision: d.decision, amount: d.decision === 'collecting' ? amount : d.amount, reason, owner_set: ownerSet });
+      // What the review found always lands in its own fields; it never touches the owner's note.
+      const ai = { ai_decision: d.decision, ai_amount: d.decision === 'collecting' ? amount : (d.amount != null ? Math.round(d.amount * 100) / 100 : null), ai_reason: reason, ai_at: nowIso };
+      if (ownerSet) { skippedOwner.push(r.number); aiOnly.push({ location_id: pool.location_id, key: r.key, ...ai }); continue; }
+      writes.push({ location_id: pool.location_id, key: r.key, category: d.decision === 'collecting' ? 'collecting' : null, amount, updated_by: 'ai-review', updated_at: nowIso, ...ai });
     }
-    if (writes.length) await sbWrite('POST', 'wip_entries?on_conflict=location_id,key', writes, 'resolution=merge-duplicates,return=minimal');
+    await writeReview(writes, aiOnly);
     await sbWrite('POST', 'wip_reviews', {
       location_id: pool.location_id, model: REVIEW_MODEL, jobs_reviewed: jobs.length, applied: writes.length,
       result: { trigger: opts.trigger || 'manual', results, usage: response.usage },
@@ -994,7 +1019,7 @@ Be conservative: silence is "not_yet". Never invent amounts or dates. reason: on
           // Collecting forecast on record even if nobody taps Share.
           try {
             const d = await loadLocation(p); const s = sectionText(d);
-            await saveSnapshot(p.location_id, reportHeader(d.label.toUpperCase()) + s.text + '\n', s.ipTotal, s.cTotal);
+            await saveSnapshot(p.location_id, s.text + '\n', s.ipTotal, s.cTotal, null, 'Saturday review');
           } catch (err) { console.error(`[wip weekly] snapshot ${p.location_id}: ${err.message}`); }
         } catch (err) {
           weeklyAttempts[key] = (weeklyAttempts[key] || 0) + 1;
@@ -1048,6 +1073,19 @@ Be conservative: silence is "not_yet". Never invent amounts or dates. reason: on
     })();
     return { busy: false, run };
   }
+  // Two upserts (PostgREST wants uniform keys per batch); before the migration
+  // the ai_* columns do not exist, so fall back to the legacy shape.
+  async function writeReview(writes, aiOnly) {
+    try {
+      if (writes.length) await sbWrite('POST', 'wip_entries?on_conflict=location_id,key', writes, 'resolution=merge-duplicates,return=minimal');
+      if (aiOnly.length) await sbWrite('POST', 'wip_entries?on_conflict=location_id,key', aiOnly, 'resolution=merge-duplicates,return=minimal');
+    } catch (err) {
+      if (!/ai_decision|ai_amount|ai_reason|ai_at|42703/.test(err.message)) throw err;
+      entryColsV2 = false;
+      const legacy = writes.map(({ ai_decision, ai_amount, ai_reason, ai_at, ...w }) => w);
+      if (legacy.length) await sbWrite('POST', 'wip_entries?on_conflict=location_id,key', legacy, 'resolution=merge-duplicates,return=minimal');
+    }
+  }
   app.post('/wip/master/:master/review', resolveMaster, async (req, res) => {
     try {
       const b = req.body || {};
@@ -1073,5 +1111,5 @@ Be conservative: silence is "not_yet". Never invent amounts or dates. reason: on
     if (!run || run.scope !== req.params.master) return res.status(404).json({ error: 'unknown run' });
     res.json(publicRun(run));
   });
-  return { weeklyReviewTick, chicagoNow, weeklyReview, upcomingWeek, lastWeek, chicagoMidnightIso, loadDashboard, reviewRuns };
+  return { weeklyReviewTick, chicagoNow, weeklyReview, upcomingWeek, lastWeek, chicagoMidnightIso, loadDashboard, reviewRuns, when, reportLists, sectionText };
 };

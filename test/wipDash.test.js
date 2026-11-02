@@ -46,10 +46,13 @@ test('lastWeek: previous Mon–Sun in Central, from any weekday', async () => {
 test('stale in_progress entry on an invoiced job no longer counts as In Progress', async () => {
   const h = await boot();
   try {
-    const text = (await get(`${h.base}/wip/${TOKENS.a1}/text`)).body;
-    assert.match(text, /In Progress — \$8,000\n1\. Cara Lee — \$8k \(drying\)\n2\. Dan Smith —\n/, text); // j6 ($6k, now Invoice Created) is gone; Dan (Work Complete) counts, no value yet
-    assert.ok(!/Finn Moore — \$6k/.test(text), 'invoiced job must not keep its In Progress value');
-    assert.match(text, /Collecting — \$1,235\n1\. Alice Johnson — \$1,234\.57/);
+    const text = (await get(`${h.base}/wip/${TOKENS.a1}/text?preview=1`)).body;
+    assert.match(text, /^A1 DALLAS · WEEK OF [A-Z]{3} \d+\nIn Progress · 2 jobs · \$8,000\n/, text); // j6 ($6k, now Invoice Created) is gone; Dan (Work Complete) counts, no value yet
+    assert.match(text, /IN PROGRESS\nCara Lee — \$8k · drying\nDan Smith — no number yet · OOP\n/, text);
+    assert.ok(!/Finn Moore/.test(text), 'invoiced job must not keep its In Progress value');
+    assert.match(text, /Collecting this week · 1 · \$1,235\n/);
+    assert.match(text, /COLLECTING THIS WEEK\nAlice Johnson — \$1,234\.57 · Carrier mailed the check Oct 9/);
+    assert.strictEqual(h.fx.store.wip_snapshots.length, 2, 'preview must not save a snapshot');
   } finally { h.close(); }
 });
 
@@ -76,13 +79,15 @@ test('owner form: location logo in the header when one resolves, apple-touch-ico
   const h = await boot();
   try {
     const a1 = (await get(`${h.base}/wip/${TOKENS.a1}`)).body;
-    assert.match(a1, /<div class="top"><img class="logo" src="https:\/\/cdn\.test\/a1\.png" alt=""><h1>A1 Dallas<\/h1>/);
+    assert.match(a1, /<div class="top"><img class="logo" src="https:\/\/cdn\.test\/a1\.png" alt=""><div class="ttl"><h1>A1 Dallas<\/h1>/);
     assert.match(a1, /apple-touch-icon" href="https:\/\/cdn\.test\/a1\.png"/);
     const aff = (await get(`${h.base}/wip/${TOKENS.aff}`)).body; // brand pack via locationLogoUrl
     assert.match(aff, /<img class="logo" src="https:\/\/cdn\.test\/aff-brand\.png"/);
-    const hr = (await get(`${h.base}/wip/${TOKENS.hr}`)).body;   // nothing → today's header
-    assert.match(hr, /<div class="top"><h1>24 HR · WIP<\/h1>/);
-    assert.match(a1, /href="\/wip\/[^"]+\/pdf" target="_blank">PDF<\/a>/);
+    const hr = (await get(`${h.base}/wip/${TOKENS.hr}`)).body;   // nothing → plain header
+    assert.match(hr, /<div class="top"><div class="ttl"><h1>24 HR<\/h1>/);
+    // Dan Smith is out of pocket: the card carries the OOP flag and the review's reason rides on Alice's row.
+    assert.match(a1, /"oop":true/);
+    assert.match(a1, /"ai_reason":"Carrier mailed the check Oct 9; expected by Oct 29\."/);
   } finally { h.close(); }
 });
 
@@ -120,8 +125,12 @@ test('master page: super master sees every location + pool admin; manager sees o
   try {
     const all = await get(`${h.base}/wip/master/${TOKENS.master}`);
     assert.strictEqual(all.status, 200);
-    for (const s of ['<span class="k">Collected last week</span>', '<span class="k">Invoiced last week</span>', 'Forecast vs actual', 'Estimate accuracy', 'Jobs needing a number', 'id="add-loc"', 'data-remove=', 'A1 Dallas', 'AFF Dallas', '24 HR']) assert.ok(all.body.includes(s), 'missing ' + s);
+    for (const s of ['<th class="r">In Progress', '<th class="r">Collecting next week', '<th class="r">Bank balance', '<th class="r">AR', 'Last week and accuracy', 'Estimate accuracy', 'id="add-loc"', 'data-remove=', 'A1 Dallas', 'AFF Dallas', '24 HR']) assert.ok(all.body.includes(s), 'missing ' + s);
+    assert.ok(!/<span class="k">/.test(all.body), 'no KPI tile strip on the main view');
+    assert.ok(!/Total<\/td>/.test(all.body), 'no totals row across locations');
     assert.match(all.body, /data-bank="aaaa1111-0000-0000-0000-000000000001" value="18250"/);
+    assert.match(all.body, /1 need a number/);
+    assert.match(all.body, /sent Oct \d+, \d+:\d\d [AP]M by Sam/);
     assert.match(all.body, /<img class="logo sm" src="https:\/\/cdn\.test\/a1\.png"/);
     assert.ok(all.body.includes('<option value="' + LOC.tulsa + '">A1 Tulsa</option>'), 'unpooled location offered');
 
@@ -266,6 +275,7 @@ test('Saturday tick saves a snapshot per reviewed location (the next week\'s for
     assert.strictEqual(r.ran.length, 2); // AFF already ran this Saturday (fixture review row)
     const added = h.fx.store.wip_snapshots.slice(before);
     assert.deepStrictEqual(added.map(s => [s.location_id, s.in_progress_total]).sort(), [[LOC.a1, 8000], [LOC.hr, 0]].sort());
-    assert.match(added[0].body, /^WIP REPORT — /);
+    assert.match(added[0].body, /^A1 DALLAS · WEEK OF /);
+    assert.strictEqual(added[0].generated_by, 'Saturday review');
   } finally { h.close(); }
 });
