@@ -56,6 +56,20 @@ test('stale in_progress entry on an invoiced job no longer counts as In Progress
   } finally { h.close(); }
 });
 
+test('a stale Collecting answer expires; a newer review beats an older owner answer', async () => {
+  const h = await boot();
+  try {
+    const hr = (await get(`${h.base}/wip/${TOKENS.hr}/text?preview=1`)).body;
+    assert.match(hr, /Collecting this week · 0 · \$0\n/, hr);
+    assert.ok(!/Kai Olsen/.test(hr), 'three-week-old collecting answer must not count');
+    // Owner answered collecting $500 after the review said not_yet → the owner's answer stands.
+    const e1 = h.fx.store.wip_entries.find(e => e.id === 'e1');
+    Object.assign(e1, { ai_decision: 'not_yet', ai_amount: null, ai_at: new Date(Date.now() - 86400000).toISOString() });
+    const a1 = (await get(`${h.base}/wip/${TOKENS.a1}/text?preview=1`)).body;
+    assert.ok(!/COLLECTING THIS WEEK\nAlice/.test(a1), 'review newer than the owner answer decides: not this week');
+  } finally { h.close(); }
+});
+
 test('owner save records estimate history only when the amount changes; survives a missing table', async () => {
   const h = await boot();
   try {
@@ -125,7 +139,7 @@ test('master page: super master sees every location + pool admin; manager sees o
   try {
     const all = await get(`${h.base}/wip/master/${TOKENS.master}`);
     assert.strictEqual(all.status, 200);
-    for (const s of ['<th class="r">In Progress', '<th class="r">Collecting next week', '<th class="r">Bank balance', '<th class="r">AR', 'Last week and accuracy', 'Estimate accuracy', 'id="add-loc"', 'data-remove=', 'A1 Dallas', 'AFF Dallas', '24 HR']) assert.ok(all.body.includes(s), 'missing ' + s);
+    for (const s of ['<th class="r">In Progress', '<th class="r">Collecting this week', '<th class="r">Bank balance', '<th class="r">AR', 'Last week and accuracy', 'Estimate accuracy', 'id="add-loc"', 'data-remove=', 'A1 Dallas', 'AFF Dallas', '24 HR']) assert.ok(all.body.includes(s), 'missing ' + s);
     assert.ok(!/<span class="k">/.test(all.body), 'no KPI tile strip on the main view');
     assert.ok(!/Total<\/td>/.test(all.body), 'no totals row across locations');
     assert.match(all.body, /data-bank="aaaa1111-0000-0000-0000-000000000001" value="18250"/);
@@ -293,5 +307,28 @@ test('Saturday tick saves a snapshot per reviewed location (the next week\'s for
     assert.deepStrictEqual(added.map(s => [s.location_id, s.in_progress_total]).sort(), [[LOC.a1, 8000], [LOC.hr, 0]].sort());
     assert.match(added[0].body, /^A1 DALLAS · WEEK OF /);
     assert.strictEqual(added[0].generated_by, 'Saturday review');
+  } finally { h.close(); }
+});
+
+test('rep link: only that rep\'s in-progress jobs on the link\'s locations; saves are checked server-side', async () => {
+  const h = await boot();
+  try {
+    const p = await get(`${h.base}/wip/rep/${TOKENS.rep}`);
+    assert.strictEqual(p.status, 200);
+    assert.match(p.body, /Tarik Sabbah/);
+    assert.match(p.body, /Cara Lee/); // A1, sales rep Tarik
+    assert.match(p.body, /Jo Kim/);   // 24 HR, Work Complete, rep name differs only in case/space
+    assert.ok(!/Hank Ali/.test(p.body), "Colt's job on a location not on the link must not show");
+    assert.ok(!/Dan Smith/.test(p.body), 'job with no rep must not show');
+    const r = await send(`${h.base}/wip/rep/${TOKENS.rep}/entries`, 'POST', { entries: [
+      { key: J.j10, amount: 7000, note: 'two rooms' }, { key: J.j8, amount: 5 }, { key: J.j3, amount: 9000 } ] });
+    assert.deepStrictEqual([r.body.saved, r.body.rejected], [2, 1]);
+    const e10 = h.fx.store.wip_entries.find(e => e.key === J.j10);
+    assert.deepStrictEqual([e10.location_id, e10.category, e10.amount, e10.note, e10.updated_by], [LOC.hr, 'in_progress', 7000, 'two rooms', 'Tarik Sabbah']);
+    assert.ok(!h.fx.store.wip_entries.some(e => e.key === J.j8 && e.amount === 5));
+    // The owner's report picks the rep's numbers up.
+    const text = (await get(`${h.base}/wip/${TOKENS.hr}/text?preview=1`)).body;
+    assert.match(text, /WORK COMPLETE\nJo Kim — \$7k · two rooms/, text);
+    assert.strictEqual((await get(`${h.base}/wip/rep/not-a-real-token-123456`)).status, 404);
   } finally { h.close(); }
 });

@@ -6,9 +6,11 @@ const AR = new Set(['Invoice Created', 'Invoiced', 'Pending Payment', 'Pending P
 const LOC = { a1: '11111111-1111-1111-1111-111111111111', aff: '22222222-2222-2222-2222-222222222222', hr: '33333333-3333-3333-3333-333333333333', tulsa: '44444444-4444-4444-4444-444444444444' };
 const POOL = { a1: 'aaaa1111-0000-0000-0000-000000000001', aff: 'aaaa1111-0000-0000-0000-000000000002', hr: 'aaaa1111-0000-0000-0000-000000000003' };
 const MGR = { sam: 'bbbb1111-0000-0000-0000-000000000001', lee: 'bbbb1111-0000-0000-0000-000000000002' };
-const TOKENS = { master: 'mastertoken-0123456789abcdef', admin: 'admintoken-00123456789abcdef', sam: 'samtoken-000123456789abcdef', lee: 'leetoken-000123456789abcdef', a1: 'ownertoken-a1-23456789abcdef', aff: 'ownertoken-aff-3456789abcdef', hr: 'ownertoken-hr-23456789abcdef' };
+const TOKENS = { rep: 'reptoken-tarik-3456789abcdef', master: 'mastertoken-0123456789abcdef', admin: 'admintoken-00123456789abcdef', sam: 'samtoken-000123456789abcdef', lee: 'leetoken-000123456789abcdef', a1: 'ownertoken-a1-23456789abcdef', aff: 'ownertoken-aff-3456789abcdef', hr: 'ownertoken-hr-23456789abcdef' };
 
 // Job ids must look like uuids: the owner save endpoint only accepts those as keys.
+// Collecting decisions expire after a week, so their dates are relative to now.
+const ago = d => new Date(Date.now() - d * 86400000).toISOString();
 const jid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const J = Object.fromEntries(Array.from({ length: 12 }, (_, i) => ['j' + (i + 1), jid(i + 1)]));
 function job(id, loc, number, name, status, stage, extra = {}) {
@@ -31,6 +33,9 @@ function seed(lastWeek) {
       { id: POOL.aff, location_id: LOC.aff, token: TOKENS.aff, label: null, sort_order: 2, added_at: '2026-09-02T00:00:00Z', bank_balance: null, bank_balance_at: null, bank_balance_by: null },
       { id: POOL.hr, location_id: LOC.hr, token: TOKENS.hr, label: '24 HR', sort_order: 3, added_at: '2026-09-03T00:00:00Z', bank_balance: 4000, bank_balance_at: '2026-10-22T12:00:00Z', bank_balance_by: 'Pat' },
     ],
+    wip_rep_links: [
+      { id: 'rl1', token: 'reptoken-tarik-3456789abcdef', rep_name: 'Tarik Sabbah', location_ids: [LOC.a1, LOC.hr], active: true, last_opened_at: null },
+    ],
     wip_managers: [
       { id: MGR.sam, name: 'Sam Rivera', email: 'sam@example.test', token: TOKENS.sam, active: true, created_at: '2026-10-01T00:00:00Z', last_opened_at: null },
       { id: MGR.lee, name: 'Lee Chen', email: null, token: TOKENS.lee, active: true, created_at: '2026-10-02T00:00:00Z', last_opened_at: '2026-10-20T00:00:00Z' },
@@ -43,23 +48,25 @@ function seed(lastWeek) {
     jobs: [
       job(J.j1, LOC.a1, '1001', 'Alice Johnson (A1 - DAL - MIT)', 'Invoiced', 'Account Receivable', { approved_invoice_total: 5000, approved_invoice_due: 1234.57, last_invoice_date: '2026-10-10' }),
       job(J.j2, LOC.a1, '1002', 'Bob Reyes', 'Attorney', 'Account Receivable', { record_type: 'Contents', approved_invoice_total: 9000, approved_invoice_due: 9000 }),
-      job(J.j3, LOC.a1, '1003', 'Cara Lee', 'In Progress', 'In Production'),
+      job(J.j3, LOC.a1, '1003', 'Cara Lee', 'In Progress', 'In Production', { sales_rep: 'Tarik Sabbah' }),
       job(J.j4, LOC.a1, '1004', 'Dan Smith', 'Work Complete', 'In Production', { insurance_type: 'Out of Pocket' }),
       job(J.j5, LOC.a1, '1005', 'Eve Park', 'Lead', null),
       job(J.j6, LOC.a1, '1006', 'Finn Moore', 'Invoice Created', 'In Production', { approved_invoice_total: 7200, approved_invoice_due: 7200, last_invoice_date: '2026-10-15' }),
       job(J.j7, LOC.a1, '1007', 'Gia Torres', 'Paid & Closed', 'Completed', { approved_invoice_total: 3100, approved_invoice_due: 0, last_invoice_date: '2026-09-20' }),
-      job(J.j8, LOC.aff, '2001', 'Hank Ali', 'In Progress', 'In Production'),
+      job(J.j8, LOC.aff, '2001', 'Hank Ali', 'In Progress', 'In Production', { sales_rep: 'Colt Smith' }),
       job(J.j9, LOC.aff, '2002', 'Ivy Brooks', 'Pending Payment', 'Account Receivable', { approved_invoice_total: 2600, approved_invoice_due: 2600, last_invoice_date: '2026-10-12' }),
-      job(J.j10, LOC.hr, '3001', 'Jo Kim', 'Work Complete', 'In Production'),
+      job(J.j10, LOC.hr, '3001', 'Jo Kim', 'Work Complete', 'In Production', { sales_rep: 'tarik sabbah ' }),
       job(J.j11, LOC.hr, '3002', 'Kai Olsen', 'Invoiced', 'Account Receivable', { approved_invoice_total: 1500, approved_invoice_due: 1500 }),
     ],
     wip_entries: [
-      { id: 'e1', location_id: LOC.a1, key: J.j1, custom_name: null, category: 'collecting', amount: null, note: '', updated_by: 'Sam', updated_at: '2026-10-23T12:00:00Z', ai_decision: 'collecting', ai_amount: 1234.57, ai_reason: 'Carrier mailed the check Oct 9; expected by Oct 29.', ai_at: '2026-10-24T11:05:00Z' },
+      { id: 'e1', location_id: LOC.a1, key: J.j1, custom_name: null, category: 'collecting', amount: null, note: '', updated_by: 'Sam', updated_at: ago(3), ai_decision: 'collecting', ai_amount: 1234.57, ai_reason: 'Carrier mailed the check Oct 9; expected by Oct 29.', ai_at: ago(2) },
       { id: 'e2', location_id: LOC.a1, key: J.j3, custom_name: null, category: 'in_progress', amount: 8000, note: 'drying', updated_by: 'Sam', updated_at: '2026-10-23T12:00:00Z' },
       // j6 was valued while In Progress, now invoiced: must NOT count as In Progress any more.
       { id: 'e3', location_id: LOC.a1, key: J.j6, custom_name: null, category: 'in_progress', amount: 6000, note: '', updated_by: 'Sam', updated_at: '2026-10-09T12:00:00Z' },
       { id: 'e4', location_id: LOC.aff, key: J.j8, custom_name: null, category: 'in_progress', amount: 12000, note: '', updated_by: 'Ana', updated_at: '2026-10-23T12:00:00Z' },
-      { id: 'e5', location_id: LOC.aff, key: J.j9, custom_name: null, category: 'collecting', amount: 2600, note: '', updated_by: 'ai-review', updated_at: '2026-10-24T11:00:00Z', ai_decision: 'collecting', ai_amount: 2600, ai_reason: 'Check mailed Oct 5, due by Oct 24.', ai_at: '2026-10-24T11:00:00Z' },
+      { id: 'e5', location_id: LOC.aff, key: J.j9, custom_name: null, category: 'collecting', amount: 2600, note: '', updated_by: 'ai-review', updated_at: ago(2), ai_decision: 'collecting', ai_amount: 2600, ai_reason: 'Check mailed Oct 5, due by Oct 24.', ai_at: ago(2) },
+      // An owner's 'collecting' from three weeks ago: expired, must not say it arrives this week.
+      { id: 'e6', location_id: LOC.hr, key: J.j11, custom_name: null, category: 'collecting', amount: 1500, note: 'guess', updated_by: 'Tarik', updated_at: ago(21) },
     ],
     wip_job_estimates: [
       { id: 's1', location_id: LOC.a1, job_id: J.j6, amount: 6000, entered_by: 'Sam', entered_at: '2026-10-09T12:00:00Z' },
