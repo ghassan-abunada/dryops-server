@@ -167,6 +167,9 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
 
   // wip_entries with the dashboard columns (collect_amount, ai_*); falls back
   // to the base columns until supabase_wip_dashboard.sql has run.
+  // A Collecting decision (owner's or the review's) counts this long: one weekly
+  // cycle plus slack for a late Saturday review or a Monday send.
+  const COLLECTING_TTL_DAYS = 9;
   const ENTRY_COLS = 'key,custom_name,category,amount,note,updated_by,updated_at';
   const ENTRY_COLS_V2 = ENTRY_COLS + ',collect_amount,ai_decision,ai_amount,ai_reason,ai_at';
   let entryColsV2 = true;
@@ -206,14 +209,24 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
       const invoiced = Number(j.approved_invoice_total || 0) > 0;
       let category = null, amount = e && e.amount != null ? Number(e.amount) : null;
       let collectAmount = e && e.collect_amount != null ? Number(e.collect_amount) : null;
-      if (group === 'ar') { category = e && e.category === 'collecting' ? 'collecting' : null; if (category !== 'collecting') amount = null; collectAmount = null; }
+      const ownerTouched = !!(e && e.updated_by && !/^(ai-review|seed)/.test(e.updated_by));
+      // "lit": the Saturday review decided this row after the owner last touched it (or the owner never has).
+      const lit = !!(e && e.ai_at && (!ownerTouched || String(e.ai_at) > String(e.updated_at || '')));
+      if (group === 'ar') {
+        // Collecting is a one-week answer. The newest decision wins (a Saturday
+        // review replaces an older owner answer), and a decision older than
+        // COLLECTING_TTL_DAYS no longer counts, so last month's "collecting"
+        // can't keep saying the money arrives this week.
+        const decidedAt = lit ? e.ai_at : e && e.updated_at;
+        const fresh = !!decidedAt && (Date.now() - Date.parse(decidedAt)) < COLLECTING_TTL_DAYS * 86400000;
+        if (lit && e.ai_decision) { category = fresh && e.ai_decision === 'collecting' ? 'collecting' : null; amount = e.ai_amount != null ? Number(e.ai_amount) : null; }
+        else category = fresh && e && e.category === 'collecting' ? 'collecting' : null;
+        if (category !== 'collecting') amount = null; collectAmount = null;
+      }
       else if (group === 'in_progress') category = e ? (e.category === 'in_progress' ? 'in_progress' : null) : 'in_progress';
       else if (e && e.category === 'in_progress' && !invoiced) category = 'in_progress';
       else { amount = null; collectAmount = null; }
       if (category !== 'in_progress') collectAmount = null;
-      const ownerTouched = !!(e && e.updated_by && !/^(ai-review|seed)/.test(e.updated_by));
-      // "lit": the Saturday review decided this row after the owner last touched it (or the owner never has).
-      const lit = !!(e && e.ai_at && (!ownerTouched || String(e.ai_at) > String(e.updated_at || '')));
       return {
         key: j.id, name: cleanName(j.name) + typeTag(j.record_type), number: j.number, status: j.status, stage: j.stage,
         record_type: j.record_type, oop: !!j.insurance_type && j.insurance_type !== 'Insurance',

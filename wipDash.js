@@ -4,7 +4,7 @@
 // money, when } from wip.js.
 //
 // Manager page: one row per location with In Progress (jobs · $), Collecting
-// next week (jobs · $), Bank balance (editable in the row) and AR. No totals
+// this week (jobs · $), Bank balance (editable in the row) and AR. No totals
 // across locations — each location is read on its own. Last week's money,
 // forecast accuracy and estimate accuracy live in one collapsed section.
 
@@ -82,7 +82,7 @@ function renderMaster(ctx, m) {
     return `<tr data-pool="${esc(l.id)}"${changed ? ' class="changed"' : ''}>
 <td><div class="loc">${l.logo ? `<img class="logo sm" src="${esc(l.logo)}" alt="">` : ''}<div><span class="nm">${esc(l.label)}</span><span class="sm">${l.lastSent ? `sent ${esc(when(l.lastSent.generated_at))}${l.lastSent.generated_by ? ' by ' + esc(l.lastSent.generated_by) : ''}` : '<span class="need-txt">not sent this week</span>'}</span></div></div></td>
 <td class="r${missing ? ' amber' : ''}" data-l="In Progress"><div><span class="big">${whole(l.ipTotal)}</span><span class="sm">${l.ipCount} job${l.ipCount === 1 ? '' : 's'}${missing ? ` · <span class="need-txt">${missing} need a number</span>` : ''}</span></div></td>
-<td class="r" data-l="Collecting next week"><div><span class="big">${whole(l.cTotal)}</span><span class="sm">${l.cCount} job${l.cCount === 1 ? '' : 's'}</span></div></td>
+<td class="r" data-l="Collecting this week"><div><span class="big">${whole(l.cTotal)}</span><span class="sm">${l.cCount} job${l.cCount === 1 ? '' : 's'}</span></div></td>
 <td class="r" data-l="Bank balance"><div class="bankcell"><span class="pre">$</span><input type="text" inputmode="decimal" pattern="[0-9.,]*" class="amt${l.bank ? '' : ' empty'}" id="bank-${esc(l.id)}" data-bank="${esc(l.id)}" value="${l.bank ? esc(l.bank.balance) : ''}" placeholder="type it" aria-label="Bank balance for ${esc(l.label)}"></div><span class="sm" id="bank-meta-${esc(l.id)}">${l.bank && l.bank.at ? `entered ${esc(when(l.bank.at, { time: false }))}${l.bank.by ? ' by ' + esc(l.bank.by) : ''}` : '<span class="need-txt">not entered</span>'}</span></td>
 <td class="r" data-l="AR"><span class="big">${whole(l.arTotal)}</span></td>
 <td class="r a"><div class="acts"><a class="btn ghost small" href="/wip/${esc(l.token)}" target="_blank">Open form</a><button class="btn ghost small" data-share="/wip/${esc(l.token)}/text" data-share-title="${esc(l.label)} WIP">Share</button><button class="btn ghost small" data-review="${esc(l.id)}">Review notes</button>${m.pdf ? `<a class="btn ghost small" href="${base}/pdf?pool_id=${esc(l.id)}" target="_blank">PDF</a>` : ''}${m.scope === 'all' ? `<button class="btn ghost small" data-copy="${esc(m.origin)}/wip/${esc(l.token)}">Owner link</button><button class="btn danger small" data-remove="${esc(l.id)}">Remove</button>` : ''}</div></td>
@@ -90,9 +90,9 @@ function renderMaster(ctx, m) {
   }).join('');
 
   const table = `<div class="tbl"><table class="t">
-<thead><tr><th>Location</th><th class="r">In Progress${q('ip')}</th><th class="r">Collecting next week${q('col')}</th><th class="r">Bank balance${q('bank')}</th><th class="r">AR${q('ar')}</th><th></th></tr></thead>
+<thead><tr><th>Location</th><th class="r">In Progress${q('ip')}</th><th class="r">Collecting this week${q('col')}</th><th class="r">Bank balance${q('bank')}</th><th class="r">AR${q('ar')}</th><th></th></tr></thead>
 <tbody>${rows || `<tr><td colspan="6" class="flat">No locations yet${m.scope === 'all' ? ' — add one below.' : '.'}</td></tr>`}</tbody></table></div>
-<div class="row" style="margin-top:8px;gap:0">${help('ip', 'What the owner says the jobs being worked on are worth, and how many of them still have no number.')}${help('col', 'Money the owner confirmed will arrive next week: invoiced jobs the Saturday review proposed plus out-of-pocket jobs marked "paying this week".')}${help('bank', "The balance the owner typed on their form. Type a corrected figure here and it saves as you leave the field.")}${help('ar', 'DryOps Open AR: approved-invoice balance on Invoice Created / Invoiced / Pending Payment jobs, every record type. Same number as the Dashboard.')}</div>`;
+<div class="row" style="margin-top:8px;gap:0">${help('ip', 'What the owner says the jobs being worked on are worth, and how many of them still have no number.')}${help('col', 'Money the owner confirmed will arrive this week: invoiced jobs the Saturday review proposed plus out-of-pocket jobs marked "paying this week".')}${help('bank', "The balance the owner typed on their form. Type a corrected figure here and it saves as you leave the field.")}${help('ar', 'DryOps Open AR: approved-invoice balance on Invoice Created / Invoiced / Pending Payment jobs, every record type. Same number as the Dashboard.')}</div>`;
 
   const reviewBar = `<div class="rbar" id="review-bar" hidden><div class="row"><span class="lbl2" id="review-label">Starting…</span><span class="pct" id="review-pct"></span></div><progress id="review-prog" max="100" value="0"></progress><div class="ticks" id="review-ticks"></div></div><div id="review-out"></div>`;
 
@@ -117,7 +117,7 @@ function renderMaster(ctx, m) {
 <div class="pagerow"><div class="pt"><h2 class="dk">WIP · ${esc(m.title)}</h2><span class="meta">${meta} · ${esc(m.today)}</span></div><button class="btn ghost small" id="review-all">Review all AR notes</button><a class="btn ghost small" href="${base}/text" target="_blank">Combined text</a>${m.pdf ? `<a class="btn ghost small" href="${base}/pdf" target="_blank">PDF</a>` : ''}<button class="btn small" data-share="${base}/text" data-share-title="WIP — ${esc(m.title)}">Share all</button></div>
 ${table}
 ${reviewBar}
-<div class="meta" style="margin:12px 2px 0">“Review notes” reads each invoiced job's JobNimbus notes from the last 5 weeks and proposes what should actually arrive next week; owners confirm on their form. ${m.weeklyReview.enabled ? `It runs by itself every <b>Saturday at ${esc(m.weeklyReview.hourLabel)} Central</b>.` : 'The automatic Saturday run is switched off.'}${m.anthropic ? '' : ' <b>ANTHROPIC_API_KEY is not set on the server, so it will fail until it is.</b>'}</div>
+<div class="meta" style="margin:12px 2px 0">“Review notes” reads each invoiced job's JobNimbus notes from the last 5 weeks and proposes what should actually arrive this week; owners confirm on their form. ${m.weeklyReview.enabled ? `It runs by itself every <b>Saturday at ${esc(m.weeklyReview.hourLabel)} Central</b>.` : 'The automatic Saturday run is switched off.'}${m.anthropic ? '' : ' <b>ANTHROPIC_API_KEY is not set on the server, so it will fail until it is.</b>'}</div>
 ${insights}
 ${addCard}`;
 
@@ -136,7 +136,7 @@ document.addEventListener('input',e=>{const i=e.target.closest('input[data-bank]
 document.addEventListener('focusout',e=>{const i=e.target.closest&&e.target.closest('input[data-bank]');if(!i)return;clearTimeout(bankTimers[i.dataset.bank]);saveBank(i)});
 // AI review: start, then poll the progress bar.
 const bar=document.getElementById('review-bar'),lbl=document.getElementById('review-label'),pctEl=document.getElementById('review-pct'),prog=document.getElementById('review-prog'),ticks=document.getElementById('review-ticks'),out=document.getElementById('review-out');
-const PH={loading:'loading jobs',notes:'reading JobNimbus notes',deciding:'deciding what will arrive next week',saving:'saving'};
+const PH={loading:'loading jobs',notes:'reading JobNimbus notes',deciding:'deciding what will arrive this week',saving:'saving'};
 function paint(s){const total=s.total||1;const frac=(s.done+(s.phase_frac||0))/total;prog.value=Math.round(frac*100);pctEl.textContent=s.done+' of '+s.total+' location'+(s.total===1?'':'s');
 lbl.textContent=s.finished?(s.error?'The review could not run — '+s.error:'Done — '+(s.done-(s.failed||0))+' location'+(s.done-(s.failed||0)===1?'':'s')+' reviewed'+(s.failed?', '+s.failed+' could not be reviewed':'')):'Reviewing '+(s.current||'')+(s.phase?' · '+(PH[s.phase]||s.phase)+(s.phase==='notes'&&s.jobs!=null?' for '+s.jobs+' job'+(s.jobs===1?'':'s'):''):'');
 ticks.innerHTML=(s.items||[]).map(t=>'<span class="'+t.state+'">'+esc(t.label)+(t.state==='done'?' '+CHECK:t.state==='fail'?' '+CROSS:'')+'</span>').join('');bar.classList.toggle('err',!!s.error||(s.finished&&!!s.failed))}

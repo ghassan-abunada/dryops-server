@@ -9,6 +9,8 @@ const MGR = { sam: 'bbbb1111-0000-0000-0000-000000000001', lee: 'bbbb1111-0000-0
 const TOKENS = { master: 'mastertoken-0123456789abcdef', admin: 'admintoken-00123456789abcdef', sam: 'samtoken-000123456789abcdef', lee: 'leetoken-000123456789abcdef', a1: 'ownertoken-a1-23456789abcdef', aff: 'ownertoken-aff-3456789abcdef', hr: 'ownertoken-hr-23456789abcdef' };
 
 // Job ids must look like uuids: the owner save endpoint only accepts those as keys.
+// Collecting decisions expire after a week, so their dates are relative to now.
+const ago = d => new Date(Date.now() - d * 86400000).toISOString();
 const jid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const J = Object.fromEntries(Array.from({ length: 12 }, (_, i) => ['j' + (i + 1), jid(i + 1)]));
 function job(id, loc, number, name, status, stage, extra = {}) {
@@ -54,12 +56,14 @@ function seed(lastWeek) {
       job(J.j11, LOC.hr, '3002', 'Kai Olsen', 'Invoiced', 'Account Receivable', { approved_invoice_total: 1500, approved_invoice_due: 1500 }),
     ],
     wip_entries: [
-      { id: 'e1', location_id: LOC.a1, key: J.j1, custom_name: null, category: 'collecting', amount: null, note: '', updated_by: 'Sam', updated_at: '2026-10-23T12:00:00Z', ai_decision: 'collecting', ai_amount: 1234.57, ai_reason: 'Carrier mailed the check Oct 9; expected by Oct 29.', ai_at: '2026-10-24T11:05:00Z' },
+      { id: 'e1', location_id: LOC.a1, key: J.j1, custom_name: null, category: 'collecting', amount: null, note: '', updated_by: 'Sam', updated_at: ago(3), ai_decision: 'collecting', ai_amount: 1234.57, ai_reason: 'Carrier mailed the check Oct 9; expected by Oct 29.', ai_at: ago(2) },
       { id: 'e2', location_id: LOC.a1, key: J.j3, custom_name: null, category: 'in_progress', amount: 8000, note: 'drying', updated_by: 'Sam', updated_at: '2026-10-23T12:00:00Z' },
       // j6 was valued while In Progress, now invoiced: must NOT count as In Progress any more.
       { id: 'e3', location_id: LOC.a1, key: J.j6, custom_name: null, category: 'in_progress', amount: 6000, note: '', updated_by: 'Sam', updated_at: '2026-10-09T12:00:00Z' },
       { id: 'e4', location_id: LOC.aff, key: J.j8, custom_name: null, category: 'in_progress', amount: 12000, note: '', updated_by: 'Ana', updated_at: '2026-10-23T12:00:00Z' },
-      { id: 'e5', location_id: LOC.aff, key: J.j9, custom_name: null, category: 'collecting', amount: 2600, note: '', updated_by: 'ai-review', updated_at: '2026-10-24T11:00:00Z', ai_decision: 'collecting', ai_amount: 2600, ai_reason: 'Check mailed Oct 5, due by Oct 24.', ai_at: '2026-10-24T11:00:00Z' },
+      { id: 'e5', location_id: LOC.aff, key: J.j9, custom_name: null, category: 'collecting', amount: 2600, note: '', updated_by: 'ai-review', updated_at: ago(2), ai_decision: 'collecting', ai_amount: 2600, ai_reason: 'Check mailed Oct 5, due by Oct 24.', ai_at: ago(2) },
+      // An owner's 'collecting' from three weeks ago: expired, must not say it arrives this week.
+      { id: 'e6', location_id: LOC.hr, key: J.j11, custom_name: null, category: 'collecting', amount: 1500, note: 'guess', updated_by: 'Tarik', updated_at: ago(21) },
     ],
     wip_job_estimates: [
       { id: 's1', location_id: LOC.a1, job_id: J.j6, amount: 6000, entered_by: 'Sam', entered_at: '2026-10-09T12:00:00Z' },

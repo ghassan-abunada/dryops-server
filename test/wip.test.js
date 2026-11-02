@@ -28,7 +28,7 @@ function stubSupabase(calls) {
         { id: 'j3', jn_id: 'jn3', number: '1003', name: 'Cara', status: 'In Progress', stage: 'In Production', record_type: 'Mitigation', jn_created: '2026-10-01T00:00:00Z', approved_invoice_total: null, approved_invoice_due: null },
       ]);
     }
-    if (path.startsWith('wip_entries?')) return ok([{ key: 'j1', custom_name: null, category: 'collecting', amount: null, note: '', updated_by: 'Sam', updated_at: '2026-10-24T12:00:00Z' }]);
+    if (path.startsWith('wip_entries?')) return ok([{ key: 'j1', custom_name: null, category: 'collecting', amount: null, note: '', updated_by: 'Sam', updated_at: new Date(Date.now() - 86400000).toISOString() }]);
     if (path === 'rpc/open_ar_total') return ok(42000.4);
     if (path.startsWith('wip_snapshots') && (!init || !init.method || init.method === 'GET')) return ok([]);
     if (path.startsWith('wip_snapshots')) return new Response(null, { status: 201 });

@@ -56,6 +56,20 @@ test('stale in_progress entry on an invoiced job no longer counts as In Progress
   } finally { h.close(); }
 });
 
+test('a stale Collecting answer expires; a newer review beats an older owner answer', async () => {
+  const h = await boot();
+  try {
+    const hr = (await get(`${h.base}/wip/${TOKENS.hr}/text?preview=1`)).body;
+    assert.match(hr, /Collecting this week · 0 · \$0\n/, hr);
+    assert.ok(!/Kai Olsen/.test(hr), 'three-week-old collecting answer must not count');
+    // Owner answered collecting $500 after the review said not_yet → the owner's answer stands.
+    const e1 = h.fx.store.wip_entries.find(e => e.id === 'e1');
+    Object.assign(e1, { ai_decision: 'not_yet', ai_amount: null, ai_at: new Date(Date.now() - 86400000).toISOString() });
+    const a1 = (await get(`${h.base}/wip/${TOKENS.a1}/text?preview=1`)).body;
+    assert.ok(!/COLLECTING THIS WEEK\nAlice/.test(a1), 'review newer than the owner answer decides: not this week');
+  } finally { h.close(); }
+});
+
 test('owner save records estimate history only when the amount changes; survives a missing table', async () => {
   const h = await boot();
   try {
@@ -125,7 +139,7 @@ test('master page: super master sees every location + pool admin; manager sees o
   try {
     const all = await get(`${h.base}/wip/master/${TOKENS.master}`);
     assert.strictEqual(all.status, 200);
-    for (const s of ['<th class="r">In Progress', '<th class="r">Collecting next week', '<th class="r">Bank balance', '<th class="r">AR', 'Last week and accuracy', 'Estimate accuracy', 'id="add-loc"', 'data-remove=', 'A1 Dallas', 'AFF Dallas', '24 HR']) assert.ok(all.body.includes(s), 'missing ' + s);
+    for (const s of ['<th class="r">In Progress', '<th class="r">Collecting this week', '<th class="r">Bank balance', '<th class="r">AR', 'Last week and accuracy', 'Estimate accuracy', 'id="add-loc"', 'data-remove=', 'A1 Dallas', 'AFF Dallas', '24 HR']) assert.ok(all.body.includes(s), 'missing ' + s);
     assert.ok(!/<span class="k">/.test(all.body), 'no KPI tile strip on the main view');
     assert.ok(!/Total<\/td>/.test(all.body), 'no totals row across locations');
     assert.match(all.body, /data-bank="aaaa1111-0000-0000-0000-000000000001" value="18250"/);
