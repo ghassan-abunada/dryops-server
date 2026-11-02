@@ -5836,6 +5836,17 @@ app.get('/maps/snapshot-url', requireAuth, (req, res) => {
   res.json({ url: apple.snapshotUrl({ lat: p.lat, lng: p.lng, w: req.query.w, h: req.query.h, zoom: req.query.zoom }) });
 });
 
+// MapKit JS token for the app's web map (My Day route preview). Bound to the
+// caller's Origin; { configured:false } lets the client fall back to Leaflet.
+app.get('/maps/mapkit-token', requireAuth, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!apple.configured()) return res.json({ configured: false, token: null });
+  const origin = req.get('origin') || '';
+  const token = apple.mapkitToken(origin);
+  if (!token) return res.status(403).json({ configured: true, token: null, error: 'Origin not allowed' });
+  res.json({ configured: true, token, expiresIn: 1800 });
+});
+
 // Diagnostic: fetch the snapshot server-side for each signing variant so we
 // can read Apple's status/message (browsers hide it behind CORS / <img>).
 app.get('/maps/snapshot-check', requireAuth, requireAdmin, async (req, res) => {

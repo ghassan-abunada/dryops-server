@@ -78,6 +78,30 @@ function makeAuthJwt({ teamId, keyId, mapsId, privateKey, now, ttl = JWT_TTL_S }
 }
 
 /**
+ * MapKit JS authorization token: ES256 JWT (iss=team, kid=key id) with an
+ * `origin` claim so a leaked token only works on that site. Same .p8 key as
+ * the Server API (the key must have MapKit JS enabled in the developer portal).
+ */
+function makeMapkitJsToken({ teamId, keyId, privateKey, origin, now, ttl = JWT_TTL_S }) {
+  let t = now instanceof Date ? now.getTime() : (now == null ? Date.now() : Number(now));
+  if (t < 1e11) t *= 1000;
+  const iat = Math.floor(t / 1000);
+  const header = { alg: 'ES256', kid: keyId, typ: 'JWT' };
+  const payload = { iss: teamId, iat, exp: iat + ttl };
+  if (origin) payload.origin = origin;
+  const signingInput = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`;
+  return `${signingInput}.${es256(signingInput, privateKey)}`;
+}
+
+/** Origins allowed to receive a MapKit JS token: dryops.app (+ subdomains) and local dev. */
+function mapkitOriginAllowed(origin) {
+  const o = String(origin || '');
+  return /^https:\/\/([a-z0-9-]+\.)*dryops\.app$/i.test(o)
+    || /^https:\/\/[a-z0-9-]+\.up\.railway\.app$/i.test(o)
+    || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(o);
+}
+
+/**
  * Web Snapshots signature: ES256 over the path + query WITHOUT the signature
  * param (e.g. "/api/v1/snapshot?center=…&teamId=…&keyId=…"), base64url.
  * `dsaEncoding` defaults to ieee-p1363; pass 'der' if Apple rejects it.
@@ -487,12 +511,20 @@ function createApple(env = process.env, deps = {}) {
     return `${SNAPSHOT_API}${pathAndQuery}&signature=${signature}`;
   }
 
-  return { configured, geocode, autocomplete, resolveCompletion, etas, directions, snapshotUrl };
+  /** MapKit JS token for a browser at `origin`, or null when unconfigured / origin not allowed. */
+  function mapkitToken(origin) {
+    if (!configured() || !mapkitOriginAllowed(origin)) return null;
+    return makeMapkitJsToken({ teamId: TEAM_ID, keyId: KEY_ID, privateKey: key(), origin });
+  }
+
+  return { configured, geocode, autocomplete, resolveCompletion, etas, directions, snapshotUrl, mapkitToken };
 }
 
 module.exports = createApple;
 module.exports.createApple = createApple;
 module.exports.makeAuthJwt = makeAuthJwt;
+module.exports.makeMapkitJsToken = makeMapkitJsToken;
+module.exports.mapkitOriginAllowed = mapkitOriginAllowed;
 module.exports.normalizePrivateKey = normalizePrivateKey;
 module.exports.signSnapshotQuery = signSnapshotQuery;
 module.exports.parseLatLng = parseLatLng;
