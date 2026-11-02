@@ -8,7 +8,7 @@ const { makeStore, LOC, POOL, MGR, TOKENS, J } = require('./wipFixtures');
 
 const SB = 'https://sb.test';
 
-function boot({ anthropic = null, jnGet = async () => ({ activity: [] }), logo = true } = {}) {
+function boot({ anthropic = null, jnGet = async () => ({ activity: [] }), logo = true, pdf = false } = {}) {
   // The dashboard's "last week" is relative to the real clock, so seed around it.
   const probe = require('../wip')(express(), { SUPABASE_URL: SB, SUPABASE_SERVICE_KEY: 'k', jnGet, anthropic: null }, { noSchedule: true });
   const lw = probe.lastWeek();
@@ -19,7 +19,7 @@ function boot({ anthropic = null, jnGet = async () => ({ activity: [] }), logo =
     SUPABASE_URL: SB, SUPABASE_SERVICE_KEY: 'svc', jnGet, anthropic,
     locationLogoUrl: logo ? async (loc) => loc.logo_url || (loc.name === 'AFF Dallas' ? 'https://cdn.test/aff-brand.png' : null) : undefined,
     logoPngFromUrl: async () => null,
-  }, { noSchedule: true });
+  }, { noSchedule: true, pdf });
   return new Promise(resolve => {
     const srv = app.listen(0, () => resolve({
       base: `http://127.0.0.1:${srv.address().port}`, wip, fx, lw,
@@ -46,10 +46,13 @@ test('lastWeek: previous Mon–Sun in Central, from any weekday', async () => {
 test('stale in_progress entry on an invoiced job no longer counts as In Progress', async () => {
   const h = await boot();
   try {
-    const text = (await get(`${h.base}/wip/${TOKENS.a1}/text`)).body;
-    assert.match(text, /In Progress — \$8,000\n1\. Cara Lee — \$8k \(drying\)\n2\. Dan Smith —\n/, text); // j6 ($6k, now Invoice Created) is gone; Dan (Work Complete) counts, no value yet
-    assert.ok(!/Finn Moore — \$6k/.test(text), 'invoiced job must not keep its In Progress value');
-    assert.match(text, /Collecting — \$1,235\n1\. Alice Johnson — \$1,234\.57/);
+    const text = (await get(`${h.base}/wip/${TOKENS.a1}/text?preview=1`)).body;
+    assert.match(text, /^A1 DALLAS · WEEK OF [A-Z]{3} \d+\nIn Progress · 1 job · \$8,000\nWork Complete · 1 job · \$0\n/, text); // j6 ($6k, now Invoice Created) is gone; Dan (Work Complete) is listed on his own, no value yet
+    assert.match(text, /IN PROGRESS\nCara Lee — \$8k · drying\n\nWORK COMPLETE\nDan Smith — no number yet · OOP\n\nCOLLECTING THIS WEEK\n/, text);
+    assert.ok(!/Finn Moore/.test(text), 'invoiced job must not keep its In Progress value');
+    assert.match(text, /Collecting this week · 1 · \$1,235\n/);
+    assert.match(text, /COLLECTING THIS WEEK\nAlice Johnson — \$1,234\.57 · Carrier mailed the check Oct 9/);
+    assert.strictEqual(h.fx.store.wip_snapshots.length, 2, 'preview must not save a snapshot');
   } finally { h.close(); }
 });
 
@@ -76,13 +79,15 @@ test('owner form: location logo in the header when one resolves, apple-touch-ico
   const h = await boot();
   try {
     const a1 = (await get(`${h.base}/wip/${TOKENS.a1}`)).body;
-    assert.match(a1, /<div class="top"><img class="logo" src="https:\/\/cdn\.test\/a1\.png" alt=""><h1>A1 Dallas<\/h1>/);
+    assert.match(a1, /<div class="top"><img class="logo" src="https:\/\/cdn\.test\/a1\.png" alt=""><div class="ttl"><h1>A1 Dallas<\/h1>/);
     assert.match(a1, /apple-touch-icon" href="https:\/\/cdn\.test\/a1\.png"/);
     const aff = (await get(`${h.base}/wip/${TOKENS.aff}`)).body; // brand pack via locationLogoUrl
     assert.match(aff, /<img class="logo" src="https:\/\/cdn\.test\/aff-brand\.png"/);
-    const hr = (await get(`${h.base}/wip/${TOKENS.hr}`)).body;   // nothing → today's header
-    assert.match(hr, /<div class="top"><h1>24 HR · WIP<\/h1>/);
-    assert.match(a1, /href="\/wip\/[^"]+\/pdf" target="_blank">PDF<\/a>/);
+    const hr = (await get(`${h.base}/wip/${TOKENS.hr}`)).body;   // nothing → plain header
+    assert.match(hr, /<div class="top"><div class="ttl"><h1>24 HR<\/h1>/);
+    // Dan Smith is out of pocket: the card carries the OOP flag and the review's reason rides on Alice's row.
+    assert.match(a1, /"oop":true/);
+    assert.match(a1, /"ai_reason":"Carrier mailed the check Oct 9; expected by Oct 29\."/);
   } finally { h.close(); }
 });
 
@@ -120,14 +125,19 @@ test('master page: super master sees every location + pool admin; manager sees o
   try {
     const all = await get(`${h.base}/wip/master/${TOKENS.master}`);
     assert.strictEqual(all.status, 200);
-    for (const s of ['<span class="k">Collected last week</span>', '<span class="k">Invoiced last week</span>', 'Forecast vs actual', 'Estimate accuracy', 'Jobs needing a number', 'id="add-loc"', 'data-remove=', 'A1 Dallas', 'AFF Dallas', '24 HR']) assert.ok(all.body.includes(s), 'missing ' + s);
+    for (const s of ['<th class="r">In Progress', '<th class="r">Collecting next week', '<th class="r">Bank balance', '<th class="r">AR', 'Last week and accuracy', 'Estimate accuracy', 'id="add-loc"', 'data-remove=', 'A1 Dallas', 'AFF Dallas', '24 HR']) assert.ok(all.body.includes(s), 'missing ' + s);
+    assert.ok(!/<span class="k">/.test(all.body), 'no KPI tile strip on the main view');
+    assert.ok(!/Total<\/td>/.test(all.body), 'no totals row across locations');
     assert.match(all.body, /data-bank="aaaa1111-0000-0000-0000-000000000001" value="18250"/);
+    assert.match(all.body, /1 need a number/);
+    assert.match(all.body, /sent Oct \d+, \d+:\d\d [AP]M by Sam/);
     assert.match(all.body, /<img class="logo sm" src="https:\/\/cdn\.test\/a1\.png"/);
     assert.ok(all.body.includes('<option value="' + LOC.tulsa + '">A1 Tulsa</option>'), 'unpooled location offered');
 
     const sam = await get(`${h.base}/wip/master/${TOKENS.sam}`);
     assert.strictEqual(sam.status, 200);
-    assert.match(sam.body, /<h1>WIP · Sam Rivera<\/h1>/);
+    assert.match(sam.body, /<h1 class="ph">WIP · Sam Rivera<\/h1>/);
+    assert.match(sam.body, /<h2 class="dk">WIP · Sam Rivera<\/h2>/);
     assert.ok(sam.body.includes('A1 Dallas') && sam.body.includes('AFF Dallas') && !sam.body.includes('24 HR'), 'scoped to Sam');
     assert.ok(!sam.body.includes('id="add-loc"') && !sam.body.includes('data-remove='), 'no pool admin for managers');
     assert.ok(h.fx.store.wip_managers.find(m => m.id === MGR.sam).last_opened_at, 'last_opened_at stamped');
@@ -167,7 +177,8 @@ test('admin portal: token gate, add manager, assign/unassign (creates the pool r
     assert.strictEqual((await get(`${h.base}/wip/admin/wrong-token-0000000000000`)).status, 404);
     const page = await get(`${h.base}/wip/admin/${TOKENS.admin}?m=${MGR.sam}`);
     assert.strictEqual(page.status, 200);
-    for (const s of ['Sam Rivera', 'Lee Chen', 'Locations for Sam Rivera', `data-assign="${LOC.tulsa}"`, 'Unassigned locations', 'A1 Tulsa']) assert.ok(page.body.includes(s), 'missing ' + s);
+    for (const s of ['Sam Rivera', 'Lee Chen', 'Locations for Sam Rivera', `data-assign="${LOC.tulsa}"`, 'A1 Tulsa']) assert.ok(page.body.includes(s), 'missing ' + s);
+    assert.ok(!/Unassigned locations/.test(page.body), 'no unassigned-locations card');
     assert.match(page.body, new RegExp(`data-assign="${LOC.a1}" checked`));
     assert.match(page.body, new RegExp(`data-assign="${LOC.hr}" >`)); // Lee's, not Sam's
 
@@ -202,8 +213,22 @@ test('admin portal: token gate, add manager, assign/unassign (creates the pool r
   } finally { h.close(); }
 });
 
-test('PDFs: one page per location and per manager; file names; long lists continue', async () => {
+test('PDF export is off by default: no buttons, routes say so', async () => {
   const h = await boot();
+  try {
+    const all = (await get(`${h.base}/wip/master/${TOKENS.master}`)).body;
+    assert.ok(!/\/pdf/.test(all), 'no PDF links on the dashboard');
+    const adm = (await get(`${h.base}/wip/admin/${TOKENS.admin}?m=${MGR.sam}`)).body;
+    assert.ok(!/\/pdf/.test(adm), 'no PDF links on the admin page');
+    const r = await get(`${h.base}/wip/master/${TOKENS.sam}/pdf?pool_id=${POOL.a1}`);
+    assert.strictEqual(r.status, 404);
+    assert.match(r.body, /turned off/);
+    assert.strictEqual((await get(`${h.base}/wip/${TOKENS.a1}/pdf`)).status, 404);
+  } finally { h.close(); }
+});
+
+test('PDFs (WIP_PDF=on): one page per location and per manager; file names; long lists continue', async () => {
+  const h = await boot({ pdf: true });
   try {
     const loc = await get(`${h.base}/wip/master/${TOKENS.sam}/pdf?pool_id=${POOL.a1}`);
     assert.strictEqual(loc.status, 200);
@@ -266,6 +291,7 @@ test('Saturday tick saves a snapshot per reviewed location (the next week\'s for
     assert.strictEqual(r.ran.length, 2); // AFF already ran this Saturday (fixture review row)
     const added = h.fx.store.wip_snapshots.slice(before);
     assert.deepStrictEqual(added.map(s => [s.location_id, s.in_progress_total]).sort(), [[LOC.a1, 8000], [LOC.hr, 0]].sort());
-    assert.match(added[0].body, /^WIP REPORT — /);
+    assert.match(added[0].body, /^A1 DALLAS · WEEK OF /);
+    assert.strictEqual(added[0].generated_by, 'Saturday review');
   } finally { h.close(); }
 });
