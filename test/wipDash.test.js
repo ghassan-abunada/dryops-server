@@ -47,8 +47,8 @@ test('stale in_progress entry on an invoiced job no longer counts as In Progress
   const h = await boot();
   try {
     const text = (await get(`${h.base}/wip/${TOKENS.a1}/text?preview=1`)).body;
-    assert.match(text, /^A1 DALLAS · WEEK OF [A-Z]{3} \d+\nIn Progress · 2 jobs · \$8,000\n/, text); // j6 ($6k, now Invoice Created) is gone; Dan (Work Complete) counts, no value yet
-    assert.match(text, /IN PROGRESS\nCara Lee — \$8k · drying\nDan Smith — no number yet · OOP\n/, text);
+    assert.match(text, /^A1 DALLAS · WEEK OF [A-Z]{3} \d+\nIn Progress · 1 job · \$8,000\nWork Complete · 1 job · \$0\n/, text); // j6 ($6k, now Invoice Created) is gone; Dan (Work Complete) is listed on his own, no value yet
+    assert.match(text, /IN PROGRESS\nCara Lee — \$8k · drying\n\nWORK COMPLETE\nDan Smith — no number yet · OOP\n\nCOLLECTING THIS WEEK\n/, text);
     assert.ok(!/Finn Moore/.test(text), 'invoiced job must not keep its In Progress value');
     assert.match(text, /Collecting this week · 1 · \$1,235\n/);
     assert.match(text, /COLLECTING THIS WEEK\nAlice Johnson — \$1,234\.57 · Carrier mailed the check Oct 9/);

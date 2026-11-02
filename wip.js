@@ -275,18 +275,30 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
     const d = new Date(w.start + 'T12:00:00Z');
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
   }
-  // The text owners send. Four numbers first, then the two lists.
+  // The text owners send. The numbers first, then In Progress, Work Complete
+  // and Collecting as separate lists.
   function sectionText(data) {
     const { inProg, coll, ipTotal, cTotal } = reportLists(data);
+    // Work Complete jobs still count toward the In Progress total everywhere
+    // else (snapshots, dashboard); the text lists them on their own.
+    const wc = inProg.filter(r => r.status === 'Work Complete');
+    const working = inProg.filter(r => r.status !== 'Work Complete');
+    const sum = rows => money2(rows.reduce((s, r) => s + Number(r.amount || 0), 0));
+    const jobs = n => `${n} job${n === 1 ? '' : 's'}`;
     const lines = [
       `${data.label.toUpperCase()} · WEEK OF ${weekOf().toUpperCase()}`,
-      `In Progress · ${inProg.length} job${inProg.length === 1 ? '' : 's'} · ${whole(ipTotal)}`,
+      `In Progress · ${jobs(working.length)} · ${whole(sum(working))}`,
+      `Work Complete · ${jobs(wc.length)} · ${whole(sum(wc))}`,
       `Collecting this week · ${coll.length} · ${whole(cTotal)}`,
       `AR ${whole(data.arTotal)} · Bank ${data.bank ? whole(data.bank.balance) : 'not entered'}`,
-      '', 'IN PROGRESS',
     ];
-    inProg.forEach(r => lines.push(`${r.name} — ${r.amount != null ? money(r.amount, true) : 'no number yet'}${r.oop ? ' · OOP' : ''}${r.collect_amount != null ? ' · paying this week ' + money(r.collect_amount, true) : ''}${r.note ? ' · ' + r.note : ''}`));
-    if (!inProg.length) lines.push('(none)');
+    const jobLine = r => `${r.name} — ${r.amount != null ? money(r.amount, true) : 'no number yet'}${r.oop ? ' · OOP' : ''}${r.collect_amount != null ? ' · paying this week ' + money(r.collect_amount, true) : ''}${r.note ? ' · ' + r.note : ''}`;
+    lines.push('', 'IN PROGRESS');
+    working.forEach(r => lines.push(jobLine(r)));
+    if (!working.length) lines.push('(none)');
+    lines.push('', 'WORK COMPLETE');
+    wc.forEach(r => lines.push(jobLine(r)));
+    if (!wc.length) lines.push('(none)');
     lines.push('', 'COLLECTING THIS WEEK');
     coll.forEach(r => lines.push(`${r.name} — ${money(r.amount)}${r.why ? ' · ' + r.why : ''}${r.note ? ' · ' + r.note : ''}`));
     if (!coll.length) lines.push('(none)');
