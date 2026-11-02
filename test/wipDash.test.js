@@ -309,3 +309,26 @@ test('Saturday tick saves a snapshot per reviewed location (the next week\'s for
     assert.strictEqual(added[0].generated_by, 'Saturday review');
   } finally { h.close(); }
 });
+
+test('rep link: only that rep\'s in-progress jobs on the link\'s locations; saves are checked server-side', async () => {
+  const h = await boot();
+  try {
+    const p = await get(`${h.base}/wip/rep/${TOKENS.rep}`);
+    assert.strictEqual(p.status, 200);
+    assert.match(p.body, /Tarik Sabbah/);
+    assert.match(p.body, /Cara Lee/); // A1, sales rep Tarik
+    assert.match(p.body, /Jo Kim/);   // 24 HR, Work Complete, rep name differs only in case/space
+    assert.ok(!/Hank Ali/.test(p.body), "Colt's job on a location not on the link must not show");
+    assert.ok(!/Dan Smith/.test(p.body), 'job with no rep must not show');
+    const r = await send(`${h.base}/wip/rep/${TOKENS.rep}/entries`, 'POST', { entries: [
+      { key: J.j10, amount: 7000, note: 'two rooms' }, { key: J.j8, amount: 5 }, { key: J.j3, amount: 9000 } ] });
+    assert.deepStrictEqual([r.body.saved, r.body.rejected], [2, 1]);
+    const e10 = h.fx.store.wip_entries.find(e => e.key === J.j10);
+    assert.deepStrictEqual([e10.location_id, e10.category, e10.amount, e10.note, e10.updated_by], [LOC.hr, 'in_progress', 7000, 'two rooms', 'Tarik Sabbah']);
+    assert.ok(!h.fx.store.wip_entries.some(e => e.key === J.j8 && e.amount === 5));
+    // The owner's report picks the rep's numbers up.
+    const text = (await get(`${h.base}/wip/${TOKENS.hr}/text?preview=1`)).body;
+    assert.match(text, /WORK COMPLETE\nJo Kim — \$7k · two rooms/, text);
+    assert.strictEqual((await get(`${h.base}/wip/rep/not-a-real-token-123456`)).status, 404);
+  } finally { h.close(); }
+});

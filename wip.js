@@ -41,6 +41,7 @@ function typeTag(recordType) {
 
 const DASH = require('./wipDash');
 const OWNER = require('./wipOwner');
+const REP = require('./wipRep');
 const PDF = require('./wipPdf');
 
 // deps: jnGet(pathAndQuery) → parsed JobNimbus JSON; anthropic → an SDK client
@@ -186,7 +187,7 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
     // only), the same columns DryOps' Stats / Collections read.
     const [jobs, entries, arRpc, logo] = await Promise.all([
       sbGet(`jobs?location_id=eq.${locId}&or=(stage.is.null,stage.not.in.(Completed,Lost))&name=not.ilike.*test%20dummy*`
-        + `&select=id,jn_id,number,name,status,stage,record_type,insurance_type,jn_created,approved_invoice_total,approved_invoice_due&order=jn_created.asc`),
+        + `&select=id,jn_id,number,name,status,stage,record_type,insurance_type,sales_rep,jn_created,approved_invoice_total,approved_invoice_due&order=jn_created.asc`),
       sbGetEntries(locId),
       // Total AR — identical to the Dashboard's Open AR card for this location.
       sbRpc('open_ar_total', { p_location_ids: [String(locId)] }),
@@ -236,7 +237,7 @@ module.exports = function mountWip(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, jn
         group, category, amount, collect_amount: collectAmount,
         ai_decision: (e && e.ai_decision) || null, ai_amount: e && e.ai_amount != null ? Number(e.ai_amount) : null,
         ai_reason: (e && e.ai_reason) || null, ai_at: (e && e.ai_at) || null, lit, answered: ownerTouched,
-        note: (e && e.note) || '', custom: false, jn_id: j.jn_id,
+        note: (e && e.note) || '', custom: false, jn_id: j.jn_id, sales_rep: j.sales_rep || null,
         updated_by: (e && e.updated_by) || null,
       };
     });
@@ -449,9 +450,70 @@ document.addEventListener('click',e=>{const q=e.target.closest('.q[data-help]');
 </script>${script ? `<script>${script}</script>` : ''}</body></html>`;
   }
 
+  // ── Sales rep page ──────────────────────────────────────────────────────────
+  // /wip/rep/<token>: one person's in-progress jobs (JobNimbus sales_rep) across
+  // the locations on their link, job values only. Saves land in the same
+  // wip_entries the owner forms and the report read, as that rep.
+  const sameRep = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+  async function repByToken(token) {
+    if (!token || token.length < 16) return null;
+    let rows;
+    try { rows = await sbGet(`wip_rep_links?token=eq.${encodeURIComponent(token)}&active=is.true&select=id,token,rep_name,location_ids&limit=1`); }
+    catch (err) { if (isMissingTable(err)) return null; throw err; }
+    const link = rows[0];
+    return link && tokenOk(token, link.token) ? link : null;
+  }
+  async function repData(link) {
+    const ids = (link.location_ids || []).map(String);
+    if (!ids.length) return [];
+    const pools = await sbGet(`wip_pool?location_id=in.(${ids.join(',')})&select=${POOL_SELECT}`);
+    pools.sort((a, b) => ids.indexOf(String(a.location_id)) - ids.indexOf(String(b.location_id)));
+    const out = [];
+    for (const pool of pools) {
+      const data = await loadLocation(pool);
+      const rows = data.rows.filter(r => !r.custom && r.group === 'in_progress' && sameRep(r.sales_rep, link.rep_name));
+      out.push({ pool, label: data.label, rows });
+    }
+    return out;
+  }
+  app.get('/wip/rep/:token', async (req, res) => {
+    try {
+      const link = await repByToken(req.params.token);
+      if (!link) return res.status(404).send(page('Not found', '<div class="card"><b>This link is not valid.</b><div class="sub" style="margin-top:6px">Ask the office for a fresh link.</div></div>'));
+      const groups = await repData(link);
+      sbWrite('PATCH', `wip_rep_links?id=eq.${link.id}`, { last_opened_at: new Date().toISOString() }, 'return=minimal').catch(() => {});
+      const { body, script, topbar } = REP.renderRep({ esc, json, q, help }, { token: link.token, name: link.rep_name, groups, weekLabel: weekOf() });
+      res.send(page(`${link.rep_name} · job values`, body, script, topbar));
+    } catch (err) { errorPage(res, err, 'rep'); }
+  });
+  app.post('/wip/rep/:token/entries', async (req, res) => {
+    try {
+      const link = await repByToken(req.params.token);
+      if (!link) return res.status(404).json({ error: 'invalid link' });
+      const ids = (link.location_ids || []).map(String);
+      const given = (Array.isArray((req.body || {}).entries) ? req.body.entries : []).slice(0, 200)
+        .map(e => ({ ...e, key: String(e.key || '') })).filter(e => /^[0-9a-f-]{36}$/.test(e.key));
+      if (!given.length) return res.json({ ok: true, saved: 0 });
+      // Only jobs on this rep's link: right location, this rep on the job.
+      const jobs = await sbGet(`jobs?id=in.(${given.map(e => e.key).join(',')})&select=id,location_id,sales_rep`);
+      const ok = new Map(jobs.filter(j => ids.includes(String(j.location_id)) && sameRep(j.sales_rep, link.rep_name)).map(j => [String(j.id), String(j.location_id)]));
+      const now = new Date().toISOString();
+      const rows = given.filter(e => ok.has(e.key)).map(e => ({
+        location_id: ok.get(e.key), key: e.key, category: 'in_progress',
+        amount: e.amount === null || e.amount === undefined || e.amount === '' || isNaN(Number(e.amount)) ? null : Math.round(Number(e.amount) * 100) / 100,
+        note: e.note ? String(e.note).slice(0, 300) : null,
+        updated_by: String(link.rep_name).slice(0, 80), updated_at: now,
+      }));
+      if (rows.length) await sbWrite('POST', 'wip_entries?on_conflict=location_id,key', rows, 'resolution=merge-duplicates,return=minimal');
+      let estimates = 0;
+      for (const loc of new Set(rows.map(r => r.location_id))) estimates += await recordEstimates(loc, rows.filter(r => r.location_id === loc));
+      res.json({ ok: true, saved: rows.length, rejected: given.length - rows.length, estimates });
+    } catch (err) { console.error('[wip rep save]', err.message); res.status(502).json({ error: err.message }); }
+  });
+
   // ── Owner page ──────────────────────────────────────────────────────────────
   app.get('/wip/:token', async (req, res, next) => {
-    if (req.params.token === 'master' || req.params.token === 'admin') return next();
+    if (req.params.token === 'master' || req.params.token === 'admin' || req.params.token === 'rep') return next();
     try {
       const pool = await poolByToken(req.params.token);
       if (!pool) return res.status(404).send(page('Not found', '<div class="card"><b>This WIP link is not valid.</b><div class="sub" style="margin-top:6px">Ask the office for a fresh link.</div></div>'));
