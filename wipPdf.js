@@ -142,7 +142,7 @@ async function renderLocationPdf({ data, lists, extra, logoPng }) {
   let y = drawHeader(doc, {
     title: `WIP — ${data.label}`,
     subtitle: `Week of ${weekLabel(extra.week)}`,
-    meta: `Generated ${generated}${extra.generatedBy ? ' by ' + extra.generatedBy : ''}\n${data.lastUpdate ? 'Owner updated ' + data.lastUpdate.slice(0, 10) + (data.lastBy ? ' by ' + data.lastBy : '') : 'No owner input yet'}`,
+    meta: `Generated ${generated}${extra.generatedBy ? ' by ' + extra.generatedBy : ''}\n${data.lastUpdate ? 'Owner updated ' + fmtDate(data.lastUpdate) + (data.lastBy ? ' by ' + data.lastBy : '') : 'No owner input yet'}`,
     logoPng,
   });
   y = drawKpis(doc, y, [
@@ -152,7 +152,7 @@ async function renderLocationPdf({ data, lists, extra, logoPng }) {
     { label: 'Bank balance', value: data.bank ? whole(data.bank.balance) : 'not entered' },
   ]);
   const { step } = pickStep([{ rows: Math.max(1, lists.inProg.length), titled: true }, { rows: Math.max(1, lists.coll.length), titled: true }]);
-  const ipRows = lists.inProg.map(r => ({ name: r.name + (r.oop ? '  · OOP' : ''), status: r.status, started: r.created || '', amount: r.amount, paying: r.collect_amount, note: r.note || '' }));
+  const ipRows = lists.inProg.map(r => ({ name: r.name + (r.oop ? '  · OOP' : ''), status: r.status, started: r.created ? fmtDate(r.created) : '', amount: r.amount, paying: r.collect_amount, note: r.note || '' }));
   const cRows = lists.coll.map(r => ({ name: r.name, status: r.status, due: r.due, amount: r.amount, why: [r.why, r.note].filter(Boolean).join(' · ') }));
   y = drawTable(doc, y, [
     { key: 'name', label: 'Job' },

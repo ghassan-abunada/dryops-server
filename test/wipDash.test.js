@@ -136,7 +136,8 @@ test('master page: super master sees every location + pool admin; manager sees o
 
     const sam = await get(`${h.base}/wip/master/${TOKENS.sam}`);
     assert.strictEqual(sam.status, 200);
-    assert.match(sam.body, /<h1>WIP · Sam Rivera<\/h1>/);
+    assert.match(sam.body, /<h1 class="ph">WIP · Sam Rivera<\/h1>/);
+    assert.match(sam.body, /<h2 class="dk">WIP · Sam Rivera<\/h2>/);
     assert.ok(sam.body.includes('A1 Dallas') && sam.body.includes('AFF Dallas') && !sam.body.includes('24 HR'), 'scoped to Sam');
     assert.ok(!sam.body.includes('id="add-loc"') && !sam.body.includes('data-remove='), 'no pool admin for managers');
     assert.ok(h.fx.store.wip_managers.find(m => m.id === MGR.sam).last_opened_at, 'last_opened_at stamped');
@@ -176,7 +177,8 @@ test('admin portal: token gate, add manager, assign/unassign (creates the pool r
     assert.strictEqual((await get(`${h.base}/wip/admin/wrong-token-0000000000000`)).status, 404);
     const page = await get(`${h.base}/wip/admin/${TOKENS.admin}?m=${MGR.sam}`);
     assert.strictEqual(page.status, 200);
-    for (const s of ['Sam Rivera', 'Lee Chen', 'Locations for Sam Rivera', `data-assign="${LOC.tulsa}"`, 'Unassigned locations', 'A1 Tulsa']) assert.ok(page.body.includes(s), 'missing ' + s);
+    for (const s of ['Sam Rivera', 'Lee Chen', 'Locations for Sam Rivera', `data-assign="${LOC.tulsa}"`, 'A1 Tulsa']) assert.ok(page.body.includes(s), 'missing ' + s);
+    assert.ok(!/Unassigned locations/.test(page.body), 'no unassigned-locations card');
     assert.match(page.body, new RegExp(`data-assign="${LOC.a1}" checked`));
     assert.match(page.body, new RegExp(`data-assign="${LOC.hr}" >`)); // Lee's, not Sam's
 

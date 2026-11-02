@@ -60,7 +60,22 @@ npm start
 - `ANTHROPIC_API_KEY` — enables the WIP "Review notes" AI review (wip.js); unset = the buttons and the Saturday run are skipped with a warning
 - `WIP_AUTO_REVIEW` / `WIP_AUTO_REVIEW_HOUR` — the WIP AI review runs by itself every Saturday from 6:00 AM Central for every pooled location (`off` disables; hour 0–23). Deduped per location per Saturday via `wip_reviews.result->>trigger = 'weekly'`; failures retry on later 10-minute ticks that day, max 3
 
-## WIP pages (wip.js, wipDash.js, wipPdf.js)
+## WIP pages (wip.js, wipOwner.js, wipDash.js, wipPdf.js)
+- Visual world = the DryOps DESIGN.md (Charcoal Navy header, Ocean Blue action,
+  slate ground, status strips, 44px targets, plain words). Direction contracts
+  live in `.impeccable/surfaces/`.
+- Owner form (wipOwner.js) is three steps on one page: job values (OOP jobs get
+  a "paying this week" switch → `wip_entries.collect_amount`, listed under
+  Collecting while staying In Progress), verify Collecting (the Saturday review's
+  proposals ride in `ai_decision/ai_amount/ai_reason/ai_at`, shown as "Notes
+  say:"; the review never writes the owner's note; rows the review changed after
+  the owner's last touch are "lit" until answered), bank + the exact text + Send
+  (`/text?by=` saves the snapshot with `generated_by`; `?preview=1` does not).
+- Manager dashboard (wipDash.js) is one row per location: In Progress (jobs · $),
+  Collecting next week (jobs · $), bank balance editable in the row, AR. No
+  totals across locations by owner decision; last week's money and estimate
+  accuracy sit in one collapsed section. Report text: location + week, the four
+  numbers, then IN PROGRESS / COLLECTING THIS WEEK lists.
 - Links are the credential: owner form `/wip/<pool token>`, manager dashboard
   `/wip/master/<wip_managers.token>` (only that manager's locations), super
   master `/wip/master/<wip_config.master_token>` (every pooled location, can

@@ -6,7 +6,7 @@
 function renderOwner(ctx, m) {
   const { esc, json, q, help, whole } = ctx;
   const textUrl = `/wip/${esc(m.token)}/text`;
-  const topbar = `<div class="top">${m.logo ? `<img class="logo" src="${esc(m.logo)}" alt="">` : ''}<div class="ttl"><h1>${esc(m.label)}</h1><div class="sub" id="step-sub">Step 1 of 3 · Job values</div></div><div class="steps" aria-hidden="true"><span class="on" data-step="1"></span><span data-step="2"></span><span data-step="3"></span></div></div>`;
+  const topbar = `<div class="top">${m.logo ? `<img class="logo" src="${esc(m.logo)}" alt="">` : ''}<div class="ttl"><h1>${esc(m.label)}</h1><div class="sub" id="step-sub">Step 1 of 3 · Job values<span class="nxt"> · then Collecting, then Bank</span></div></div><div class="steps" aria-hidden="true"><span class="on" data-step="1"></span><span data-step="2"></span><span data-step="3"></span></div></div>`;
 
   const body = `
 <section class="step" data-step="1">
@@ -50,6 +50,7 @@ function renderOwner(ctx, m) {
   const script = `
 const TOKEN=${json(m.token)},TEXT_URL=${json(textUrl)};let ROWS=${json(m.rows)};const ORDER=${json(m.weekLabel)};
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+const CHECK='<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"m5 12.5 4.5 4.5L19 7\"/></svg>';
 function fmt(n){return '$'+Math.round(n||0).toLocaleString('en-US')}
 function num(v){if(v==null||v==='')return null;const n=Number(String(v).replace(/[^0-9.]/g,''));return isNaN(n)?null:n}
 function money2(n){return n==null?'':Number(n).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:2})}
@@ -63,12 +64,12 @@ function totals(){let ip=0,c=0,ni=0,nc=0,need=0;for(const r of ROWS){if(counted(
 // ── Cards ───────────────────────────────────────────────────────────────────
 function tag(r){return (r.oop?'<span class="tag oop">OOP</span>':'')+(r.status==='Work Complete'?'<span class="tag">Complete</span>':'')}
 function ipCard(r){const need=counted(r)&&r.amount==null;
-return '<div class="job is-ip'+(need?' need':'')+(counted(r)?'':' off')+'" data-card="'+esc(r.key)+'"><div class="job-head"><div class="nm">'+(r.custom?'<input type="text" class="nm" value="'+esc(r.name)+'" data-k="'+esc(r.key)+'" data-f="custom_name" placeholder="Customer name">':esc(r.name))+tag(r)+'</div><div class="meta">'+esc(r.status)+(r.created?' · started '+esc(r.created):'')+'</div></div>'
+return '<div class="job is-ip'+(need?' need':'')+(counted(r)?'':' off')+'" data-card="'+esc(r.key)+'"><div class="job-head"><div class="nm">'+(r.custom?'<input type="text" class="nm" value="'+esc(r.name)+'" data-k="'+esc(r.key)+'" data-f="custom_name" placeholder="Customer name">':esc(r.name))+tag(r)+'</div><div class="meta">'+esc(r.status)+(r.createdLabel?' · started '+esc(r.createdLabel):'')+'</div></div>'
 +(counted(r)?'<div class="amt-row"><span class="pre">$</span><input type="text" inputmode="decimal" pattern="[0-9.,]*" class="amt" data-k="'+esc(r.key)+'" data-f="amount" value="'+esc(money2(r.amount))+'" placeholder="What is this job worth?"></div>'
 +(r.oop?'<label class="sw"><span>Paying this week? Put it under Collecting</span><input type="checkbox" data-k="'+esc(r.key)+'" data-f="paying" '+(r.collect_amount!=null?'checked':'')+'><span class="tog"></span></label>'+(r.collect_amount!=null?'<div class="amt-row"><span class="pre">$</span><input type="text" inputmode="decimal" pattern="[0-9.,]*" class="amt" data-k="'+esc(r.key)+'" data-f="collect_amount" value="'+esc(money2(r.collect_amount))+'" placeholder="How much this week?"></div>':''):'')
-+'<div class="rowbtns">'+(r.custom?'<button class="btn small ghost" data-del="'+esc(r.key)+'">Remove</button>':'<button class="btn small ghost" data-hide="'+esc(r.key)+'">Not ours now</button>')+(r.note?'':'<button class="btn small ghost" data-note="'+esc(r.key)+'">Add a note</button>')+'</div>'
 +(r.note?'<input type="text" class="nt" data-k="'+esc(r.key)+'" data-f="note" value="'+esc(r.note)+'" placeholder="Note">':'')
-:'<div class="rowbtns"><span class="meta">not counted</span><button class="btn small ghost" data-restore="'+esc(r.key)+'">Count it</button></div>')+'</div>'}
++'<div class="rowbtns">'+(r.custom?'<button class="lnk" data-del="'+esc(r.key)+'">Remove</button>':'<button class="lnk" data-hide="'+esc(r.key)+'">Not ours now</button>')+'</div>'
+:'<div class="rowbtns"><span class="meta">not counted</span><button class="lnk" data-restore="'+esc(r.key)+'">Count it</button></div>')+'</div>'}
 function otherCard(r){const on=counted(r);
 return '<div class="job'+(on?' is-ip':'')+'" data-card="'+esc(r.key)+'"><div class="job-head"><div class="nm">'+esc(r.name)+tag(r)+'</div><div class="meta">'+esc(r.status)+(r.group==='in_progress'?' · hidden':'')+'</div></div>'
 +(r.group==='in_progress'?'<div class="rowbtns"><button class="btn small ghost" data-restore="'+esc(r.key)+'">Count it</button></div>':'<div class="amt-row"><span class="pre">$</span><input type="text" inputmode="decimal" pattern="[0-9.,]*" class="amt" data-k="'+esc(r.key)+'" data-f="amount" value="'+esc(money2(r.amount))+'" placeholder="Leave blank, or type a value"></div>')+'</div>'}
@@ -76,7 +77,7 @@ function colCard(r){const yes=r.category==='collecting';const lit=r.lit&&!yes&&r
 const amt=r.category==='collecting'?(r.amount!=null?r.amount:r.due):(r.ai_amount!=null?r.ai_amount:r.due);
 return '<div class="job is-col'+(lit?' lit':'')+(yes?'':' maybe')+'" data-card="'+esc(r.key)+'"><div class="job-head"><div class="nm">'+esc(r.name)+'</div><div class="meta">'+esc(r.status)+(r.due!=null?' · they owe '+fmt(r.due):'')+'</div>'+(r.ai_reason?'<div class="says">Notes say: '+esc(r.ai_reason)+'</div>':'')+'</div>'
 +'<div class="amt-row"><span class="pre">$</span><input type="text" inputmode="decimal" pattern="[0-9.,]*" class="amt" data-k="'+esc(r.key)+'" data-f="amount" value="'+esc(money2(yes?amt:null))+'" placeholder="'+esc(amt!=null?'Yes = '+fmt(amt):'How much this week?')+'"></div>'
-+'<div class="rowbtns"><button class="btn small'+(yes?' on':'')+'" data-yes="'+esc(r.key)+'" data-amt="'+esc(amt!=null?amt:'')+'">'+(yes?'Yes ✓':'Yes')+'</button><button class="btn small ghost'+(!yes&&r.answered?' on':'')+'" data-no="'+esc(r.key)+'">Not this week</button></div>'
++'<div class="rowbtns"><button class="btn small'+(yes?' on':'')+'" data-yes="'+esc(r.key)+'" data-amt="'+esc(amt!=null?amt:'')+'">'+(yes?'Yes '+CHECK:'Yes')+'</button><button class="btn small ghost'+(!yes&&r.answered?' on':'')+'" data-no="'+esc(r.key)+'">Not this week</button></div>'
 +(r.note?'<input type="text" class="nt" data-k="'+esc(r.key)+'" data-f="note" value="'+esc(r.note)+'" placeholder="Note">':'')+'</div>'}
 function oopColCard(r){return '<div class="job is-col" data-card="'+esc(r.key)+'"><div class="job-head"><div class="nm">'+esc(r.name)+tag(r)+'</div><div class="meta">paying this week · set in step 1</div></div><div class="amt-row"><span class="pre">$</span><input type="text" inputmode="decimal" pattern="[0-9.,]*" class="amt" data-k="'+esc(r.key)+'" data-f="collect_amount" value="'+esc(money2(r.collect_amount))+'" placeholder="How much this week?"></div></div>'}
 function render(){
@@ -96,14 +97,15 @@ else if(STEP===2){k.textContent='Collecting';v.textContent=fmt(t.c)+' · '+t.nc+
 else{k.textContent='Ready';v.textContent=document.getElementById('bank').value?'bank balance in':'bank balance missing'}}
 function go(n){STEP=n;document.querySelectorAll('.step').forEach(s=>s.hidden=Number(s.dataset.step)!==n);
 document.querySelectorAll('.steps span').forEach(s=>s.classList.toggle('on',Number(s.dataset.step)<=n));
-document.getElementById('step-sub').textContent=['','Step 1 of 3 · Job values','Step 2 of 3 · Collecting','Step 3 of 3 · Bank and send'][n];
+document.getElementById('step-sub').innerHTML=['','Step 1 of 3 · Job values<span class="nxt"> · then Collecting, then Bank</span>','Step 2 of 3 · Collecting<span class="nxt"> · then Bank and send</span>','Step 3 of 3 · Bank and send'][n];
 document.getElementById('back').hidden=n===1;document.getElementById('next').textContent=n===3?'Send':'Next';window.scrollTo(0,0);bar();if(n===3)preview()}
 async function preview(){const p=document.getElementById('preview');try{const r=await fetch(TEXT_URL+'?preview=1',{cache:'no-store'});p.textContent=await r.text()}catch(e){p.textContent='Could not load the preview. Try again in a moment.'}}
 document.getElementById('next').onclick=async()=>{if(STEP<3){go(STEP+1);return}
 await flush(true);let text='';try{const r=await fetch(TEXT_URL+'?by='+encodeURIComponent(who.value||''),{cache:'no-store'});text=await r.text()}catch(e){setStatus('Could not build the report. Try again.',true);return}
-document.getElementById('sent-meta').textContent='sent '+new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
-if(navigator.share){try{await navigator.share({title:'WIP — '+${json(m.label)},text});return}catch(e){if(e&&e.name==='AbortError')return}}
-shareFallback(text)};
+const stamp=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+function sent(){document.getElementById('sent-meta').textContent='sent '+stamp;document.getElementById('bar-k').textContent='Sent';document.getElementById('bar-v').textContent=stamp;const n=document.getElementById('next');n.className='btn ghost';n.textContent='Sent '+stamp+' · Send again'}
+if(navigator.share){try{await navigator.share({title:'WIP — '+${json(m.label)},text});sent();return}catch(e){if(e&&e.name==='AbortError')return}}
+shareFallback(text);sent()};
 document.getElementById('back').onclick=()=>go(STEP-1);
 // ── Saving ──────────────────────────────────────────────────────────────────
 const st=document.getElementById('status');let saveNote=null;
