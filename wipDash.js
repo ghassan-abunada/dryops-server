@@ -14,7 +14,7 @@ const CSS = `
   .pagerow .pt{flex:1;min-width:200px;display:flex;flex-direction:column}.pagerow h2{margin:0;font-size:17px}.pagerow .meta{white-space:nowrap}
   .top .brand{display:none}.top .brand span{color:var(--hdrsub);font-weight:700;margin-left:8px}
   @media(min-width:900px){.top .brand{display:block}.top .ph{display:none}.pagerow{border-bottom:1px solid var(--line);padding-bottom:10px;margin:0 0 16px}}
-  @media(max-width:899px){.pagerow .dk{display:none}}
+  @media(max-width:899px){.pagerow .dk{display:none}.pagerow .pt{display:none}.pagerow .btn{flex:1 1 auto}}
   .tbl{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
   table.t{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
   table.t th{font-weight:800;color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
