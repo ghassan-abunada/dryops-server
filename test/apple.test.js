@@ -396,3 +396,28 @@ test('directions(): request shape, routes[0] mapping, rounding, cache, null on n
   assert.strictEqual(await off.directions({ origin: '32.7,-96.8', destination: '32.73,-96.77' }), null);
   assert.strictEqual(calls.length, before);
 });
+
+test('makeMapkitJsToken: ES256 JWT with iss/kid/origin and no sub; verifies with the public key', () => {
+  const now = 1_760_000_000_000;
+  const jwt = apple.makeMapkitJsToken({ teamId: 'TEAM1', keyId: 'KEY1', privateKey: pem, origin: 'https://dryops.app', now });
+  const [h, p, sig] = jwt.split('.');
+  assert.deepStrictEqual(b64urlJson(h), { alg: 'ES256', kid: 'KEY1', typ: 'JWT' });
+  const payload = b64urlJson(p);
+  assert.strictEqual(payload.iss, 'TEAM1');
+  assert.strictEqual(payload.origin, 'https://dryops.app');
+  assert.strictEqual(payload.sub, undefined);
+  assert.strictEqual(payload.exp - payload.iat, 1800);
+  assert.ok(crypto.verify('sha256', Buffer.from(`${h}.${p}`), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(sig, 'base64url')));
+});
+
+test('mapkitOriginAllowed + createApple().mapkitToken: dryops.app, railway and localhost only', () => {
+  const ok = ['https://dryops.app', 'https://www.dryops.app', 'https://dryops-app-production.up.railway.app', 'http://localhost:8081', 'http://127.0.0.1:19006'];
+  const bad = ['', 'http://dryops.app', 'https://dryops.app.evil.com', 'https://evil.com', 'https://notdryops.app', null];
+  for (const o of ok) assert.strictEqual(apple.mapkitOriginAllowed(o), true, o);
+  for (const o of bad) assert.strictEqual(apple.mapkitOriginAllowed(o), false, String(o));
+  const quiet = { error() {}, warn() {}, log() {} };
+  const a = createApple({ APPLE_MAPS_TEAM_ID: 'T', APPLE_MAPS_KEY_ID: 'K', APPLE_MAPS_ID: 'M', APPLE_MAPS_PRIVATE_KEY: pem }, { log: quiet });
+  assert.ok(a.mapkitToken('https://dryops.app'));
+  assert.strictEqual(a.mapkitToken('https://evil.com'), null);
+  assert.strictEqual(createApple({}, { log: quiet }).mapkitToken('https://dryops.app'), null);
+});
