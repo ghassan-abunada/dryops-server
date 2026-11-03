@@ -5,10 +5,10 @@ const { webhookTargets, classifyTextDelivery, rankJobs, previewOf, validateConte
 
 test('webhookTargets: calls keep the calls route, texts go to the sms route with the event in the query', () => {
   const t = webhookTargets('https://dryops-server-production.up.railway.app/', 'a b');
-  assert.strictEqual(t.pre_call_webhook, 'https://dryops-server-production.up.railway.app/webhooks/callrail/calls?token=a%20b');
-  assert.strictEqual(t.post_call_webhook, t.pre_call_webhook);
-  assert.strictEqual(t.post_outbound_call_webhook, t.pre_call_webhook);
-  assert.strictEqual(t.updated_call_webhook, t.pre_call_webhook);
+  assert.strictEqual(t.pre_call_webhook, 'https://dryops-server-production.up.railway.app/webhooks/callrail/calls?token=a%20b&event=pre_call');
+  assert.strictEqual(t.post_call_webhook, 'https://dryops-server-production.up.railway.app/webhooks/callrail/calls?token=a%20b&event=post_call');
+  assert.strictEqual(t.post_outbound_call_webhook.split('&')[0], t.pre_call_webhook.split('&')[0], 'same route');
+  assert.match(t.updated_call_webhook, /&event=updated$/);
   assert.strictEqual(t.sms_received_webhook, 'https://dryops-server-production.up.railway.app/webhooks/callrail/sms?token=a%20b&event=received');
   assert.strictEqual(t.sms_sent_webhook, 'https://dryops-server-production.up.railway.app/webhooks/callrail/sms?token=a%20b&event=sent');
   assert.deepStrictEqual(Object.keys(t).length, 6);

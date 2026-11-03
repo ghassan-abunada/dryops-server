@@ -925,7 +925,17 @@ app.post('/webhooks/callrail/calls', express.urlencoded({ extended: true, limit:
   // late or is retried can never blank a finished call; the post-call delivery
   // or the reconcile fills them in. The app treats "started recently, no
   // answered/duration" as a live call (lib/calls.ts isLiveCall).
-  const preCall = call.duration === undefined && call.answered === undefined;
+  // Which delivery this is: the installer tags each URL (&event=pre_call |
+  // post_call | outbound | updated). Untagged (old URLs, until the refresh
+  // reinstalls them): a ringing call carries no duration / answer, or an
+  // unanswered zero-length call a few seconds old — never a finished miss yet.
+  const event = String(req.query.event || '');
+  const startedAgo = Date.now() - (Date.parse(call.start_time) || Date.now());
+  const preCall = event
+    ? event === 'pre_call'
+    : (call.duration === undefined && call.answered === undefined)
+      || (call.answered !== true && !(Number(call.duration) > 0) && startedAgo < 20 * 1000);
+  const settled = event === 'post_call' || event === 'outbound' || event === 'updated';
   if (preCall) { delete row.duration; delete row.answered; delete row.voicemail; }
 
   try {
@@ -977,8 +987,8 @@ app.post('/webhooks/callrail/calls', express.urlencoded({ extended: true, limit:
       setTimeout(() => intake.postCallActivities({ callrailId: row.callrail_id }).catch((e) => console.warn('[callrail-webhook] instant activity failed', e.message)), 500);
     }
     // Push owners / managers (never blocks the 200 CallRail waits for).
-    callAlerts.onCallEvent({ ...row }, { preCall }).catch((e) => console.warn('[callrail-webhook] call push failed', e.message));
-    return res.status(200).json({ ok: true, callrail_id: row.callrail_id, pre_call: preCall, summary_ready: summaryReady, location_id: row.location_id || null, job_id: row.job_id || null });
+    callAlerts.onCallEvent({ ...row }, { preCall, settled }).catch((e) => console.warn('[callrail-webhook] call push failed', e.message));
+    return res.status(200).json({ ok: true, callrail_id: row.callrail_id, event: event || null, pre_call: preCall, summary_ready: summaryReady, location_id: row.location_id || null, job_id: row.job_id || null });
   } catch (err) {
     console.error('[callrail-webhook] error', err.message);
     return res.status(502).json({ ok: false, error: err.message });
@@ -1138,6 +1148,18 @@ async function callrailWebhooksWeeklyTick() {
   }
 }
 if (SUPABASE_SERVICE_KEY) setInterval(callrailWebhooksWeeklyTick, 60 * 60 * 1000);
+// Also once ~90 s after each deploy, so a change to the webhook URLs (e.g. the
+// &event= tags, 2026-11-03) reaches CallRail without waiting for Monday.
+if (SUPABASE_SERVICE_KEY && CALLRAIL_API_KEY && CALLRAIL_ACCOUNT_IDS.length && CALLRAIL_WEBHOOK_TOKEN) {
+  setTimeout(async () => {
+    try {
+      const { summary, results } = await installCallrailWebhooks({ dryRun: false });
+      const failed = results.filter(r => r.action === 'failed');
+      if (failed.length) console.error('[callrail-webhooks] boot refresh had failures:', failed.map(f => `${f.company || f.account_id}: ${f.error}`).join('; '));
+      else console.log('[callrail-webhooks] boot refresh ok', JSON.stringify(summary));
+    } catch (err) { console.error('[callrail-webhooks] boot refresh failed:', err.message); }
+  }, 90 * 1000).unref?.();
+}
 
 // TEMPORARY setup helper: returns CallRail accounts (id + name) using the API
 // key, ONLY while no account ids are configured yet. Self-disables (410) once
@@ -7075,6 +7097,10 @@ require('./sms')(app, {
   callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, anthropic: wipAnthropic,
   push: pushSender,
 });
+
+// ── Owner call backs through CallRail (see callbacks.js) ────────────────────
+// POST /calls/:id/callback: CallRail rings the owner's phone, then the caller.
+require('./callbacks')(app, { requireAuth, sbGet, sbUpsert, callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS });
 
 // ── @Mentions → DryOps notifications (see mentions.js) ──────────────────────
 // Reads every new JobNimbus activity once a minute, matches "@FirstLast" to

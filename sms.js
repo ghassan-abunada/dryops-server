@@ -68,12 +68,14 @@ function toISO(v) {
 function webhookTargets(baseUrl, token) {
   const base = String(baseUrl || '').replace(/\/+$/, '');
   const t = encodeURIComponent(token || '');
-  const calls = `${base}/webhooks/callrail/calls?token=${t}`;
+  // Each call event carries its name (2026-11-03): CallRail's ringing (pre-call)
+  // payload can look like a finished missed call, so the URL says which it is.
+  const calls = (event) => `${base}/webhooks/callrail/calls?token=${t}&event=${event}`;
   return {
-    pre_call_webhook: calls,
-    post_call_webhook: calls,
-    post_outbound_call_webhook: calls,
-    updated_call_webhook: calls,
+    pre_call_webhook: calls('pre_call'),
+    post_call_webhook: calls('post_call'),
+    post_outbound_call_webhook: calls('outbound'),
+    updated_call_webhook: calls('updated'),
     sms_received_webhook: `${base}/webhooks/callrail/sms?token=${t}&event=received`,
     sms_sent_webhook: `${base}/webhooks/callrail/sms?token=${t}&event=sent`,
   };

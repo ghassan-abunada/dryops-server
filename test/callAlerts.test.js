@@ -123,9 +123,14 @@ test('manager review: missed call pushes once; repeat answered caller does not',
   await alerts.onCallEvent(missed, { preCall: false });
   await alerts.onCallEvent(missed, { preCall: false });
   await alerts.onCallEvent(repeat, { preCall: false });
-  assert.strictEqual(sent.length, 1);
-  assert.strictEqual(sent[0].title, 'Missed call · A1 Dallas');
-  assert.strictEqual(sent[0].data.url, '/calls/CALM?mode=review');
+  // Once each: the owner's Call back push and the manager's review push; the repeat caller gets neither.
+  assert.strictEqual(sent.length, 2);
+  const owner = sent.find((m) => m.data.kind === 'call_missed');
+  const manager = sent.find((m) => m.data.kind === 'call_review');
+  assert.strictEqual(owner.categoryId, 'missed_call');
+  assert.strictEqual(owner.data.url, '/calls/CALM?mode=owner');
+  assert.strictEqual(manager.title, 'Missed call · A1 Dallas');
+  assert.strictEqual(manager.data.url, '/calls/CALM?mode=review');
 });
 
 test('manager review: answered first-timer waits for the recording', async () => {
@@ -157,4 +162,25 @@ test('push.js: dry run sends nothing; dead tokens are pruned', async () => {
   const del = calls.find((c) => c.method === 'DELETE');
   assert.ok(del && decodeURIComponent(del.url).includes('ExponentPushToken[dead]'));
   assert.deepStrictEqual(createPush.chunk([1, 2, 3], 2), [[1, 2], [3]]);
+});
+
+test('a ringing call that looks missed is not pushed as missed (2026-11-03 bug)', async () => {
+  const { callSettled } = callAlerts;
+  const now = Date.now();
+  // CallRail's ringing delivery: answered false, duration 0, 2 seconds old → not over.
+  assert.strictEqual(callSettled({ start_time: new Date(now - 2000).toISOString(), duration: 0 }, now), false);
+  // A real miss, 90 seconds old → over.
+  assert.strictEqual(callSettled({ start_time: new Date(now - 90 * 1000).toISOString(), duration: 0 }, now), true);
+  // A 3-minute answered call only settles a minute after it ends.
+  assert.strictEqual(callSettled({ start_time: new Date(now - 200 * 1000).toISOString(), duration: 180 }, now), false);
+  assert.strictEqual(callSettled({ start_time: new Date(now - 260 * 1000).toISOString(), duration: 180 }, now), true);
+
+  const ringing = { ...base, callrail_id: 'CALRING', answered: false, voicemail: false, duration: 0, start_time: new Date(now - 2000).toISOString() };
+  const { alerts, sent } = harness({ managers: [{ id: 'm1', role: 'expansion_manager', location_ids: [LOC] }], calls: { CALRING: ringing } });
+  const out = await alerts.reviewCall('CALRING', 99); // past the retry list: no timer
+  assert.deepStrictEqual(out, { waiting: true, reason: 'not settled' });
+  assert.strictEqual(sent.length, 0, 'nobody is told it was missed while it rings');
+  // The post-call delivery says it is over: now it is a real miss.
+  await alerts.reviewCall('CALRING', 0, { settled: true });
+  assert.ok(sent.some((m) => m.title.startsWith('Missed call')));
 });

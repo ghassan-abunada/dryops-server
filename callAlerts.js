@@ -21,9 +21,23 @@ const OWNER_ROLES = ['owner', 'admin'];
 const MANAGER_ROLES = ['expansion_manager', 'admin'];
 
 const OWNER = 'owner_alert';
+const OWNER_MISSED = 'owner_missed';
 const MANAGER = 'manager_review';
 const RECORDING_RETRY_MS = [2 * 60 * 1000, 6 * 60 * 1000];
 const SWEEP_WINDOW_MS = 3 * 60 * 60 * 1000;
+const SETTLE_MS = 60 * 1000;
+
+/**
+ * Is this call over? A post-call / modified delivery says so; otherwise the
+ * call must be older than its duration plus a minute. A ringing call that was
+ * mistaken for a finished one (answered false, duration 0, seconds old) is not
+ * settled, so nobody is told it was missed while it is still ringing.
+ */
+function callSettled(call, now = Date.now()) {
+  const started = Date.parse(call && call.start_time);
+  if (!Number.isFinite(started)) return true;
+  return now - started > (Number(call.duration) || 0) * 1000 + SETTLE_MS;
+}
 
 // ── Pure helpers (tested) ────────────────────────────────────────────────────
 
@@ -75,8 +89,20 @@ function fmtMinutes(sec) {
   return `${Math.round(s / 60)} min`;
 }
 
+/** CallRail's carrier caller-ID often isn't a person ("WIRELESS CALLER", "DALLAS TX"); same rule as the app (lib/callsLive.ts). */
+function isPlaceholderName(name) {
+  const n = String(name || '').trim().replace(/\s+/g, ' ');
+  if (!n) return true;
+  if (/^(wireless caller|unknown( caller| name)?|private( caller| number)?|restricted|anonymous|toll free( call)?|cell phone|mobile caller|unavailable|no caller id|out of area|v\d+)$/i.test(n)) return true;
+  return n === n.toUpperCase() && /^[A-Z .'-]+ [A-Z]{2}$/.test(n);
+}
+function personName(call) {
+  const n = String(call.customer_name || '').trim();
+  return isPlaceholderName(n) ? '' : n;
+}
+
 function callerLabel(call) {
-  const name = String(call.customer_name || '').trim();
+  const name = personName(call);
   const phone = fmtPhone(call.customer_phone_number);
   if (name && phone) return `${name} ${phone}`;
   return name || phone || 'Unknown caller';
@@ -94,9 +120,26 @@ function ownerMessage(call, locationName) {
   };
 }
 
+/** Owner / admin missed-call push: the notification carries a Call back button (category 'missed_call'). */
+function ownerMissedMessage(call, locationName) {
+  return {
+    title: `Missed call${locationName ? ` · ${shortLocation(locationName)}` : ''}`,
+    body: `${callerLabel(call)} ${call.voicemail ? 'left a voicemail' : 'wasn\'t answered'}. Call them back now?`,
+    data: { kind: 'call_missed', callrail_id: call.callrail_id, url: `/calls/${call.callrail_id}?mode=owner` },
+    categoryId: 'missed_call',
+  };
+}
+
+/** Owner missed-call push: a finished, missed (or voicemail) inbound call from a new caller (no job yet). */
+function ownerMissedEligible(call) {
+  if (!call || !inbound(call) || !call.location_id || call.job_id) return false;
+  if (call.answered == null && call.duration == null) return false;
+  return call.answered === false || call.voicemail === true;
+}
+
 function managerMessage(call, locationName, kind) {
   const where = locationName ? ` · ${shortLocation(locationName)}` : '';
-  const who = String(call.customer_name || '').trim() || fmtPhone(call.customer_phone_number) || 'Unknown caller';
+  const who = personName(call) || fmtPhone(call.customer_phone_number) || 'Unknown caller';
   return kind === 'missed'
     ? {
         title: `Missed call${where}`,
@@ -165,6 +208,16 @@ function createCallAlerts({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push, cal
     return { sent, recipients: ids.length };
   }
 
+  async function sendOwnerMissed(call) {
+    const ctx = await context(call.location_id, OWNER_ROLES);
+    const ids = recipientsFor(ctx.profiles, call.location_id, OWNER_ROLES, ctx.prefs, 'call_alerts');
+    if (!ids.length) return { sent: 0, reason: 'no owners' };
+    if (!(await claim(call.callrail_id, OWNER_MISSED, ids.length))) return { sent: 0, reason: 'already sent' };
+    const sent = await push.toProfiles(ids, ownerMissedMessage(call, ctx.locationName), 'call_missed');
+    log.log(`[call-push] owner missed ${call.callrail_id} → ${ids.length} owner(s), ${sent} device(s)`);
+    return { sent, recipients: ids.length };
+  }
+
   async function sendManager(call, kind) {
     const ctx = await context(call.location_id, MANAGER_ROLES);
     const ids = recipientsFor(ctx.profiles, call.location_id, MANAGER_ROLES, ctx.prefs, 'call_reviews');
@@ -176,10 +229,21 @@ function createCallAlerts({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push, cal
   }
 
   /** Re-read the stored call (webhook rows are sparse) and decide the manager push. */
-  async function reviewCall(callrailId, attempt = 0) {
+  async function reviewCall(callrailId, attempt = 0, { settled = false } = {}) {
     const rows = await sbGet(`calls?callrail_id=eq.${enc(callrailId)}&select=callrail_id,direction,answered,voicemail,first_call,duration,location_id,job_id,recording_url,customer_name,customer_phone_number,start_time&limit=1`);
     const call = Array.isArray(rows) ? rows[0] : null;
     if (!call) return null;
+    // Not over yet (or a ringing call that looked finished): look again later.
+    if (!settled && !callSettled(call)) {
+      const delay = RECORDING_RETRY_MS[attempt];
+      if (delay != null && !pending.has(`${callrailId}:${attempt}`)) {
+        pending.add(`${callrailId}:${attempt}`);
+        setTimeout(() => { pending.delete(`${callrailId}:${attempt}`); reviewCall(callrailId, attempt + 1).catch((e) => log.warn('[call-push] retry failed', e.message)); }, delay).unref?.();
+      }
+      return { waiting: true, reason: 'not settled' };
+    }
+    // Owners + admins: a missed new caller, with a Call back button (once per call).
+    if (attempt === 0 && ownerMissedEligible(call)) await sendOwnerMissed(call).catch((e) => log.warn('[call-push] owner missed failed', e.message));
     let kind = managerReviewKind(call, { hasRecording: !!call.recording_url });
     if (kind === 'wait') kind = managerReviewKind(call, { hasRecording: await hasRecording(call) });
     if (kind === 'wait') {
@@ -194,10 +258,10 @@ function createCallAlerts({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push, cal
   }
 
   /** Webhook hook: `row` is the upserted call row with location/job resolved. */
-  async function onCallEvent(row, { preCall }) {
+  async function onCallEvent(row, { preCall, settled = false }) {
     try {
       if (ownerAlertEligible(row, preCall)) return await sendOwner(row);
-      if (!preCall && inbound(row)) return await reviewCall(row.callrail_id);
+      if (!preCall && inbound(row)) return await reviewCall(row.callrail_id, 0, { settled });
     } catch (e) {
       log.warn('[call-push] failed', row && row.callrail_id, e.message);
     }
@@ -230,6 +294,11 @@ module.exports.ownerAlertEligible = ownerAlertEligible;
 module.exports.managerReviewKind = managerReviewKind;
 module.exports.ownerMessage = ownerMessage;
 module.exports.managerMessage = managerMessage;
+module.exports.ownerMissedMessage = ownerMissedMessage;
+module.exports.ownerMissedEligible = ownerMissedEligible;
+module.exports.isPlaceholderName = isPlaceholderName;
+module.exports.OWNER_MISSED = OWNER_MISSED;
+module.exports.callSettled = callSettled;
 module.exports.fmtPhone = fmtPhone;
 module.exports.OWNER = OWNER;
 module.exports.OWNER_ROLES = OWNER_ROLES;
