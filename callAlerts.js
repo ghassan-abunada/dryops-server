@@ -1,10 +1,10 @@
 'use strict';
 // Call pushes (owner 2026-11-03).
 //
-//   Owners       — "New caller" while the phone rings: an inbound call to their
+//   Owners + admins — "New caller" while the phone rings: an inbound call to their
 //                  location from a number with no job yet. Tapping opens the
 //                  call in the app to make a job or mark it not an opportunity.
-//   Exp. managers — "Call to review" once the call ends: answered first-time
+//   Exp. managers + admins — "Call to review" once the call ends: answered first-time
 //                  callers with a recording, and every missed call. Tapping
 //                  opens the Wash Your Hands review for that call.
 //
@@ -14,6 +14,11 @@
 // manager can see those numbers and the push would reach all of them; they
 // still list in WYH. Each (call, kind) is claimed once in call_push_log, so
 // webhook retries, the reconcile and redeploys never double-push.
+
+// Who gets each push (owner 2026-11-03: "include admins too"), always only at
+// locations they are assigned to.
+const OWNER_ROLES = ['owner', 'admin'];
+const MANAGER_ROLES = ['expansion_manager', 'admin'];
 
 const OWNER = 'owner_alert';
 const MANAGER = 'manager_review';
@@ -27,12 +32,13 @@ function assignedLocations(p) {
   return p.location_id ? [String(p.location_id)] : [];
 }
 
-/** Profiles of `role` assigned to the location who have not switched `prefKey` off. */
-function recipientsFor(profiles, locationId, role, prefs, prefKey) {
+/** Profiles with one of `roles` assigned to the location who have not switched `prefKey` off. */
+function recipientsFor(profiles, locationId, roles, prefs, prefKey) {
+  const want = new Set(Array.isArray(roles) ? roles : [roles]);
   if (!locationId) return [];
   const off = new Set((prefs || []).filter((p) => p && p[prefKey] === false).map((p) => String(p.profile_id)));
   return (profiles || [])
-    .filter((p) => p && p.role === role && assignedLocations(p).includes(String(locationId)))
+    .filter((p) => p && want.has(p.role) && assignedLocations(p).includes(String(locationId)))
     .map((p) => String(p.id))
     .filter((id) => !off.has(id));
 }
@@ -126,9 +132,9 @@ function createCallAlerts({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push, cal
     return Array.isArray(rows) && rows.length > 0;
   }
 
-  async function context(locationId, role) {
+  async function context(locationId, roles) {
     const [profiles, loc] = await Promise.all([
-      sbGet(`profiles?select=id,role,location_id,location_ids&role=eq.${enc(role)}`),
+      sbGet(`profiles?select=id,role,location_id,location_ids&role=in.(${roles.map(enc).join(',')})`),
       sbGet(`locations?id=eq.${enc(locationId)}&select=name&limit=1`),
     ]);
     const prof = Array.isArray(profiles) ? profiles : [];
@@ -150,8 +156,8 @@ function createCallAlerts({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push, cal
   }
 
   async function sendOwner(call) {
-    const ctx = await context(call.location_id, 'owner');
-    const ids = recipientsFor(ctx.profiles, call.location_id, 'owner', ctx.prefs, 'call_alerts');
+    const ctx = await context(call.location_id, OWNER_ROLES);
+    const ids = recipientsFor(ctx.profiles, call.location_id, OWNER_ROLES, ctx.prefs, 'call_alerts');
     if (!ids.length) return { sent: 0, reason: 'no owners' };
     if (!(await claim(call.callrail_id, OWNER, ids.length))) return { sent: 0, reason: 'already sent' };
     const sent = await push.toProfiles(ids, ownerMessage(call, ctx.locationName), 'call_alert');
@@ -160,8 +166,8 @@ function createCallAlerts({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push, cal
   }
 
   async function sendManager(call, kind) {
-    const ctx = await context(call.location_id, 'expansion_manager');
-    const ids = recipientsFor(ctx.profiles, call.location_id, 'expansion_manager', ctx.prefs, 'call_reviews');
+    const ctx = await context(call.location_id, MANAGER_ROLES);
+    const ids = recipientsFor(ctx.profiles, call.location_id, MANAGER_ROLES, ctx.prefs, 'call_reviews');
     if (!ids.length) return { sent: 0, reason: 'no managers' };
     if (!(await claim(call.callrail_id, MANAGER, ids.length))) return { sent: 0, reason: 'already sent' };
     const sent = await push.toProfiles(ids, managerMessage(call, ctx.locationName, kind), 'call_review');
@@ -226,4 +232,6 @@ module.exports.ownerMessage = ownerMessage;
 module.exports.managerMessage = managerMessage;
 module.exports.fmtPhone = fmtPhone;
 module.exports.OWNER = OWNER;
+module.exports.OWNER_ROLES = OWNER_ROLES;
+module.exports.MANAGER_ROLES = MANAGER_ROLES;
 module.exports.MANAGER = MANAGER;
