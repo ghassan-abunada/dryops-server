@@ -408,6 +408,7 @@ module.exports = function mountSms(app, deps) {
     if (!sum) return;
     const { title, body } = sum;
     const messages = tokens.map((t) => ({ to: t.token, title, body, sound: 'default', data: { conversation_id: conv.id, url: `/messages/${conv.id}` } }));
+    if (deps.push) { await deps.push.send(messages, 'sms'); return; }
     for (let i = 0; i < messages.length; i += 100) {
       const r = await fetch('https://exp.host/--/api/v2/push/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(messages.slice(i, i + 100)) });
       if (!r.ok) warn('expo push', r.status, (await r.text()).slice(0, 200));
