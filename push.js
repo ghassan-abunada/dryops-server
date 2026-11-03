@@ -72,9 +72,10 @@ function createPush({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, fetchImpl, env 
   }
 
   /** One notification to every device of these profiles. */
-  async function toProfiles(profileIds, { title, body, data, sound = 'default' }, tag) {
+  async function toProfiles(profileIds, { title, body, data, sound = 'default', categoryId }, tag) {
     const tokens = await tokensFor(profileIds);
-    return send(tokens.map((t) => ({ to: t.token, title, body, sound, data })), tag);
+    // categoryId: the notification's action buttons (registered by the app, e.g. 'missed_call' → Call back).
+    return send(tokens.map((t) => ({ to: t.token, title, body, sound, data, ...(categoryId ? { categoryId } : {}) })), tag);
   }
 
   return { send, toProfiles, tokensFor, dryrun };

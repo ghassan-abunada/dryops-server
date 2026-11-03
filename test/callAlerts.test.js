@@ -123,9 +123,14 @@ test('manager review: missed call pushes once; repeat answered caller does not',
   await alerts.onCallEvent(missed, { preCall: false });
   await alerts.onCallEvent(missed, { preCall: false });
   await alerts.onCallEvent(repeat, { preCall: false });
-  assert.strictEqual(sent.length, 1);
-  assert.strictEqual(sent[0].title, 'Missed call · A1 Dallas');
-  assert.strictEqual(sent[0].data.url, '/calls/CALM?mode=review');
+  // Once each: the owner's Call back push and the manager's review push; the repeat caller gets neither.
+  assert.strictEqual(sent.length, 2);
+  const owner = sent.find((m) => m.data.kind === 'call_missed');
+  const manager = sent.find((m) => m.data.kind === 'call_review');
+  assert.strictEqual(owner.categoryId, 'missed_call');
+  assert.strictEqual(owner.data.url, '/calls/CALM?mode=owner');
+  assert.strictEqual(manager.title, 'Missed call · A1 Dallas');
+  assert.strictEqual(manager.data.url, '/calls/CALM?mode=review');
 });
 
 test('manager review: answered first-timer waits for the recording', async () => {

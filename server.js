@@ -7076,6 +7076,10 @@ require('./sms')(app, {
   push: pushSender,
 });
 
+// ── Owner call backs through CallRail (see callbacks.js) ────────────────────
+// POST /calls/:id/callback: CallRail rings the owner's phone, then the caller.
+require('./callbacks')(app, { requireAuth, sbGet, sbUpsert, callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS });
+
 // ── @Mentions → DryOps notifications (see mentions.js) ──────────────────────
 // Reads every new JobNimbus activity once a minute, matches "@FirstLast" to
 // DryOps profiles (profiles.jn_user_id), records `mentions` and pushes.
