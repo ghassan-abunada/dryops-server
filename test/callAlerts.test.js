@@ -45,6 +45,10 @@ test('recipientsFor: role + assigned location, minus people who switched it off'
   assert.deepStrictEqual(recipientsFor(profiles, LOC, 'owner', [{ profile_id: 'o2', call_reviews: false }], 'call_alerts'), ['o1', 'o2'], 'other switch ignored');
   assert.deepStrictEqual(recipientsFor(profiles, LOC, 'expansion_manager', [], 'call_reviews'), ['m1'], 'a manager of other locations only is never pushed');
   assert.deepStrictEqual(recipientsFor(profiles, null, 'owner', [], 'call_alerts'), []);
+  // Admins too (owner 2026-11-03), only where they are assigned.
+  assert.deepStrictEqual(recipientsFor(profiles, LOC, callAlerts.OWNER_ROLES, [], 'call_alerts'), ['o1', 'o2', 'a1']);
+  assert.deepStrictEqual(recipientsFor(profiles, LOC, callAlerts.MANAGER_ROLES, [], 'call_reviews'), ['m1', 'a1']);
+  assert.deepStrictEqual(recipientsFor(profiles, OTHER, callAlerts.OWNER_ROLES, [], 'call_alerts'), ['o3']);
 });
 
 test('push copy: no company name, deep link to the call screen', () => {
@@ -65,7 +69,7 @@ function harness({ owners = [{ id: 'o1', role: 'owner', location_ids: [LOC] }], 
   const claimed = new Set();
   const sent = [];
   const sbGet = async (q) => {
-    if (q.startsWith('profiles?')) return q.includes('role=eq.owner') ? owners : managers;
+    if (q.startsWith('profiles?')) return decodeURIComponent(q).includes('owner') ? owners : managers;
     if (q.startsWith('locations?')) return [{ name: 'A1 Dallas' }];
     if (q.startsWith('push_prefs?')) return prefs;
     if (q.startsWith('push_tokens?')) {
