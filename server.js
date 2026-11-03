@@ -888,6 +888,11 @@ function mapCallRow(call, { sparse = false } = {}) {
   };
 }
 
+// Call pushes (callAlerts.js): owners on a ringing new caller, expansion
+// managers once a call is ready to review. One Expo sender (push.js).
+const pushSender = require('./push')({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet });
+const callAlerts = require('./callAlerts')({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push: pushSender, callrailApi, CALLRAIL_ACCOUNT_IDS });
+
 // Post-call webhook: CallRail POSTs each completed call here in real time.
 app.post('/webhooks/callrail/calls', async (req, res) => {
   if (!callrailWebhookOk(req)) {
@@ -962,6 +967,8 @@ app.post('/webhooks/callrail/calls', async (req, res) => {
     if (summaryReady) {
       setTimeout(() => intake.postCallActivities({ callrailId: row.callrail_id }).catch((e) => console.warn('[callrail-webhook] instant activity failed', e.message)), 500);
     }
+    // Push owners / managers (never blocks the 200 CallRail waits for).
+    callAlerts.onCallEvent({ ...row }, { preCall }).catch((e) => console.warn('[callrail-webhook] call push failed', e.message));
     return res.status(200).json({ ok: true, callrail_id: row.callrail_id, pre_call: preCall, summary_ready: summaryReady, location_id: row.location_id || null, job_id: row.job_id || null });
   } catch (err) {
     console.error('[callrail-webhook] error', err.message);
@@ -1325,6 +1332,9 @@ async function reconcileCalls() {
       }
     }
     if (upserted) await sbRpc('callrail_resolve_all'); // location/job/date_contacted for new rows
+    // Manager reviews the webhook missed (restart, late recording), last 3 hours only.
+    const reviews = await callAlerts.sweep().catch((e) => { console.warn('[calls-reconcile] call push sweep failed', e.message); return 0; });
+    if (reviews) console.log(`[calls-reconcile] sent ${reviews} call review push(es)`);
     console.log(`[calls-reconcile] upserted ${upserted} calls (${CALLS_RECONCILE_LOOKBACK_DAYS}d window)`);
   } catch (err) {
     console.error('[calls-reconcile] failed:', err.message);
@@ -7054,12 +7064,13 @@ require('./sms')(app, {
   requireAuth, requireCallAccess, callrailWebhookOk, loadActor: intake.loadActor,
   sbGet, sbPatch, sbUpsert, jnSendJson, UUID_RE,
   callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, anthropic: wipAnthropic,
+  push: pushSender,
 });
 
 // ── @Mentions → DryOps notifications (see mentions.js) ──────────────────────
 // Reads every new JobNimbus activity once a minute, matches "@FirstLast" to
 // DryOps profiles (profiles.jn_user_id), records `mentions` and pushes.
-require('./mentions')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAdmin, sbGet, sbInsert, jnGetJson, jnFetchAccountUsers });
+require('./mentions')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAdmin, sbGet, sbInsert, jnGetJson, jnFetchAccountUsers, push: pushSender });
 
 // ── WYH AI reviewer (Wash Your Hands suggestions; see wyhAi.js) ──────────────
 // Mounted after intake: it borrows intake.loadActor like the WYH module.

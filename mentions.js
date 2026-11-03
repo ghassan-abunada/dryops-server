@@ -35,7 +35,7 @@ function jobRefOf(a) {
   return r ? { id: r.id, name: r.name || null } : null;
 }
 
-module.exports = function mentions(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAdmin, sbGet, sbInsert, jnGetJson, jnFetchAccountUsers }) {
+module.exports = function mentions(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAdmin, sbGet, sbInsert, jnGetJson, jnFetchAccountUsers, push }) {
   const warn = (...a) => console.warn('[mentions]', ...a);
   const enc = encodeURIComponent;
   let cursorSecs = null;
@@ -154,6 +154,7 @@ module.exports = function mentions(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, re
         });
       }
     }
+    if (push) { await push.send(messages, 'mention'); return messages.length; }
     for (let i = 0; i < messages.length; i += 100) {
       const res = await fetch('https://exp.host/--/api/v2/push/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(messages.slice(i, i + 100)) });
       if (!res.ok) warn('expo push', res.status, (await res.text()).slice(0, 200));
