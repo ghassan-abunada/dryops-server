@@ -2,6 +2,7 @@ const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
 const callAccess = require('./callAccess');
+const { readCallrailCall, describeBody: describeCallrailBody } = require('./callrailPayload');
 const jnScope = require('./jnScope');
 
 const app = express();
@@ -894,7 +895,8 @@ const pushSender = require('./push')({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet
 const callAlerts = require('./callAlerts')({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push: pushSender, callrailApi, CALLRAIL_ACCOUNT_IDS });
 
 // Post-call webhook: CallRail POSTs each completed call here in real time.
-app.post('/webhooks/callrail/calls', async (req, res) => {
+// CallRail may post JSON or a form with the call as a JSON string; both parse.
+app.post('/webhooks/callrail/calls', express.urlencoded({ extended: true, limit: '2mb' }), async (req, res) => {
   if (!callrailWebhookOk(req)) {
     // Loud on purpose: the Aug 2026 outage was invisible because rejected
     // deliveries logged nothing — CallRail showed the webhook "live" while
@@ -903,13 +905,20 @@ app.post('/webhooks/callrail/calls', async (req, res) => {
       CALLRAIL_WEBHOOK_TOKEN ? 'token mismatch (check ?token= in the CallRail webhook URL)' : 'CALLRAIL_WEBHOOK_TOKEN env var is not set');
     return res.status(401).json({ error: 'unauthorized' });
   }
-  let call = req.body;
-  if (call && typeof call === 'object' && call.data && typeof call.data === 'object') call = call.data;
-  if (Array.isArray(call)) call = call[0];
-  if (!call || typeof call !== 'object') return res.status(200).json({ ok: true, skipped: 'empty' });
+  // Any envelope CallRail uses, with the CAL… id from resource_id / id / call_id
+  // (callrailPayload.js). A skipped delivery is LOGGED (keys only): on
+  // 2026-11-03 every delivery was silently skipped as "no id".
+  const call = readCallrailCall(req.body);
+  if (!call) {
+    console.warn('[callrail-webhook] skipped delivery (no call id):', JSON.stringify(describeCallrailBody(req.body, req.get('content-type'))));
+    return res.status(200).json({ ok: true, skipped: 'no id' });
+  }
 
   const row = mapCallRow(call, { sparse: true });
-  if (!row.callrail_id) return res.status(200).json({ ok: true, skipped: 'no id' });
+  if (!row.callrail_id) {
+    console.warn('[callrail-webhook] skipped delivery (unmapped id):', JSON.stringify(describeCallrailBody(req.body, req.get('content-type'))));
+    return res.status(200).json({ ok: true, skipped: 'no id' });
+  }
 
   // Pre-call deliveries (phone still ringing) carry the caller but no
   // duration/answered/voicemail yet. Drop those keys so a pre-call that lands
