@@ -25,6 +25,19 @@ const OWNER_MISSED = 'owner_missed';
 const MANAGER = 'manager_review';
 const RECORDING_RETRY_MS = [2 * 60 * 1000, 6 * 60 * 1000];
 const SWEEP_WINDOW_MS = 3 * 60 * 60 * 1000;
+const SETTLE_MS = 60 * 1000;
+
+/**
+ * Is this call over? A post-call / modified delivery says so; otherwise the
+ * call must be older than its duration plus a minute. A ringing call that was
+ * mistaken for a finished one (answered false, duration 0, seconds old) is not
+ * settled, so nobody is told it was missed while it is still ringing.
+ */
+function callSettled(call, now = Date.now()) {
+  const started = Date.parse(call && call.start_time);
+  if (!Number.isFinite(started)) return true;
+  return now - started > (Number(call.duration) || 0) * 1000 + SETTLE_MS;
+}
 
 // ── Pure helpers (tested) ────────────────────────────────────────────────────
 
@@ -216,10 +229,19 @@ function createCallAlerts({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push, cal
   }
 
   /** Re-read the stored call (webhook rows are sparse) and decide the manager push. */
-  async function reviewCall(callrailId, attempt = 0) {
+  async function reviewCall(callrailId, attempt = 0, { settled = false } = {}) {
     const rows = await sbGet(`calls?callrail_id=eq.${enc(callrailId)}&select=callrail_id,direction,answered,voicemail,first_call,duration,location_id,job_id,recording_url,customer_name,customer_phone_number,start_time&limit=1`);
     const call = Array.isArray(rows) ? rows[0] : null;
     if (!call) return null;
+    // Not over yet (or a ringing call that looked finished): look again later.
+    if (!settled && !callSettled(call)) {
+      const delay = RECORDING_RETRY_MS[attempt];
+      if (delay != null && !pending.has(`${callrailId}:${attempt}`)) {
+        pending.add(`${callrailId}:${attempt}`);
+        setTimeout(() => { pending.delete(`${callrailId}:${attempt}`); reviewCall(callrailId, attempt + 1).catch((e) => log.warn('[call-push] retry failed', e.message)); }, delay).unref?.();
+      }
+      return { waiting: true, reason: 'not settled' };
+    }
     // Owners + admins: a missed new caller, with a Call back button (once per call).
     if (attempt === 0 && ownerMissedEligible(call)) await sendOwnerMissed(call).catch((e) => log.warn('[call-push] owner missed failed', e.message));
     let kind = managerReviewKind(call, { hasRecording: !!call.recording_url });
@@ -236,10 +258,10 @@ function createCallAlerts({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push, cal
   }
 
   /** Webhook hook: `row` is the upserted call row with location/job resolved. */
-  async function onCallEvent(row, { preCall }) {
+  async function onCallEvent(row, { preCall, settled = false }) {
     try {
       if (ownerAlertEligible(row, preCall)) return await sendOwner(row);
-      if (!preCall && inbound(row)) return await reviewCall(row.callrail_id);
+      if (!preCall && inbound(row)) return await reviewCall(row.callrail_id, 0, { settled });
     } catch (e) {
       log.warn('[call-push] failed', row && row.callrail_id, e.message);
     }
@@ -276,6 +298,7 @@ module.exports.ownerMissedMessage = ownerMissedMessage;
 module.exports.ownerMissedEligible = ownerMissedEligible;
 module.exports.isPlaceholderName = isPlaceholderName;
 module.exports.OWNER_MISSED = OWNER_MISSED;
+module.exports.callSettled = callSettled;
 module.exports.fmtPhone = fmtPhone;
 module.exports.OWNER = OWNER;
 module.exports.OWNER_ROLES = OWNER_ROLES;
