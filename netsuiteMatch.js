@@ -53,4 +53,27 @@ function gurrScope(subsidiaries, matchedIds, rollupNames) {
     && (matched.has(String(s.id)) || rollups.has(s.name)));
 }
 
-module.exports = { normalizeName, similarity, matchLocations, gurrScope };
+// Mitigation and Contents only. Gurr is the Rebuild side even where a Gurr location
+// is typed Mitigation. `confirmed` maps a DryOps location name to the owner's chosen
+// subsidiary; a chosen name that isn't unique in NetSuite throws rather than guesses.
+function mitigationPackoutScope(matches, subsidiaries, confirmed) {
+  const TYPES = new Set(['Mitigation', 'Contents']);
+  const scope = new Map();
+  for (const m of matches) {
+    if (!TYPES.has(m.location_type) || /^Gurr/i.test(m.location)) continue;
+    let sub = m.status === 'exact' ? m.subsidiary : null;
+    const pick = confirmed[m.location];
+    if (pick) {
+      const found = subsidiaries.filter((s) => (pick.id ? String(s.id) === String(pick.id) : s.name === pick.name));
+      if (found.length !== 1) throw new Error(`Confirmed subsidiary for ${m.location} matched ${found.length} rows`);
+      [sub] = found;
+    }
+    if (!sub || /^Gurr/i.test(sub.name)) continue;
+    const key = String(sub.id);
+    if (!scope.has(key)) scope.set(key, { id: sub.id, name: sub.name, locations: [] });
+    scope.get(key).locations.push({ name: m.location, type: m.location_type, status: m.location_status, jobs: m.jobs });
+  }
+  return [...scope.values()];
+}
+
+module.exports = { normalizeName, similarity, matchLocations, gurrScope, mitigationPackoutScope };

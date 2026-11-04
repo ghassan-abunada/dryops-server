@@ -64,3 +64,25 @@ test('gurrScope keeps matched and confirmed Gurr subsidiaries only', () => {
   const ids = gurrScope(subs, [1, '4', '5'], ['Gurr Brothers Construction of Hawaii']).map((s) => s.id);
   assert.deepEqual(ids, ['1', '2']);
 });
+
+test('mitigationPackoutScope keeps Mitigation and Contents, applies picks, leaves out Gurr', () => {
+  const { mitigationPackoutScope } = require('../netsuiteMatch');
+  const subs = [
+    { id: '1', name: 'A1 Restoration of Seattle' },
+    { id: '289', name: 'American Fire and Flood of Long Island' },
+    { id: '290', name: 'American Fire and Flood of Long Island' },
+    { id: '9', name: 'Dup' }, { id: '10', name: 'Dup' },
+  ];
+  const row = (location, location_type, extra = {}) => ({ location, location_type, location_status: 'active', jobs: 1, status: 'review', ...extra });
+  const matches = [
+    row('A1 Restoration - Seattle', 'Mitigation'),
+    row('American Fire and Flood of Long Island', 'Mitigation', { status: 'ambiguous' }),
+    row('American Packout of Dallas', 'Contents', { status: 'exact', subsidiary: { id: '20', name: 'American Packout of Dallas' } }),
+    row('A1 Rebuild', 'Rebuild', { status: 'exact', subsidiary: { id: '30', name: 'A1 Rebuild' } }),
+    row('Gurr Brothers Construction of Colorado - AJ', 'Mitigation', { status: 'exact', subsidiary: { id: '40', name: 'Gurr Brothers Construction of Colorado' } }),
+    row('Unmapped', 'Mitigation'),
+  ];
+  const picks = { 'A1 Restoration - Seattle': { name: 'A1 Restoration of Seattle' }, 'American Fire and Flood of Long Island': { id: 290 } };
+  assert.deepEqual(mitigationPackoutScope(matches, subs, picks).map((s) => String(s.id)).sort(), ['1', '20', '290']);
+  assert.throws(() => mitigationPackoutScope([row('X', 'Mitigation')], subs, { X: { name: 'Dup' } }), /matched 2 rows/);
+});
