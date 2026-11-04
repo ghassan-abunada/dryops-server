@@ -1,4 +1,4 @@
-// Read-only: profiles expense for subsidiaries tied to Mitigation and Contents
+// Read-only: profiles expense, income and account types for subsidiaries tied to Mitigation and Contents
 // locations (Gurr and Rebuild are parked). Nothing outside that scope is queried.
 //   railway run node scripts/netsuiteMitPackout.js <discovery.json> <output.json>
 const fs = require('fs');
@@ -45,6 +45,7 @@ async function main() {
   const ids = scope.map((s) => Number(s.id)).join(',');
 
   const base = `FROM transactionaccountingline tal JOIN transaction t ON t.id = tal.transaction JOIN account a ON a.id = tal.account JOIN transactionline tl ON tl.transaction = tal.transaction AND tl.id = tal.transactionline WHERE tal.posting = 'T' AND tl.subsidiary IN (${ids}) AND t.trandate >= ADD_MONTHS(SYSDATE, -12) AND a.accttype IN ('Expense', 'OthExpense', 'COGS')`;
+  const anyAccount = base.replace(" AND a.accttype IN ('Expense', 'OthExpense', 'COGS')", '');
   const out = {
     generated_at: new Date().toISOString(),
     scope,
@@ -52,11 +53,14 @@ async function main() {
     by_sub_location: await attempt(`SELECT tl.subsidiary AS sub_id, BUILTIN.DF(tl.location) AS location, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${base} GROUP BY tl.subsidiary, BUILTIN.DF(tl.location)`),
     by_month_type: await attempt(`SELECT TO_CHAR(t.trandate, 'YYYY-MM') AS ym, t.type, a.accttype, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${base} GROUP BY TO_CHAR(t.trandate, 'YYYY-MM'), t.type, a.accttype`),
     by_account: await attempt(`SELECT a.accttype, a.accountsearchdisplayname AS account, t.type, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${base} GROUP BY a.accttype, a.accountsearchdisplayname, t.type`),
+    by_account_type: await attempt(`SELECT a.accttype, t.type, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${anyAccount} GROUP BY a.accttype, t.type`),
+    income_by_account: await attempt(`SELECT a.accountsearchdisplayname AS account, t.type, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${anyAccount} AND a.accttype IN ('Income', 'OthIncome') GROUP BY a.accountsearchdisplayname, t.type`),
+    vendor_coverage: await attempt(`SELECT t.type, CASE WHEN t.entity IS NULL THEN 'none' ELSE 'set' END AS entity_state, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${base} GROUP BY t.type, CASE WHEN t.entity IS NULL THEN 'none' ELSE 'set' END`),
     class_coverage: await attempt(`SELECT t.type, CASE WHEN tl.class IS NULL THEN 'none' ELSE 'set' END AS class_state, SUM(tal.amount) AS amount ${base} GROUP BY t.type, CASE WHEN tl.class IS NULL THEN 'none' ELSE 'set' END`),
   };
   fs.writeFileSync(outPath, JSON.stringify(out, null, 1));
   console.log(`Subsidiaries in scope: ${scope.length}`);
-  for (const k of ['by_sub_type', 'by_sub_location', 'by_month_type', 'by_account', 'class_coverage']) console.log(`${out[k].error ? 'FAIL' : 'OK  '} ${k}: ${out[k].error || `${out[k].rows.length} rows`}`);
+  for (const k of ['by_sub_type', 'by_sub_location', 'by_month_type', 'by_account', 'by_account_type', 'income_by_account', 'vendor_coverage', 'class_coverage']) console.log(`${out[k].error ? 'FAIL' : 'OK  '} ${k}: ${out[k].error || `${out[k].rows.length} rows`}`);
   console.log(`Saved to ${outPath}`);
 }
 
