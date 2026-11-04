@@ -7170,6 +7170,18 @@ require('./hoWindows')(app, {
   tzFor: homeowner.tzFor, todayIn: homeowner.todayIn, hourIn: homeowner.hourIn,
 });
 
+// One-time NetSuite credential drop (see netsuiteIntake.js). Off until its env is set.
+const mountNetsuiteIntake = require('./netsuiteIntake');
+mountNetsuiteIntake(app, {
+  store: mountNetsuiteIntake.supabaseStore({ url: SUPABASE_URL, serviceKey: SUPABASE_SERVICE_KEY }),
+  onSubmitted: async ({ method, account_id, expense_tagging }) => {
+    const to = (process.env.NETSUITE_NOTIFY_EMAIL || '').trim();
+    if (!to) return;
+    const sent = await sendEmail(to, 'NetSuite credentials received', `<p>NetSuite credentials were submitted for account ${escapeHtml(account_id)} (${escapeHtml(method)}). Expenses tagged by: ${escapeHtml(expense_tagging)}.</p>`);
+    if (!sent.ok) throw new Error(sent.error || 'email failed');
+  },
+});
+
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
 });
