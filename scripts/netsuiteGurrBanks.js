@@ -1,5 +1,5 @@
-// Read-only: can Gurr spending be split per location by bank account? Lists bank
-// accounts in the in-scope Gurr subsidiaries and how much expense each one carries.
+// Read-only: can Gurr spending be split per location? Lists bank accounts in the
+// in-scope Gurr subsidiaries, plus expense by bank, NetSuite location and class.
 //   railway run node scripts/netsuiteGurrBanks.js <discovery.json> <output.json>
 const fs = require('fs');
 const { supabaseStore, parseKey, decryptSecrets } = require('../netsuiteIntake');
@@ -43,12 +43,14 @@ async function main() {
     subsidiaries: scope.map((s) => ({ id: s.id, name: s.name })),
     expense_by_type: await attempt(`SELECT tl.subsidiary AS sub_id, t.type, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${base} AND ${EXPENSE} GROUP BY tl.subsidiary, t.type`),
     bank_accounts: await attempt(`SELECT tl.subsidiary AS sub_id, a.id AS account_id, a.acctnumber, a.accountsearchdisplayname AS account, t.type, COUNT(DISTINCT t.id) AS n ${base} AND a.accttype = 'Bank' GROUP BY tl.subsidiary, a.id, a.acctnumber, a.accountsearchdisplayname, t.type`),
-    check_expense_by_bank: await attempt(`SELECT tl.subsidiary AS sub_id, bank.id AS bank_id, bank.accountsearchdisplayname AS bank, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${base} AND ${EXPENSE} AND t.type = 'Check' AND tl.subsidiary = tl.subsidiary GROUP BY tl.subsidiary, bank.id, bank.accountsearchdisplayname`.replace('JOIN transactionline tl', "JOIN transactionline bl ON bl.transaction = t.id AND bl.mainline = 'T' JOIN account bank ON bank.id = bl.expenseaccount JOIN transactionline tl")),
+    check_expense_by_bank: await attempt(`SELECT tl.subsidiary AS sub_id, bank.id AS bank_id, bank.accountsearchdisplayname AS bank, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${base} AND ${EXPENSE} AND t.type = 'Check' GROUP BY tl.subsidiary, bank.id, bank.accountsearchdisplayname`.replace('JOIN transactionline tl', "JOIN transactionline bl ON bl.transaction = t.id AND bl.mainline = 'T' JOIN account bank ON bank.id = bl.expenseaccount JOIN transactionline tl")),
+    expense_by_location: await attempt(`SELECT tl.subsidiary AS sub_id, t.type, BUILTIN.DF(tl.location) AS location, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${base} AND ${EXPENSE} GROUP BY tl.subsidiary, t.type, BUILTIN.DF(tl.location)`),
+    check_bank_vs_location: await attempt(`SELECT tl.subsidiary AS sub_id, bank.accountsearchdisplayname AS bank, BUILTIN.DF(tl.location) AS location, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${base} AND ${EXPENSE} AND t.type = 'Check' GROUP BY tl.subsidiary, bank.accountsearchdisplayname, BUILTIN.DF(tl.location)`.replace('JOIN transactionline tl', "JOIN transactionline bl ON bl.transaction = t.id AND bl.mainline = 'T' JOIN account bank ON bank.id = bl.expenseaccount JOIN transactionline tl")),
     expense_by_class: await attempt(`SELECT tl.subsidiary AS sub_id, t.type, BUILTIN.DF(tl.class) AS class, SUM(tal.amount) AS amount, COUNT(DISTINCT t.id) AS n ${base} AND ${EXPENSE} GROUP BY tl.subsidiary, t.type, BUILTIN.DF(tl.class)`),
   };
   fs.writeFileSync(outPath, JSON.stringify(out, null, 1));
   console.log(`Gurr subsidiaries in scope: ${scope.length}`);
-  for (const k of ['expense_by_type', 'bank_accounts', 'check_expense_by_bank', 'expense_by_class']) console.log(`${out[k].error ? 'FAIL' : 'OK  '} ${k}: ${out[k].error || `${out[k].rows.length} rows`}`);
+  for (const k of ['expense_by_type', 'bank_accounts', 'check_expense_by_bank', 'expense_by_location', 'check_bank_vs_location', 'expense_by_class']) console.log(`${out[k].error ? 'FAIL' : 'OK  '} ${k}: ${out[k].error || `${out[k].rows.length} rows`}`);
   console.log(`Saved to ${outPath}`);
 }
 
