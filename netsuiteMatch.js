@@ -44,4 +44,13 @@ function matchLocations(locations, subsidiaries) {
   });
 }
 
-module.exports = { normalizeName, similarity, matchLocations };
+// Gurr rolls locations into state subsidiaries, so scope = Gurr subsidiaries that
+// matched a location exactly, plus the state rollups the owner confirmed by name.
+function gurrScope(subsidiaries, matchedIds, rollupNames) {
+  const matched = new Set(matchedIds.map(String));
+  const rollups = new Set(rollupNames);
+  return subsidiaries.filter((s) => /^Gurr Brothers/.test(s.name) && !/elimxx/i.test(s.name)
+    && (matched.has(String(s.id)) || rollups.has(s.name)));
+}
+
+module.exports = { normalizeName, similarity, matchLocations, gurrScope };

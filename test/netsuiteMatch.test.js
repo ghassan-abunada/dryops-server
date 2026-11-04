@@ -51,3 +51,16 @@ test('matchLocations auto-accepts only one clean match', () => {
   assert.equal(repairs.suggestions[0].id, '6');
   assert.equal(at('Totally Unrelated Business').suggestions.length, 0);
 });
+
+test('gurrScope keeps matched and confirmed Gurr subsidiaries only', () => {
+  const { gurrScope } = require('../netsuiteMatch');
+  const subs = [
+    { id: '1', name: 'Gurr Brothers Construction of Texas' },
+    { id: '2', name: 'Gurr Brothers Construction of Hawaii' },
+    { id: '3', name: 'Gurr Brothers Construction of Alaska' },
+    { id: '4', name: 'Gurr Brothers Construction Elimxx' },
+    { id: '5', name: 'A1 Restoration of Dallas' },
+  ];
+  const ids = gurrScope(subs, [1, '4', '5'], ['Gurr Brothers Construction of Hawaii']).map((s) => s.id);
+  assert.deepEqual(ids, ['1', '2']);
+});
