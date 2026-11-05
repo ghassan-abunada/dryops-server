@@ -4902,6 +4902,7 @@ function zonedToUnix(dateISO, minutes, tz) {
 
 function blockLine(v, settings) {
   const ws = (settings && settings.work_start_min) || 480, we = (settings && settings.work_end_min) || 1080;
+  if (/^ASAP\b/.test(String(v.scheduled_time || ''))) return String(v.scheduled_time);
   const win = v.slot_start_min == null ? 'Anytime' : `${fmtMin(v.slot_start_min)}–${fmtMin(v.slot_end_min)}`;
   if (v.block_kind === 'full_day') return `Full day (${fmtMin(ws)}–${fmtMin(we)})`;
   if (v.block_kind === 'half_day') return `Half day · arrival window ${win}`;
@@ -4964,7 +4965,7 @@ function visitFingerprint(v) {
     v.task_type, v.status, v.notes, v.jn_id, [...(v.assigned_to_ids || [])].sort(), v.test_types || null, v.service_min || null]);
 }
 
-const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,slot_start_min,slot_end_min,block_kind,crew_size,task_type,test_types,service_min,status,notes,' +
+const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,scheduled_time,slot_start_min,slot_end_min,block_kind,crew_size,task_type,test_types,service_min,status,notes,' +
   'assigned_to_ids,jn_task_id,jn_task_error,jn_task_attempts,jn_task_dirty,updated_at,demo_report,monitor_report,inspection_report,jobs(name,client_name,location_id,jn_location_id)';
 
 const visitSyncLocks = new Set();
