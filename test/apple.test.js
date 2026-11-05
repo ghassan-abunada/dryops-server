@@ -421,3 +421,23 @@ test('mapkitOriginAllowed + createApple().mapkitToken: dryops.app, railway and l
   assert.strictEqual(a.mapkitToken('https://evil.com'), null);
   assert.strictEqual(createApple({}, { log: quiet }).mapkitToken('https://dryops.app'), null);
 });
+
+test('fillZip: looks up the zip Apple autocomplete leaves out, and never takes a wrong one', async () => {
+  const place = { street: '1500 Marilla St', city: 'Dallas', state: 'TX', zip: '', lat: 1, lng: 2 };
+  let asked = null;
+  const found = await apple.fillZip(place, async (q) => { asked = q; return [{ street: '1500 Marilla St', state: 'TX', zip: '75201' }]; });
+  assert.strictEqual(asked, '1500 Marilla St, Dallas, TX');
+  assert.deepStrictEqual(found, { ...place, zip: '75201' });
+  // Another house, another state or no zip: keep it empty.
+  assert.strictEqual(await apple.fillZip(place, async () => [{ street: '1600 Marilla St', state: 'TX', zip: '75201' }]), place);
+  assert.strictEqual(await apple.fillZip(place, async () => [{ street: '1500 Marilla St', state: 'OK', zip: '74101' }]), place);
+  assert.strictEqual(await apple.fillZip(place, async () => [{ street: '1500 Marilla St', state: 'TX', zip: '' }]), place);
+  // A failed lookup is not an error for the person picking the address.
+  assert.strictEqual(await apple.fillZip(place, async () => { throw new Error('down'); }), place);
+  // Nothing to do: no lookup at all.
+  const never = async () => { throw new Error('should not look up'); };
+  const withZip = { ...place, zip: '75201' };
+  assert.strictEqual(await apple.fillZip(withZip, never), withZip);
+  assert.deepStrictEqual(await apple.fillZip({}, never), {});
+  assert.strictEqual(await apple.fillZip(null, never), null);
+});

@@ -672,7 +672,7 @@ function biasFromQuery(query) {
 // ETAs and snapshots when APPLE_MAPS_* are set. Autocomplete pre-seeds
 // `details:geo:<lat>,<lng>` in geoCache so /places/details answers from it.
 const apple = require('./apple')(process.env, { geoCacheSet });
-const { parseLatLng, simplifyPath, PATH_MAX_POINTS } = require('./apple');
+const { parseLatLng, simplifyPath, PATH_MAX_POINTS, fillZip } = require('./apple');
 
 // Server-side geocode: Apple first, then Google (only when GOOGLE_MAPS_KEY is
 // set; mirrors the app's geocodeAddress), then the keyless chain.
@@ -5676,6 +5676,12 @@ async function placesAutocomplete(req, res) {
   }
 }
 
+// Apple first (its geocode has the postcode its autocomplete leaves out), then the keyless chain.
+async function zipLookup(q) {
+  const hits = apple.configured() ? await apple.geocode(q) : [];
+  return hits.some((h) => h.zip) ? hits : freeSuggest(q, 3);
+}
+
 // Place Details for a picked autocomplete suggestion — returns the address
 // broken into components so the app can fill street/city/state/zip fields.
 // Passing the same session token as the autocomplete calls closes the billing
@@ -5684,13 +5690,15 @@ async function placesDetails(req, res) {
   const placeId = String(req.query.place_id || '').trim();
   const geo = /^geo:(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/.exec(placeId);
   if (geo) {
-    const cached = geoCacheGet(`details:${placeId}`) || {};
+    const seeded = geoCacheGet(`details:${placeId}`) || {};
+    const cached = await fillZip(seeded, zipLookup);
+    if (cached !== seeded) geoCacheSet(`details:${placeId}`, cached);
     return res.json({ street: cached.street || '', city: cached.city || '', state: cached.state || '', zip: cached.zip || '',
       formatted: cached.formatted || '', lat: Number(geo[1]), lng: Number(geo[2]) });
   }
   if (placeId.startsWith('apple:')) {
     // Apple autocomplete row without coordinates → follow its completionUrl.
-    const p = await apple.resolveCompletion(placeId);
+    const p = await fillZip(await apple.resolveCompletion(placeId), zipLookup);
     if (!p) return res.json({});
     return res.json({ street: p.street || '', city: p.city || '', state: p.state || '', zip: p.zip || '',
       formatted: p.formatted || '', lat: p.lat, lng: p.lng });
