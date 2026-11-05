@@ -690,12 +690,15 @@ module.exports = function mountSms(app, deps) {
       return stats;
     } finally { pullRunning = false; }
   }
-  // Every boot: a paced 90-day pull in the background (idempotent — threads
-  // we already hold cost one read each, only new messages are written), then
-  // the 15-minute 2-day reconcile keeps up.
-  async function bootPull() {
-    lastPull = { tag: 'backfill-boot', days: BACKFILL_DAYS, startedAt: new Date().toISOString(), finishedAt: null, stats: null };
-    return pullConversations({ days: BACKFILL_DAYS, tag: 'backfill-boot' });
+  // Once a day: a paced 90-day pull in the background (idempotent — threads we
+  // already hold cost one read each, only new messages are written). Not on
+  // boot: several deploys close together stacked these on top of the other boot
+  // sweeps, and the database went down on 2026-11-05. A boot only catches up
+  // with the 2-day reconcile, which covers any downtime; POST /admin/sms/backfill
+  // still runs a long pull by hand.
+  async function dailyPull() {
+    lastPull = { tag: 'backfill-daily', days: BACKFILL_DAYS, startedAt: new Date().toISOString(), finishedAt: null, stats: null };
+    return pullConversations({ days: BACKFILL_DAYS, tag: 'backfill-daily' });
   }
   app.get('/admin/texting/status', requireCallAccess, async (req, res) => {
     try {
@@ -713,8 +716,9 @@ module.exports = function mountSms(app, deps) {
     catch (err) { res.status(502).json({ error: err.message }); }
   });
   if (SUPABASE_SERVICE_KEY && CALLRAIL_API_KEY && CALLRAIL_ACCOUNT_IDS.length) {
-    setTimeout(() => bootPull().catch((e) => warn('boot pull failed', e.message)), 90 * 1000);
+    setTimeout(() => pullConversations().catch((e) => warn('boot reconcile failed', e.message)), 90 * 1000);
     setInterval(() => pullConversations().catch((e) => warn('reconcile failed', e.message)), RECONCILE_INTERVAL_MS);
+    setInterval(() => dailyPull().catch((e) => warn('daily pull failed', e.message)), 24 * 60 * 60 * 1000);
   }
 
   // ── Secondary contact on an existing job ──────────────────────────────────
