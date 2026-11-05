@@ -28,6 +28,8 @@ const {
   testingAbbrFor, testingNameCandidates, testingLeadType, testingOwnersForIntake, testingNoteLines,
 } = testingIntake;
 
+const isAsapLabel = (label) => /^ASAP\b/.test(String(label || ''));
+
 module.exports = function mountIntake(app, deps) {
   const {
     SUPABASE_URL, SUPABASE_SERVICE_KEY, WEB_APP_URL,
@@ -137,6 +139,8 @@ module.exports = function mountIntake(app, deps) {
     return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
   }
   function windowLabel(slot) {
+    // An emergency keeps the app's "ASAP · by 11:40pm": it carries a deadline the stored window can't when it crosses midnight.
+    if (slot && isAsapLabel(slot.label)) return String(slot.label).trim().slice(0, 40);
     if (!slot || slot.start_min == null || slot.end_min == null) return 'Anytime';
     return `${fmtMin(slot.start_min)}–${fmtMin(slot.end_min)}`;
   }
@@ -786,14 +790,14 @@ module.exports = function mountIntake(app, deps) {
   async function postInspectionScheduledNote(visitId, ctx) {
     let { loc, rep, jobJnId, jnLocId, date, label, actor } = ctx || {};
     if (!loc) {
-      const rows = await sbGet(`inspections?id=eq.${enc(visitId)}&select=id,jn_id,scheduled_date,slot_start_min,slot_end_min,assigned_to_ids,location_id,jobs(jn_id,jn_location_id)`);
+      const rows = await sbGet(`inspections?id=eq.${enc(visitId)}&select=id,jn_id,scheduled_date,scheduled_time,slot_start_min,slot_end_min,assigned_to_ids,location_id,jobs(jn_id,jn_location_id)`);
       const v = rows && rows[0];
       if (!v) return { ok: false, error: 'Visit not found' };
       loc = await loadLocation(v.location_id || (v.jobs && v.jobs.location_id));
       jobJnId = v.jn_id || (v.jobs && v.jobs.jn_id);
       jnLocId = REDIRECT_LOCATION || (loc && loc.jn_location_id) || (v.jobs && v.jobs.jn_location_id);
       date = v.scheduled_date;
-      label = windowLabel(v.slot_start_min == null ? null : { start_min: v.slot_start_min, end_min: v.slot_end_min });
+      label = windowLabel(v.slot_start_min == null ? null : { start_min: v.slot_start_min, end_min: v.slot_end_min, label: v.scheduled_time });
       const reps = (await sbGet(`profiles?id=in.(${(v.assigned_to_ids || []).map(enc).join(',')})&select=id,full_name,jn_user_id`)) || [];
       rep = reps[0] || null;
       ctx = { ...ctx, reps };
