@@ -228,6 +228,25 @@ function placeFromResult(r) {
   return { lat, lng, formatted, street, city, state, zip };
 }
 
+/**
+ * Apple's autocomplete rows carry no postcode, so a picked suggestion has a
+ * street, city and state but no zip. Look it up from the full address. A wrong
+ * zip is worse than none: only a hit at the same house number and state counts.
+ */
+async function fillZip(place, lookup) {
+  if (!place || place.zip || !place.street) return place;
+  const q = [place.street, place.city, place.state].filter(Boolean).join(', ');
+  const house = String(place.street).split(/\s+/)[0].toLowerCase();
+  const state = String(place.state || '').toLowerCase();
+  let hits = [];
+  try { hits = (await lookup(q)) || []; } catch { return place; }
+  const hit = hits.find((h) => h
+    && /^\d{5}/.test(String(h.zip || ''))
+    && String(h.street || '').split(/\s+/)[0].toLowerCase() === house
+    && (!state || !h.state || String(h.state).toLowerCase() === state));
+  return hit ? { ...place, zip: String(hit.zip) } : place;
+}
+
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 /**
@@ -529,6 +548,7 @@ module.exports.normalizePrivateKey = normalizePrivateKey;
 module.exports.signSnapshotQuery = signSnapshotQuery;
 module.exports.parseLatLng = parseLatLng;
 module.exports.placeFromResult = placeFromResult;
+module.exports.fillZip = fillZip;
 module.exports.chunk = chunk;
 module.exports.joinStepPaths = joinStepPaths;
 module.exports.simplifyPath = simplifyPath;
