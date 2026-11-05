@@ -229,22 +229,39 @@ function placeFromResult(r) {
 }
 
 /**
- * Apple's autocomplete rows carry no postcode, so a picked suggestion has a
- * street, city and state but no zip. Look it up from the full address. A wrong
- * zip is worse than none: only a hit at the same house number and state counts.
+ * Apple's autocomplete rows have only a one-line address: street, city, state
+ * and zip are all blank. Look the line up and fill in what's missing. A wrong
+ * zip is worse than none: only a hit at the same house number, on a street
+ * the line names, and in the same state (when known) counts. A row with no
+ * house number ("Marilla, NY") isn't an address to look up.
  */
 async function fillZip(place, lookup) {
-  if (!place || place.zip || !place.street) return place;
-  const q = [place.street, place.city, place.state].filter(Boolean).join(', ');
-  const house = String(place.street).split(/\s+/)[0].toLowerCase();
+  if (!place || place.zip) return place;
+  const q = place.street
+    ? [place.street, place.city, place.state].filter(Boolean).join(', ')
+    : String(place.formatted || '').trim();
+  const words = (v) => String(v || '').toLowerCase().replace(/[.,]/g, ' ').split(/\s+/).filter(Boolean);
+  const said = words(q);
+  const house = said[0];
+  if (!house || !/^\d/.test(house)) return place;
   const state = String(place.state || '').toLowerCase();
   let hits = [];
   try { hits = (await lookup(q)) || []; } catch { return place; }
-  const hit = hits.find((h) => h
-    && /^\d{5}/.test(String(h.zip || ''))
-    && String(h.street || '').split(/\s+/)[0].toLowerCase() === house
-    && (!state || !h.state || String(h.state).toLowerCase() === state));
-  return hit ? { ...place, zip: String(hit.zip) } : place;
+  const hit = hits.find((h) => {
+    if (!h || !/^\d{5}/.test(String(h.zip || ''))) return false;
+    const street = words(h.street);
+    return street[0] === house
+      && street.slice(1).some((w) => w.length >= 3 && said.includes(w))
+      && (!state || !h.state || String(h.state).toLowerCase() === state);
+  });
+  if (!hit) return place;
+  return {
+    ...place,
+    street: place.street || String(hit.street),
+    city: place.city || String(hit.city || ''),
+    state: place.state || String(hit.state || ''),
+    zip: String(hit.zip),
+  };
 }
 
 // ── Factory ──────────────────────────────────────────────────────────────────
