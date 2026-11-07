@@ -39,10 +39,16 @@ const COLS = [
   { key: 'status', label: 'STATUS', w: 84, right: true },
 ];
 
+// "#64257 Starmye Goforth (OSR - DAL - MIT)" -> "#64257 Starmye Goforth". The suffix
+// repeats the location the page is already about, and it pushed names off the column.
+function jobName(label) {
+  return String(label == null ? '' : label).replace(/\s*\([^()]*\)\s*$/, '');
+}
+
 function cells(row) {
   const a = row.amounts || {};
   return {
-    job: row.job_label,
+    job: jobName(row.job_label),
     type: row.job_type,
     after: row.after_hours_at || '-',
     base: dash((a.insurance_landed || 0) + (a.oop_landed || 0) + (a.manual || 0)),
@@ -175,4 +181,4 @@ function buildCommissionStatementPdf(statement, logoPng) {
   });
 }
 
-module.exports = { buildCommissionStatementPdf, money };
+module.exports = { buildCommissionStatementPdf, money, jobName };

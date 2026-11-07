@@ -25,6 +25,31 @@ async function logoPng(url, fetchImpl = fetch) {
   }
 }
 
+// Same brand rule as the app (lib/logos.ts brandOf): the franchise name before the
+// territory. "One Stop Restoration of Dallas" -> "One Stop Restoration".
+function brandOf(name) {
+  let n = String(name || '').trim();
+  let idx = -1;
+  for (const c of [' of ', ' - ', ' – ', ' (']) {
+    const i = n.indexOf(c);
+    if (i > 0 && (idx === -1 || i < idx)) idx = i;
+  }
+  if (idx > 0) n = n.slice(0, idx);
+  return n.replace(/,?\s+(LLC\.?|Inc\.?)$/i, '').replace(/[,.]+$/, '').trim();
+}
+
+// The location's own logo, else its brand's pack. The light variant is last: it is
+// made for dark backgrounds and this page is white.
+async function logoUrlFor(location, sbGet) {
+  if (!location) return null;
+  if (location.logo_url) return location.logo_url;
+  const brand = brandOf(location.name);
+  if (!brand) return null;
+  const rows = await sbGet(`brand_logos?brand=eq.${encodeURIComponent(brand)}&select=variant,url`).catch(() => null);
+  const byVariant = new Map((rows || []).map(r => [r.variant, r.url]));
+  return byVariant.get('full') || byVariant.get('icon') || byVariant.get('light') || null;
+}
+
 function pdfFileName(statement) {
   const safe = String(statement.location_name || 'Location').replace(/[^A-Za-z0-9 ]/g, '').trim().replace(/\s+/g, '-');
   return `Commission-${safe}-${statement.payout_month}.pdf`;
@@ -40,8 +65,8 @@ module.exports = function mountCommissions(app, { sbGet }) {
       if (!row) return res.status(404).send('This statement was not found.');
       let logo = null;
       if (row.location_id) {
-        const locs = await sbGet(`locations?id=eq.${row.location_id}&select=logo_url`);
-        logo = await logoPng(locs && locs[0] && locs[0].logo_url);
+        const locs = await sbGet(`locations?id=eq.${row.location_id}&select=name,logo_url`);
+        logo = await logoPng(await logoUrlFor(locs && locs[0], sbGet));
       }
       const pdf = await buildCommissionStatementPdf(row.statement, logo);
       res.setHeader('Content-Type', 'application/pdf');
@@ -58,3 +83,5 @@ module.exports = function mountCommissions(app, { sbGet }) {
 
 module.exports.logoPng = logoPng;
 module.exports.pdfFileName = pdfFileName;
+module.exports.brandOf = brandOf;
+module.exports.logoUrlFor = logoUrlFor;
