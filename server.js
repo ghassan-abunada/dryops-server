@@ -7048,6 +7048,12 @@ require('./monitor')(app, {
 // Commission statements: the PDF link a manager shares with a location's owners
 // (see commissions.js). Prints the frozen statement the app saved.
 require('./commissions')(app, { sbGet });
+// Commission payroll reminder: the Tuesday before each month's second payroll,
+// email + push the amount to add to everyone who manages commissions.
+require('./commissionReminder')(app, {
+  SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, sendEmail, push: pushSender, jnGetJson,
+  requireAuth, requireAdmin, appUrl: WEB_APP_URL,
+});
 
 // SMS readiness for the app (Schedule tab shows whether ETA texts / inbound
 // replies are wired up). Same env names sendSms() reads.
