@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const express = require('express');
 const mountCommissions = require('../commissions');
-const { buildCommissionStatementPdf } = require('../commissionPdf');
+const { buildCommissionStatementPdf, jobName } = require('../commissionPdf');
 
 const row = (over = {}) => ({
   job_label: '#64257 Starmye Goforth (OSR - DAL - MIT)', earned_month: '2026-11', earned_label: 'November 2026',
@@ -40,6 +40,37 @@ test('logoPng gives up quietly on anything it cannot read', async () => {
   assert.strictEqual(await mountCommissions.logoPng('https://x.example/a.png', notImage), null);
   const down = async () => { throw new Error('down'); };
   assert.strictEqual(await mountCommissions.logoPng('https://x.example/a.png', down), null);
+});
+
+test('draws credits and a location that is owed money back', async () => {
+  const credit = row({ job_label: '#64511 Marla Vandoorn (A1 - DAL - MIT)', amounts: { insurance_landed: -100, oop_landed: 25 }, notes: ['Credit: Insurance job landed, paid $100, now worth $0'], total: -75, owed: -75 });
+  const pdf = await buildCommissionStatementPdf(statement({ rows: [], late_rows: [credit], total: -75, owed: -75, paid: 0 }));
+  assert.ok(isPdf(pdf));
+});
+
+test('job names lose the location suffix and nothing else', () => {
+  assert.strictEqual(jobName('#64257 Starmye Goforth (OSR - DAL - MIT)'), '#64257 Starmye Goforth');
+  assert.strictEqual(jobName('Deduction: job'), 'Deduction: job');
+  assert.strictEqual(jobName('Smith (Jim) House (A1 - DAL - MIT)'), 'Smith (Jim) House');
+  assert.strictEqual(jobName(null), '');
+});
+
+test('brand matches the app rule', () => {
+  assert.strictEqual(mountCommissions.brandOf('One Stop Restoration of Dallas'), 'One Stop Restoration');
+  assert.strictEqual(mountCommissions.brandOf('A1 Restoration - Seattle'), 'A1 Restoration');
+  assert.strictEqual(mountCommissions.brandOf('24 Hour Flood Pros, LLC'), '24 Hour Flood Pros');
+});
+
+test('the logo is the location\'s own, else the brand pack, never light first', async () => {
+  const pack = (rows) => async (q) => { assert.ok(q.includes('brand=eq.One%20Stop%20Restoration')); return rows; };
+  const none = async () => { throw new Error('should not look up the brand'); };
+  assert.strictEqual(await mountCommissions.logoUrlFor({ name: 'X of Y', logo_url: 'https://own' }, none), 'https://own');
+  const named = { name: 'One Stop Restoration of Dallas', logo_url: null };
+  assert.strictEqual(await mountCommissions.logoUrlFor(named, pack([{ variant: 'light', url: 'L' }, { variant: 'full', url: 'F' }])), 'F');
+  assert.strictEqual(await mountCommissions.logoUrlFor(named, pack([{ variant: 'light', url: 'L' }, { variant: 'icon', url: 'I' }])), 'I');
+  assert.strictEqual(await mountCommissions.logoUrlFor(named, pack([])), null);
+  assert.strictEqual(await mountCommissions.logoUrlFor(named, async () => { throw new Error('db down'); }), null);
+  assert.strictEqual(await mountCommissions.logoUrlFor(null, none), null);
 });
 
 test('the file name holds only safe characters', () => {

@@ -39,10 +39,16 @@ const COLS = [
   { key: 'status', label: 'STATUS', w: 84, right: true },
 ];
 
+// "#64257 Starmye Goforth (OSR - DAL - MIT)" -> "#64257 Starmye Goforth". The suffix
+// repeats the location the page is already about, and it pushed names off the column.
+function jobName(label) {
+  return String(label == null ? '' : label).replace(/\s*\([^()]*\)\s*$/, '');
+}
+
 function cells(row) {
   const a = row.amounts || {};
   return {
-    job: row.job_label,
+    job: jobName(row.job_label),
     type: row.job_type,
     after: row.after_hours_at || '-',
     base: dash((a.insurance_landed || 0) + (a.oop_landed || 0) + (a.manual || 0)),
@@ -51,7 +57,7 @@ function cells(row) {
     po: dash(a.packout),
     large: dash(a.large_job),
     total: money(row.total),
-    status: row.paid_on ? `Paid ${usDate(row.paid_on)}` : 'Not paid yet',
+    status: row.paid_on ? (row.total < 0 ? `Credited ${usDate(row.paid_on)}` : `Paid ${usDate(row.paid_on)}`) : row.total < 0 ? 'Credit' : 'Not paid yet',
   };
 }
 
@@ -97,9 +103,11 @@ function buildCommissionStatementPdf(statement, logoPng) {
 
     // What the reader has to do with it.
     doc.rect(x0, y, width, 46).fillColor(ZEBRA).fill();
+    // Credits can outweigh bonuses for one location: the paying location then owes it.
+    const payer = st.pay_location_name || 'the paying location';
     const ask = st.is_pay_location
       ? 'Paid directly by this location. No transfer needed.'
-      : `Reimburse ${st.pay_location_name || 'the paying location'}`;
+      : Number(st.total) < 0 ? `Credit: ${payer} returns this to you` : `Reimburse ${payer}`;
     doc.font('Helvetica-Bold').fontSize(13).fillColor(INK).text(ask, x0 + 12, y + 16, { width: width - 180, lineBreak: false });
     doc.font('Helvetica-Bold').fontSize(20).fillColor(INK).text(money(st.total), x0 + width - 172, y + 12, { width: 160, align: 'right', lineBreak: false });
     y += 60;
@@ -175,4 +183,4 @@ function buildCommissionStatementPdf(statement, logoPng) {
   });
 }
 
-module.exports = { buildCommissionStatementPdf, money };
+module.exports = { buildCommissionStatementPdf, money, jobName };

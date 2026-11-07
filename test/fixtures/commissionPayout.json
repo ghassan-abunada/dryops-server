@@ -1,0 +1,27 @@
+{
+  "_comment": "Pins the payout dryops-server's payroll reminder computes (vendor/commissions, test/commissionReminder.test.js) to the app's (lib/commissions/compute.ts). Change both together.",
+  "photo": { "nancy": false },
+  "feed": {
+    "now_month": "2026-12",
+    "jobs": [
+      { "id": "marla", "jn_id": "m", "number": "64511", "name": "Marla Vandoorn (A1 - DAL - MIT)", "client_name": null, "location_id": "a1", "location_name": "A1 Restoration of Dallas", "status": "In Progress", "stage": "In Production", "insurance_type": "Insurance", "claim_number": null, "tested": "Tested", "sales_rep": "Colt Smith", "rep_match": true, "jn_created": "2026-11-06T15:05:50Z", "month": "2026-11", "lead_at": "2026-11-06T15:00:58Z", "lead_source": "call", "lead_local": "2026-11-06T09:00", "lead_dow": 5, "lead_minutes": 540, "collected": 0, "invoice_total": 0, "photo_by_rep": false, "packouts": [] },
+      { "id": "starmye", "jn_id": "s", "number": "64257", "name": "Starmye Goforth (OSR - DAL - MIT)", "client_name": null, "location_id": "osr", "location_name": "One Stop Restoration of Dallas", "status": "In Progress", "stage": "In Production", "insurance_type": "Insurance", "claim_number": "JMH5", "tested": "Tested", "sales_rep": "Colt Smith", "rep_match": true, "jn_created": "2026-11-05T04:42:10Z", "month": "2026-11", "lead_at": "2026-11-05T04:37:40Z", "lead_source": "call", "lead_local": "2026-11-04T22:37", "lead_dow": 3, "lead_minutes": 1357, "collected": 0, "invoice_total": 0, "photo_by_rep": false, "packouts": [{ "id": "po1", "number": "64262", "name": "PO", "status": "PO in progress", "stage": "In Production" }] },
+      { "id": "vinod", "jn_id": "v", "number": "63287", "name": "Vinod Gupta (A1 - DAL - MIT)", "client_name": null, "location_id": "a1", "location_name": "A1 Restoration of Dallas", "status": "Paid & Closed", "stage": "Completed", "insurance_type": "Insurance", "claim_number": "0181", "tested": "Tested", "sales_rep": "Colt Smith", "rep_match": true, "jn_created": "2026-11-01T19:29:15Z", "month": "2026-11", "lead_at": "2026-11-01T19:25:16Z", "lead_source": "call", "lead_local": "2026-11-01T13:25", "lead_dow": 7, "lead_minutes": 805, "collected": 31000, "invoice_total": 33000, "photo_by_rep": false, "packouts": [] },
+      { "id": "fortney", "jn_id": "f", "number": "63343", "name": "Fortney Kerri (24 - DAL - MIT)", "client_name": null, "location_id": "24", "location_name": "24 Hour Flood Pros of Dallas", "status": "Work Complete", "stage": "In Production", "insurance_type": "Not Insurance", "claim_number": null, "tested": null, "sales_rep": "Colt Smith", "rep_match": true, "jn_created": "2026-11-02T02:57:20Z", "month": "2026-11", "lead_at": "2026-11-02T02:51:53Z", "lead_source": "call", "lead_local": "2026-11-01T20:51", "lead_dow": 7, "lead_minutes": 1251, "collected": 0, "invoice_total": 0, "photo_by_rep": false, "packouts": [{ "id": "po2", "number": "63431", "name": "PO", "status": "Not Sold", "stage": "Lost" }] },
+      { "id": "nancy", "jn_id": "n", "number": "63643", "name": "Nancy Nguyen (A1 - DAL - MIT)", "client_name": null, "location_id": "a1", "location_name": "A1 Restoration of Dallas", "status": "Non-Opportunity", "stage": "Lost", "insurance_type": null, "claim_number": null, "tested": null, "sales_rep": "Colt Smith", "rep_match": true, "jn_created": "2026-11-07T03:00:00Z", "month": "2026-11", "lead_at": "2026-11-07T03:00:00Z", "lead_source": "call", "lead_local": "2026-11-06T21:00", "lead_dow": 5, "lead_minutes": 1260, "collected": 0, "invoice_total": 0, "photo_by_rep": false, "packouts": [] },
+      { "id": "zepeda", "jn_id": "z", "number": "64145", "name": "Elizabeth Zepeda (A1 - DAL - MIT)", "client_name": null, "location_id": "a1", "location_name": "A1 Restoration of Dallas", "status": "In Progress", "stage": "In Production", "insurance_type": "Insurance", "claim_number": "43-0", "tested": "Tested", "sales_rep": "Colt Smith", "rep_match": true, "jn_created": "2026-12-04T18:32:12Z", "month": "2026-12", "lead_at": "2026-12-04T18:26:06Z", "lead_source": "call", "lead_local": "2026-12-04T12:26", "lead_dow": 5, "lead_minutes": 746, "collected": 0, "invoice_total": 0, "photo_by_rep": false, "packouts": [] }
+    ],
+    "corrections": [],
+    "payments": [
+      { "id": "p1", "rep_id": "colt", "line_key": "job:fortney:insurance_landed", "job_id": "fortney", "location_id": "24", "location_name": "24 Hour Flood Pros of Dallas", "earned_month": "2026-11", "payout_month": "2026-12", "amount": 100, "label": "Insurance job landed", "job_label": "#63343 Fortney Kerri", "paid_on": "2026-12-02", "marked_by_name": "Gus", "created_at": "2026-12-02T00:00:00Z" },
+      { "id": "p2", "rep_id": "colt", "line_key": "job:fortney:packout", "job_id": "fortney", "location_id": "24", "location_name": "24 Hour Flood Pros of Dallas", "earned_month": "2026-11", "payout_month": "2026-12", "amount": 25, "label": "Pack-out sold", "job_label": "#63343 Fortney Kerri", "paid_on": "2026-12-02", "marked_by_name": "Gus", "created_at": "2026-12-02T00:00:00Z" }
+    ]
+  },
+  "expected": {
+    "gross": 475,
+    "total": 350,
+    "applied": [["job:fortney:insurance_landed", -100], ["job:fortney:packout", -25]],
+    "carried": [],
+    "split": [["a1", 225], ["osr", 175], ["24", 75]]
+  }
+}
