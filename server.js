@@ -7045,6 +7045,10 @@ require('./monitor')(app, {
   requireAuth, requireAdmin, anthropic: wipAnthropic, denverNow,
 });
 
+// Commission statements: the PDF link a manager shares with a location's owners
+// (see commissions.js). Prints the frozen statement the app saved.
+require('./commissions')(app, { sbGet });
+
 // SMS readiness for the app (Schedule tab shows whether ETA texts / inbound
 // replies are wired up). Same env names sendSms() reads.
 app.get('/admin/sms/status', requireAuth, requireAdmin, (req, res) => {
