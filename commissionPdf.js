@@ -57,7 +57,7 @@ function cells(row) {
     po: dash(a.packout),
     large: dash(a.large_job),
     total: money(row.total),
-    status: row.paid_on ? `Paid ${usDate(row.paid_on)}` : 'Not paid yet',
+    status: row.paid_on ? (row.total < 0 ? `Credited ${usDate(row.paid_on)}` : `Paid ${usDate(row.paid_on)}`) : row.total < 0 ? 'Credit' : 'Not paid yet',
   };
 }
 
@@ -103,9 +103,11 @@ function buildCommissionStatementPdf(statement, logoPng) {
 
     // What the reader has to do with it.
     doc.rect(x0, y, width, 46).fillColor(ZEBRA).fill();
+    // Credits can outweigh bonuses for one location: the paying location then owes it.
+    const payer = st.pay_location_name || 'the paying location';
     const ask = st.is_pay_location
       ? 'Paid directly by this location. No transfer needed.'
-      : `Reimburse ${st.pay_location_name || 'the paying location'}`;
+      : Number(st.total) < 0 ? `Credit: ${payer} returns this to you` : `Reimburse ${payer}`;
     doc.font('Helvetica-Bold').fontSize(13).fillColor(INK).text(ask, x0 + 12, y + 16, { width: width - 180, lineBreak: false });
     doc.font('Helvetica-Bold').fontSize(20).fillColor(INK).text(money(st.total), x0 + width - 172, y + 12, { width: 160, align: 'right', lineBreak: false });
     y += 60;

@@ -42,6 +42,12 @@ test('logoPng gives up quietly on anything it cannot read', async () => {
   assert.strictEqual(await mountCommissions.logoPng('https://x.example/a.png', down), null);
 });
 
+test('draws credits and a location that is owed money back', async () => {
+  const credit = row({ job_label: '#64511 Marla Vandoorn (A1 - DAL - MIT)', amounts: { insurance_landed: -100, oop_landed: 25 }, notes: ['Credit: Insurance job landed, paid $100, now worth $0'], total: -75, owed: -75 });
+  const pdf = await buildCommissionStatementPdf(statement({ rows: [], late_rows: [credit], total: -75, owed: -75, paid: 0 }));
+  assert.ok(isPdf(pdf));
+});
+
 test('job names lose the location suffix and nothing else', () => {
   assert.strictEqual(jobName('#64257 Starmye Goforth (OSR - DAL - MIT)'), '#64257 Starmye Goforth');
   assert.strictEqual(jobName('Deduction: job'), 'Deduction: job');
