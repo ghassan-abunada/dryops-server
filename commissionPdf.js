@@ -27,15 +27,16 @@ function truncate(doc, text, width) {
 }
 
 const COLS = [
-  { key: 'job', label: 'JOB', w: 222 },
-  { key: 'type', label: 'TYPE', w: 74 },
-  { key: 'after', label: 'AFTER-HOURS CALL', w: 104 },
-  { key: 'base', label: 'BASE', w: 44, right: true },
-  { key: 'ah', label: 'AFTER HRS', w: 54, right: true },
+  { key: 'job', label: 'JOB', w: 180 },
+  { key: 'type', label: 'TYPE', w: 70 },
+  { key: 'after', label: 'AFTER-HOURS CALL', w: 100 },
+  { key: 'base', label: 'BASE', w: 40, right: true },
+  { key: 'resp', label: 'RESPONSE', w: 52, right: true },
+  { key: 'ahl', label: 'AH LANDED', w: 56, right: true },
   { key: 'po', label: 'PACK-OUT', w: 50, right: true },
-  { key: 'large', label: 'LARGE', w: 44, right: true },
-  { key: 'total', label: 'TOTAL', w: 50, right: true },
-  { key: 'status', label: 'STATUS', w: 78, right: true },
+  { key: 'large', label: 'LARGE', w: 40, right: true },
+  { key: 'total', label: 'TOTAL', w: 48, right: true },
+  { key: 'status', label: 'STATUS', w: 84, right: true },
 ];
 
 function cells(row) {
@@ -45,7 +46,8 @@ function cells(row) {
     type: row.job_type,
     after: row.after_hours_at || '-',
     base: dash((a.insurance_landed || 0) + (a.oop_landed || 0) + (a.manual || 0)),
-    ah: dash((a.after_hours_response || 0) + (a.after_hours_landed || 0)),
+    resp: dash(a.after_hours_response),
+    ahl: dash(a.after_hours_landed),
     po: dash(a.packout),
     large: dash(a.large_job),
     total: money(row.total),
