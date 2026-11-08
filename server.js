@@ -7201,6 +7201,11 @@ mountNetsuiteIntake(app, {
   },
 });
 
+// NetSuite → Financials tab sync (see netsuiteSync.js): subsidiary map, monthly P&L,
+// statement-verified bank balances and PEX card charges. Hourly + nightly full run
+// only when NETSUITE_SYNC=on; `POST /admin/financials/sync` runs one by hand.
+require('./netsuiteSync')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAuth, requireAdmin, denverNow });
+
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
 });
