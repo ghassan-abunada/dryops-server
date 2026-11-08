@@ -95,15 +95,17 @@ function validateMonitorReport(raw) {
 // ── Completeness ─────────────────────────────────────────────────────────────
 
 const readingComplete = (r) => !!r && r.temp_f != null && r.rh != null;
+// Temp / RH are optional: blank or both numbers, never half-filled (twin of readingOk in the app).
+const readingOk = (r) => !r || (r.temp_f == null && r.rh == null) || readingComplete(r);
 const dryStandard = (m) => (m.dry_standard_mc != null ? m.dry_standard_mc : DRY_STANDARD_DEFAULT);
 const isDry = (mc, standard) => mc != null && mc <= standard;
 
 function isMonitorRoomComplete(room, fire = false) {
   if (!room || !String(room.name || '').trim()) return false;
   if (fire) return true;   // scrubber counts only
-  if (!readingComplete(room.reading)) return false;
+  if (!readingOk(room.reading)) return false;
   if ((room.materials || []).some((m) => m.mc == null)) return false;
-  if ((room.dehu_outlets || []).some((o) => !readingComplete(o))) return false;
+  if ((room.dehu_outlets || []).some((o) => !readingOk(o))) return false;
   if (room.dry == null) return false;
   return true;
 }
@@ -112,7 +114,7 @@ function isMonitorReportComplete(r) {
   if (!r || Number(r.v) !== 1 || r.kind !== 'monitor') return false;
   if (!DATE_RE.test(r.session_date || '')) return false;
   if (!TIME_RE.test(r.arrival_time || '')) return false;
-  if (!r.fire && !readingComplete(r.outside)) return false;
+  if (!r.fire && !readingOk(r.outside)) return false;
   if (!Array.isArray(r.rooms) || !r.rooms.length || !r.rooms.every((x) => isMonitorRoomComplete(x, !!r.fire))) return false;
   if (!r.photos_taken) return false;
   return true;
@@ -377,7 +379,7 @@ function isInspectionRoomComplete(room, fire = false) {
     if (!room.fire || !room.fire.soot) return false;
   } else {
     if ((room.materials || []).some((m) => m.mc == null)) return false;
-    if (!readingComplete(room.reading)) return false;
+    if (!readingOk(room.reading)) return false;
   }
   if (!room.photos_taken) return false;
   return true;
@@ -388,7 +390,7 @@ function isInspectionReportComplete(r) {
   if (!r.loss_type || !r.source) return false;
   if (needsWaterClass(r) && (r.category == null || r.class == null)) return false;
   const fire = isFire(r);
-  if (!fire && !readingComplete(r.outside)) return false;
+  if (!fire && !readingOk(r.outside)) return false;
   if (r.docusketch == null) return false;
   if (!Array.isArray(r.rooms) || !r.rooms.length || !r.rooms.every((x) => isInspectionRoomComplete(x, fire))) return false;
   const e = r.emergency || {};

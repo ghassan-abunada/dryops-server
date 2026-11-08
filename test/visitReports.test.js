@@ -42,7 +42,13 @@ test('validation rebuilds a whitelist and reports problems', () => {
   // one outlet slot per running dehumidifier
   const two = validateMonitorReport({ ...fixture.input, rooms: [{ ...fixture.input.rooms[0], equipment: [{ type: 'Dehumidifier', qty_before: 0, qty_present: 2 }], dehu_outlets: [] }] });
   assert.strictEqual(two.report.rooms[0].dehu_outlets.length, 2);
-  assert.strictEqual(isMonitorReportComplete(two.report), false);
+  // temp / RH are optional: blank outlets, room and outside readings still complete; half-filled ones do not
+  assert.strictEqual(isMonitorReportComplete(two.report), true);
+  const blank = validateMonitorReport({ ...fixture.input, outside: null, rooms: fixture.input.rooms.map((r) => ({ ...r, reading: null })) });
+  assert.ok(blank.ok, JSON.stringify(blank.errors));
+  assert.strictEqual(isMonitorReportComplete(blank.report), true);
+  const half = validateMonitorReport({ ...fixture.input, outside: { temp_f: 80, rh: null } });
+  assert.strictEqual(isMonitorReportComplete(half.report), false);
 });
 
 test('registry wires demo + monitor', () => {
@@ -63,6 +69,11 @@ test('inspection summary matches the shared fixture byte for byte', () => {
   assert.strictEqual(isInspectionReportComplete(v.report), true);
   assert.strictEqual(exteriorWallLF(v.report.rooms[0]), 12);
   assert.strictEqual(exteriorWallLF(v.report.rooms[1]), 0);
+  const blank = validateInspectionReport({ ...inspection.input, outside: null, rooms: inspection.input.rooms.map((r) => ({ ...r, reading: null })) });
+  assert.ok(blank.ok, JSON.stringify(blank.errors));
+  assert.strictEqual(isInspectionReportComplete(blank.report), true);
+  const half = validateInspectionReport({ ...inspection.input, rooms: [{ ...inspection.input.rooms[0], reading: { temp_f: 70, rh: null } }] });
+  assert.strictEqual(isInspectionReportComplete(half.report), false);
 });
 
 test('inspection validation whitelists and gates', () => {
