@@ -10,7 +10,7 @@ async function main() {
   const full = process.argv.includes('--full');
   const noop = () => {};
   const { runSync } = mountNetsuiteSync({ post: noop, get: noop }, {
-    SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAuth: noop, requireAdmin: noop,
+    SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAuth: noop, requireAdmin: noop, schedule: false,
     denverNow: () => new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Denver' })),
   });
   const started = Date.now();

@@ -278,7 +278,8 @@ function mountNetsuiteSync(app, deps) {
     } catch (err) { res.status(502).json({ error: err.message }); }
   });
 
-  if ((process.env.NETSUITE_SYNC || '').trim() === 'on') {
+  // `schedule: false` (the command-line script) mounts the runner without the timers.
+  if (deps.schedule !== false && (process.env.NETSUITE_SYNC || '').trim() === 'on') {
     const tick = () => {
       const day = denverNow();
       const full = day.getHours() === 3 && lastFullDay !== day.toDateString();
