@@ -169,8 +169,10 @@ function mountNetsuiteSync(app, deps) {
   const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' };
   const rest = async (path, init = {}) => {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { ...init, headers: { ...headers, ...(init.headers || {}) } });
-    if (!r.ok) throw new Error(`${path.split('?')[0]} ${r.status} ${(await r.text()).slice(0, 300)}`);
-    return r.status === 204 ? null : r.json();
+    const text = await r.text();
+    if (!r.ok) throw new Error(`${path.split('?')[0]} ${r.status} ${text.slice(0, 300)}`);
+    // `Prefer: return=minimal` answers 201/204 with an empty body.
+    return text ? JSON.parse(text) : null;
   };
   const rpc = (fn, body) => rest(`rpc/${fn}`, { method: 'POST', body: JSON.stringify(body || {}) });
   let running = null;
