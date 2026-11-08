@@ -18,28 +18,31 @@ test('the compiled rules give the app\'s payout for the shared fixture', () => {
   }, fixture.expected);
 });
 
-test('payroll calendar: every other Friday from 10/23/2026, reminder the Tuesday before the second', () => {
+test('payroll calendar: every other Friday from 10/23/2026, reminder the Tuesday before the first', () => {
   assert.deepStrictEqual(paydaysIn('2026-11'), ['2026-11-06', '2026-11-20']);
-  assert.strictEqual(commissionPayday('2026-12'), '2026-12-18');
-  assert.strictEqual(commissionReminderDay('2026-12'), '2026-12-15');
+  assert.strictEqual(commissionPayday('2026-12'), '2026-12-04');
+  assert.strictEqual(commissionReminderDay('2026-12'), '2026-12-01');
+  // Fri 1/1/2027 would need the amount Tue 12/29, before December is over: next payroll.
+  assert.strictEqual(commissionPayday('2027-01'), '2027-01-15');
   assert.strictEqual(commissionReminderDay('2027-01'), '2027-01-12');
 });
 
 test('due only on the reminder Tuesday from 8 AM Central', () => {
-  // 2026-12-15 is a Tuesday; Central is UTC-6 in December.
-  assert.strictEqual(reminderDue(new Date('2026-12-15T13:59:00Z')).due, false); // 7:59 AM
-  assert.strictEqual(reminderDue(new Date('2026-12-15T14:00:00Z')).due, true);  // 8:00 AM
-  assert.strictEqual(reminderDue(new Date('2026-12-16T05:59:00Z')).due, true);  // 11:59 PM Tue
-  assert.strictEqual(reminderDue(new Date('2026-12-16T06:00:00Z')).due, false); // Wed
-  assert.strictEqual(reminderDue(new Date('2026-12-01T15:00:00Z')).due, false); // first payroll's week
-  assert.strictEqual(reminderDue(new Date('2026-11-17T15:00:00Z')).due, true);  // Nov: before Fri 11/20
+  // 2026-12-01 is a Tuesday; Central is UTC-6 in December.
+  assert.strictEqual(reminderDue(new Date('2026-12-01T13:59:00Z')).due, false); // 7:59 AM
+  assert.strictEqual(reminderDue(new Date('2026-12-01T14:00:00Z')).due, true);  // 8:00 AM
+  assert.strictEqual(reminderDue(new Date('2026-12-02T05:59:00Z')).due, true);  // 11:59 PM Tue
+  assert.strictEqual(reminderDue(new Date('2026-12-02T06:00:00Z')).due, false); // Wed
+  assert.strictEqual(reminderDue(new Date('2026-12-15T15:00:00Z')).due, false); // second payroll's week
+  assert.strictEqual(reminderDue(new Date('2026-12-29T15:00:00Z')).due, false); // not for Fri 1/1
+  assert.strictEqual(reminderDue(new Date('2027-01-12T15:00:00Z')).due, true);  // Jan: before Fri 1/15
 });
 
 test('the message carries the amount, the payday, credits and the split', () => {
   const comp = computePayout(fixture.feed, fixture.photo);
   const m = buildMessage({ repName: 'Colt Smith', payoutMonth: '2026-12', comp, appUrl: 'https://dryops.app' });
   assert.strictEqual(m.amount, 350);
-  assert.strictEqual(m.title, 'Commission for the Fri 12/18 payroll: $350');
+  assert.strictEqual(m.title, 'Commission for the Fri 12/4 payroll: $350');
   assert.match(m.body, /Add \$350 for Colt Smith/);
   assert.match(m.body, /after 2 credits/);
   assert.match(m.html, /Credits taken \(2\)/);

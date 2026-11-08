@@ -36,17 +36,17 @@ function monthLabel(month) {
     const [y, m] = month.split('-').map(Number);
     return `${MONTHS[m - 1]} ${y}`;
 }
-/** "Second payroll of December, Fri 12/18" */
+/** "First payroll of December, Fri 12/4" */
 function payoutLabel(payoutMonth) {
     const [, m] = payoutMonth.split('-').map(Number);
-    return `Second payroll of ${MONTHS[m - 1]}, ${(0, payroll_1.shortDate)((0, payroll_1.commissionPayday)(payoutMonth))}`;
+    return `First payroll of ${MONTHS[m - 1]}, ${(0, payroll_1.shortDate)((0, payroll_1.commissionPayday)(payoutMonth))}`;
 }
-/** The same payout inside a sentence: "paid on the second payroll of December (Fri 12/18)". */
+/** The same payout inside a sentence: "paid on the first payroll of December (Fri 12/4)". */
 function payoutPhrase(payoutMonth) {
     const [, m] = payoutMonth.split('-').map(Number);
-    return `second payroll of ${MONTHS[m - 1]} (${(0, payroll_1.shortDate)((0, payroll_1.commissionPayday)(payoutMonth))})`;
+    return `first payroll of ${MONTHS[m - 1]} (${(0, payroll_1.shortDate)((0, payroll_1.commissionPayday)(payoutMonth))})`;
 }
-/** A month's earnings go out on the second payroll of the month after it. */
+/** A month's earnings go out on the first payroll of the month after it. */
 function payoutMonthFor(earnedMonth) {
     return addMonths(earnedMonth, 1);
 }

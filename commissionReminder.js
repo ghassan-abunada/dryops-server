@@ -1,13 +1,14 @@
 'use strict';
 // Commission payroll reminder (owner 2026-11-07). Payroll is every other Friday from
-// 2026-10-23, processed the Wednesday before; commission goes on the SECOND payroll
-// of each month and the payroll manager needs the amount on that week's Tuesday.
+// 2026-10-23, processed the Wednesday before; commission goes on the FIRST payroll
+// of each month (a payday on the 1st-3rd moves it to the next, the month isn't over
+// by its Tuesday) and the payroll manager needs the amount on that week's Tuesday.
 // So on that Tuesday, from 8 AM Central, everyone who manages commissions (admins
 // and the people an admin approved in the app's Access sheet, never the rep
 // himself) gets an email and a push with the amount to add.
 //
 // The amount is the app's own calculation: vendor/commissions is compiled from the
-// app's lib/commissions (`npm run vendor:commissions` there), pinned by
+// app's lib/commissions (`DRYOPS_SERVER=<this checkout> sh scripts/vendor-commissions.sh` there), pinned by
 // test/fixtures/commissionPayout.json in both repos.
 //
 //   POST /commissions/reminder/run              admin: what it would send (dry run)
@@ -133,7 +134,7 @@ function createReminder(deps) {
       if (answer !== null) photo[job.id] = answer;
     }
     const comp = computePayout(feed, photo);
-    return { feed, comp, message: buildMessage({ repName: rep.rep_name, payoutMonth: feed.now_month, comp, appUrl }) };
+    return { feed, comp, message: buildMessage({ repName: rep.rep_name, payoutMonth: comp.next.payoutMonth, comp, appUrl }) };
   }
 
   async function alreadySent(repId, payoutMonth) {
@@ -152,8 +153,8 @@ function createReminder(deps) {
     const out = [];
     for (const rep of reps) {
       try {
-        const { feed, message } = await prepare(rep);
-        const payoutMonth = feed.now_month;
+        const { comp, message } = await prepare(rep);
+        const payoutMonth = comp.next.payoutMonth;
         const ids = await recipientsFor(rep.profile_id);
         const emails = (await Promise.all(ids.map(emailOf))).filter(Boolean);
         const entry = { rep: rep.rep_name, payout_month: payoutMonth, payday: commissionPayday(payoutMonth), amount: message.amount, title: message.title, body: message.body, recipients: emails };
