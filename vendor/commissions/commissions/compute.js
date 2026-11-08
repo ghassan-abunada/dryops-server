@@ -7,6 +7,7 @@ exports.computePayout = computePayout;
 // the reminder is the amount on the screen. Pinned by
 // lib/__tests__/fixtures/commissionPayout.json in both repos.
 const rules_1 = require("./rules");
+const payroll_1 = require("./payroll");
 const payout_1 = require("./payout");
 /**
  * @param photo JobNimbus "a photo by the rep" answers for unlanded after-hours jobs,
@@ -18,11 +19,13 @@ function computePayout(feed, photo = {}) {
     const lines = [...jobs.flatMap(j => j.lines), ...(0, rules_1.manualLines)(feed.corrections)];
     // A response line we can't verify right now must not turn into a credit.
     const unverified = new Set(jobs.filter(j => j.flags.includes('photo_unchecked')).map(j => `job:${j.job.id}:after_hours_response`));
-    const ledger = (0, payout_1.buildLedger)(lines, feed.payments, feed.corrections, feed.now_month, unverified);
+    // The next payout: this month's until a week after its payday, then next month's.
+    const payoutMonth = feed.today ? (0, payroll_1.payoutMonthOn)(feed.today) : feed.now_month;
+    const ledger = (0, payout_1.buildLedger)(lines, feed.payments, feed.corrections, payoutMonth, unverified);
     return {
         jobs,
         ledger,
-        next: (0, payout_1.nextPayout)(ledger.lines, feed.now_month),
-        split: (0, payout_1.splitByLocation)(ledger.lines, feed.now_month),
+        next: (0, payout_1.nextPayout)(ledger.lines, payoutMonth),
+        split: (0, payout_1.splitByLocation)(ledger.lines, payoutMonth),
     };
 }

@@ -1,14 +1,18 @@
 "use strict";
 // The payroll calendar (owner 2026-11-07): payroll is every other Friday, counting
 // from Friday 2026-10-23, processed the Wednesday before. Commission goes on the
-// SECOND payroll of each month, and the payroll manager needs the amount on the
-// Tuesday of that week. Pure date math on YYYY-MM-DD strings (no time zones).
+// FIRST payroll of each month (owner, later 2026-11-07), and the payroll manager
+// needs the amount on the Tuesday of that week. When that Tuesday would fall in the
+// month before (a payday on the 1st to 3rd, e.g. Fri 1/1/2027), the month being
+// paid isn't over yet, so commission moves to the next payroll (owner's choice).
+// Pure date math on YYYY-MM-DD strings (no time zones).
 // dryops-server runs a compiled copy of this file (vendor/commissions).
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PAYROLL_ANCHOR = void 0;
+exports.PAYOUT_GRACE_DAYS = exports.PAYROLL_ANCHOR = void 0;
 exports.addDays = addDays;
 exports.paydaysIn = paydaysIn;
 exports.commissionPayday = commissionPayday;
+exports.payoutMonthOn = payoutMonthOn;
 exports.commissionReminderDay = commissionReminderDay;
 exports.shortDate = shortDate;
 exports.PAYROLL_ANCHOR = '2026-10-23';
@@ -38,9 +42,22 @@ function paydaysIn(month) {
         out.push(fromUtc(t));
     return out;
 }
-/** The payroll commission goes on: the month's second payday. */
+/** The payroll commission goes on: the month's first payday whose Tuesday reminder is in the month. */
 function commissionPayday(month) {
-    return paydaysIn(month)[1];
+    return paydaysIn(month).find(d => addDays(d, -3).slice(0, 7) === month);
+}
+/** Days after a commission payday it still counts as the current payout, so lines marked paid a little late land on it. */
+exports.PAYOUT_GRACE_DAYS = 7;
+/**
+ * Which month's payout is next on a given day (YYYY-MM-DD): this month's until a
+ * week after its commission payday, then next month's.
+ */
+function payoutMonthOn(today) {
+    const month = today.slice(0, 7);
+    if (today <= addDays(commissionPayday(month), exports.PAYOUT_GRACE_DAYS))
+        return month;
+    const [y, m] = month.split('-').map(Number);
+    return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
 }
 /** Payroll is processed on Wednesday; the amount is needed the Tuesday before. */
 function commissionReminderDay(month) {
