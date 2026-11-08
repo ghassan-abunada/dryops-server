@@ -1,0 +1,31 @@
+{
+  "note": "Synthetic charges, one per flag rule and its edges. The app's lib/financials/ledger.ts and the server's cardFlags.js must both produce `flags`.",
+  "txns": [
+    { "id": "p1", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Fuel Stop", "account_number": "74100", "account_name": "74100 Fuel", "at": "2026-10-01T10:00:00Z", "amount": 60 },
+    { "id": "p2", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Fuel Stop", "account_number": "74100", "account_name": "74100 Fuel", "at": "2026-10-02T10:00:00Z", "amount": 55 },
+    { "id": "p3", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Hardware Mart", "account_number": "52000", "account_name": "52000 Supplies & Materials-COGS", "at": "2026-10-03T09:00:00Z", "amount": 140 },
+    { "id": "p4", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Hardware Mart", "account_number": "52000", "account_name": "52000 Supplies & Materials-COGS", "at": "2026-10-03T15:00:00Z", "amount": 140 },
+    { "id": "p5", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Town Liquor", "account_number": "72100", "account_name": "72100 Meals", "at": "2026-10-04T19:00:00Z", "amount": 48.5 },
+    { "id": "p6", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Equipment Co", "account_number": "56000", "account_name": "56000 Equipment Rental-COGS", "at": "2026-10-05T11:00:00Z", "amount": 1500 },
+    { "id": "p7", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Storage Place", "account_number": "53000", "account_name": "53000 Storage-COGS", "at": "2026-10-06T08:00:00Z", "amount": 300 },
+    { "id": "p8", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Storage Place", "account_number": "53000", "account_name": "53000 Storage-COGS", "at": "2026-10-06T20:00:00Z", "amount": 300 },
+    { "id": "p9", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Fuel Stop", "account_number": "74100", "account_name": "74100 Fuel", "at": "2026-10-07T10:00:00Z", "amount": -20 },
+    { "id": "p10", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Tolls", "account_number": "74200", "account_name": "74200 Tolls & Parking", "at": "2026-10-08T07:00:00Z", "amount": 12 },
+    { "id": "p11", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Tolls", "account_number": "74200", "account_name": "74200 Tolls & Parking", "at": "2026-10-08T17:00:00Z", "amount": 12 },
+    { "id": "p12", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Golfland Supply", "account_number": "52000", "account_name": "52000 Supplies & Materials-COGS", "at": "2026-10-09T12:00:00Z", "amount": 90 },
+    { "id": "p13", "subsidiary_id": 1, "cardholder": "Pat Example", "vendor_card": false, "merchant": "Topgolf Downtown", "account_number": "72100", "account_name": "72100 Meals", "at": "2026-10-10T20:00:00Z", "amount": 85 },
+    { "id": "v1", "subsidiary_id": 1, "cardholder": "Vendor Ads Example", "vendor_card": true, "merchant": "Ad Network", "account_number": "73200", "account_name": "73200 Advertising & Marketing", "at": "2026-10-01T00:00:00Z", "amount": 5000 },
+    { "id": "v2", "subsidiary_id": 1, "cardholder": "Vendor Ads Example", "vendor_card": true, "merchant": "Casino Billboards", "account_number": "73200", "account_name": "73200 Advertising & Marketing", "at": "2026-10-02T00:00:00Z", "amount": 400 },
+    { "id": "v3", "subsidiary_id": 1, "cardholder": "Vendor Ads Example", "vendor_card": true, "merchant": "Ad Network", "account_number": "73200", "account_name": "73200 Advertising & Marketing", "at": "2026-10-02T00:00:00Z", "amount": 5000 }
+  ],
+  "flags": {
+    "p3": ["duplicate"],
+    "p4": ["duplicate"],
+    "p5": ["merchant"],
+    "p6": ["above_usual", "round"],
+    "p7": ["round"],
+    "p8": ["round"],
+    "p13": ["merchant"],
+    "v2": ["merchant"]
+  }
+}
