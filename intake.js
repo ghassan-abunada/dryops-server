@@ -21,7 +21,7 @@
 // forces every created record into one test JN location.
 
 const crypto = require('crypto');
-const { deliver, notifyChannels } = require('./notify');
+const { deliver, notifyChannels, channelLocationIds } = require('./notify');
 const testingIntake = require('./intakeTesting');
 const {
   isTestingRecordType, normalizeTestTypes, testingServiceMinutes, formatTestTypes,
@@ -888,11 +888,13 @@ module.exports = function mountIntake(app, deps) {
   app.post('/admin/notifications/channels/:id/test', requireAuth, requireAdmin, async (req, res) => {
     try {
       const actor = await loadActor(req);
-      const rows = await sbGet(`notification_channels?id=eq.${enc(req.params.id)}&select=id,kind,name,config,location_id`);
+      const rows = (await sbGet(`notification_channels?id=eq.${enc(req.params.id)}&select=id,kind,name,config,location_id,location_ids`))
+        || (await sbGet(`notification_channels?id=eq.${enc(req.params.id)}&select=id,kind,name,config,location_id`));
       const ch = rows && rows[0];
       if (!ch) return res.status(404).json({ error: 'Channel not found' });
-      if (ch.location_id && !canManageLocation(actor, ch.location_id)) return res.status(403).json({ error: 'Not allowed' });
-      if (!ch.location_id && actor.role !== 'admin') return res.status(403).json({ error: 'Not allowed' });
+      const chLocs = channelLocationIds(ch);
+      if (chLocs && !chLocs.every((id) => canManageLocation(actor, id))) return res.status(403).json({ error: 'Not allowed' });
+      if (!chLocs && actor.role !== 'admin') return res.status(403).json({ error: 'Not allowed' });
       const msg = {
         lines: [
           { b: `🚨 Google Lead · ${ch.name} (test) 🚨` }, '',
