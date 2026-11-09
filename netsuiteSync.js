@@ -164,6 +164,12 @@ function cardRow(item, month) {
   };
 }
 
+/** Is this hourly tick the day's full run? 3 AM Denver, once per calendar day. `now` is denverNow()'s { y, m, d, h }. */
+function fullRunDue({ y, m, d, h }, lastFullDay) {
+  const dayKey = `${y}-${m}-${d}`;
+  return { full: h === 3 && lastFullDay !== dayKey, dayKey };
+}
+
 function mountNetsuiteSync(app, deps) {
   const { SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAuth, requireAdmin, denverNow } = deps;
   const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' };
@@ -279,11 +285,17 @@ function mountNetsuiteSync(app, deps) {
   });
 
   if ((process.env.NETSUITE_SYNC || '').trim() === 'on') {
+    // denverNow() is server.js's plain { y, m, d, h } reading, not a Date. A thrown
+    // error here would be uncaught inside a timer and take the whole server down
+    // (2026-11-08 crash loop), so the tick never lets one escape.
     const tick = () => {
-      const day = denverNow();
-      const full = day.getHours() === 3 && lastFullDay !== day.toDateString();
-      if (full) lastFullDay = day.toDateString();
-      start({ full, trigger: full ? 'nightly' : 'schedule' });
+      try {
+        const { full, dayKey } = fullRunDue(denverNow(), lastFullDay);
+        if (full) lastFullDay = dayKey;
+        start({ full, trigger: full ? 'nightly' : 'schedule' });
+      } catch (err) {
+        console.error('[netsuite sync] tick failed:', err && err.message);
+      }
     };
     setTimeout(tick, 90 * 1000);
     setInterval(tick, 60 * 60 * 1000);
@@ -294,4 +306,4 @@ function mountNetsuiteSync(app, deps) {
 }
 
 module.exports = mountNetsuiteSync;
-Object.assign(module.exports, { CONFIRMED, DATA_START, monthStartsFrom, windowFrom, buildMap, pnlRow, bankEntries, cardRow });
+Object.assign(module.exports, { CONFIRMED, DATA_START, monthStartsFrom, windowFrom, buildMap, pnlRow, bankEntries, cardRow, fullRunDue });
