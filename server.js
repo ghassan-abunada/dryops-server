@@ -420,6 +420,8 @@ app.post('/webhooks/jobnimbus/jobs', async (req, res) => {
 
   const row = { jn_id: String(jnid), last_synced: new Date().toISOString(), ...jnJobFields(job) };
   const set = (col, val) => { if (val !== undefined) row[col] = val; };
+  // JN's sales_rep user id → profiles.jn_user_id (salesRep.js), next to the name above.
+  Object.assign(row, await salesRep.profileCol(job));
 
   // Resolve JobNimbus numeric location id -> our locations.id UUID. Unknown
   // ids (a location created in JN after our seed) get a placeholder row
@@ -7094,6 +7096,12 @@ const intake = require('./intake')(app, {
   syncVisitJnTask, loadScheduleSettings, fmtMin,
 });
 
+// Job sales rep: the job page's row (GET/PUT /jobs/:id/sales-rep) and the
+// JN user id → profile resolution the webhook + reconcile merge in (salesRep.js).
+const salesRep = require('./salesRep')(app, {
+  sbGet, sbPatch, jnSendJson, jnGetJobFull, requireAuth, loadActor: intake.loadActor, normalizeRepName,
+});
+
 // Wash Your Hands: the checklist → "WYH - First Last" JobNimbus note (wyh.js).
 require('./wyh')(app, {
   requireAuth, sbGet, sbPatch, sbInsert, jnGetJson, jnAddNote, jnFetchAccountUsers, UUID_RE,
@@ -7138,7 +7146,7 @@ require('./mentions')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAdmin, s
 // (POST /jobs/:id/refresh — the WYH panel calls it on open).
 const jobSync = require('./jobSync')(app, {
   SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGetJobFull, jnFetchUpdatedSince, jnJobFields,
-  sbSelect, requireAuth, requireAdmin, loadActor: intake.loadActor,
+  sbSelect, requireAuth, requireAdmin, loadActor: intake.loadActor, salesRepProfileCol: salesRep.profileCol,
 });
 
 require('./wyhAi')(app, {

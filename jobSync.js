@@ -14,6 +14,8 @@ const { uuidRe } = require('./noteReader');
 
 module.exports = function mountJobSync(app, deps) {
   const { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGetJobFull, jnFetchUpdatedSince, jnJobFields, sbSelect, requireAuth, loadActor } = deps;
+  // JN sales_rep user id → jobs.sales_rep_profile_id (salesRep.js); absent in tests.
+  const salesRepProfileCol = deps.salesRepProfileCol || (async () => ({}));
   const RECONCILE_MINUTES = Math.max(5, Number(process.env.JOB_RECONCILE_MINUTES) || 30);
   const DISABLED = /^(1|true|yes|on)$/i.test(String(process.env.JOB_RECONCILE_DISABLED || ''));
   const sbHeaders = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=representation' };
@@ -24,12 +26,12 @@ module.exports = function mountJobSync(app, deps) {
   async function patchFromJn(job) {
     const jnid = job && (job.jnid || job.id);
     if (!jnid) return null;
-    const row = { ...jnJobFields(job), last_synced: new Date().toISOString() };
+    const row = { ...jnJobFields(job), ...(await salesRepProfileCol(job)), last_synced: new Date().toISOString() };
     // Ordering guard: a reconcile pass reads JobNimbus once and patches for a
     // while; a webhook landing in between carries newer data. Only write when
     // JobNimbus's own stamp on this record is not older than the one we hold.
     const stamp = row.jn_updated ? `&or=(jn_updated.is.null,jn_updated.lte.${encodeURIComponent(row.jn_updated)})` : '';
-    const select = 'id,jn_id,number,name,status,insurer,claim_number,adjuster_name,insurance_type,tested,date_loss,cat,lead_type,sales_rep,jn_updated,last_synced';
+    const select = 'id,jn_id,number,name,status,insurer,claim_number,adjuster_name,insurance_type,tested,date_loss,cat,lead_type,sales_rep,sales_rep_profile_id,jn_updated,last_synced';
     const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?jn_id=eq.${encodeURIComponent(String(jnid))}${stamp}&select=${select}`, {
       method: 'PATCH', headers: sbHeaders, body: JSON.stringify(row),
     });
