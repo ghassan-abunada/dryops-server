@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { monthStartsFrom, windowFrom, buildMap, pnlRow, bankEntries, cardRow, DATA_START } = require('../netsuiteSync');
+const { monthStartsFrom, windowFrom, buildMap, pnlRow, bankEntries, cardRow, DATA_START, fullRunDue } = require('../netsuiteSync');
 const { parseStatements } = require('../scripts/loadStatements');
 const { normalizeName } = require('../netsuiteMatch');
 
@@ -112,4 +112,12 @@ test('parseStatements reads the accounting export, including quoted dollar amoun
     { company: 'Sample Packout of Dallas', last4: '0222', statement_date: '2026-09-30', balance: -50.25 },
   ]);
   assert.throws(() => parseStatements('h\nbad line\n'), /Line 2/);
+});
+
+test('fullRunDue takes denverNow()\'s { y, m, d, h } reading: full once at 3 AM Denver, hourly otherwise', () => {
+  const at3 = { y: 2026, m: 11, d: 8, h: 3 };
+  assert.deepEqual(fullRunDue(at3, null), { full: true, dayKey: '2026-11-8' });
+  assert.equal(fullRunDue(at3, '2026-11-8').full, false);            // already ran today
+  assert.equal(fullRunDue({ ...at3, h: 4 }, null).full, false);      // not 3 AM
+  assert.equal(fullRunDue({ ...at3, d: 9 }, '2026-11-8').full, true); // next day
 });
