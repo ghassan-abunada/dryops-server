@@ -72,8 +72,13 @@ module.exports = function mountIntake(app, deps) {
       sources: (Array.isArray(j && j.sources) ? j.sources : []).map((s) => ({
         id: Number(s.JobSourceId), name: String(s.SourceName || '').trim(), active: s.IsActive !== false,
       })).filter((s) => s.id && s.name),
+      // statuses: the workflow's status names in JN order (recordType.js remaps
+      // a job's status when its type changes); [] when the payload has none.
       workflows: (Array.isArray(j && j.workflows) ? j.workflows : []).map((w) => ({
         id: Number(w.id), name: String(w.name || '').trim(), object_type: w.object_type, active: w.is_active !== false,
+        statuses: (Array.isArray(w.status) ? w.status : Array.isArray(w.statuses) ? w.statuses : [])
+          .filter((s) => s && (typeof s === 'string' || (s.is_active !== false && s.is_archived !== true)))
+          .map((s) => String(typeof s === 'string' ? s : (s.name || s.status_name || '')).trim()).filter(Boolean),
       })),
       locations: (Array.isArray(j && j.locations) ? j.locations : []).map((l) => ({
         id: Number(l.id), name: String(l.name || '').trim(), city: String(l.city || '').trim(), state: String(l.state_text || '').trim(),

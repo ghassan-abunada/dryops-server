@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const callAccess = require('./callAccess');
 const { readCallrailCall, describeBody: describeCallrailBody } = require('./callrailPayload');
 const jnScope = require('./jnScope');
+const { descriptionCol } = require('./jobSync');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -385,6 +386,8 @@ function jnJobFields(job) {
   set('date_start', jnToDate(job.start_date));
   set('record_type', recordType || undefined);
   set('status', job.status_name || undefined);
+  // JN description → jobs.description ('' clears it; jobSync.descriptionCol).
+  Object.assign(row, descriptionCol(job));
   // JobNimbus lead source (every record type): the Stats "Lead Sources" panel
   // at testing locations groups by it (columns from add_job_intake.sql).
   Object.assign(row, jnSourceCols(job));
@@ -6056,9 +6059,10 @@ async function jnGetContactFull(contactId) {
   return r.json();
 }
 
-// Every image file on the job, oldest first — the same listing files.tsx and
-// jnCountFilesForJob use, so the report matches the app's Files tab.
-async function jnListJobImages(jobJnId) {
+// Every file on the job, oldest first, each with an `is_image` flag — the same
+// listing files.tsx and jnCountFilesForJob use. `imagesOnly` keeps just the
+// photos (the photo report); jobFiles.js lists everything for the Files tab.
+async function jnListJobFiles(jobJnId, { imagesOnly = false } = {}) {
   const seen = new Set();
   const files = [];
   let total = 0;
@@ -6075,13 +6079,21 @@ async function jnListJobImages(jobJnId) {
       if (!id || seen.has(id)) continue; // dedupe: JN pages can overlap when files land mid-walk
       seen.add(id);
       fresh++;
-      if (isJnImage(f)) files.push(f);
+      const img = !!isJnImage(f);
+      if (img || !imagesOnly) files.push(Object.assign(f, { is_image: img }));
     }
     // Short page = done. A page with nothing new = `from` not honored; stop
     // rather than re-reading the same page to the bound.
     if (page.length < PHOTO_REPORT_PAGE || !fresh) break;
   }
   files.sort((a, b) => (a.date_created || 0) - (b.date_created || 0));
+  return Object.assign(files, { total });
+}
+
+// Every image file on the job, oldest first (the photo report; capped).
+async function jnListJobImages(jobJnId) {
+  const files = await jnListJobFiles(jobJnId, { imagesOnly: true });
+  const total = files.total;
   console.log('[photo-report]', jobJnId, `${files.length} images of ${total} files`);
   if (files.length > PHOTO_REPORT_MAX_PHOTOS) {
     console.warn('[photo-report]', jobJnId, `truncating ${files.length} images to the ${PHOTO_REPORT_MAX_PHOTOS} oldest`);
@@ -7147,6 +7159,21 @@ require('./mentions')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAdmin, s
 const jobSync = require('./jobSync')(app, {
   SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGetJobFull, jnFetchUpdatedSince, jnJobFields,
   sbSelect, requireAuth, requireAdmin, loadActor: intake.loadActor, salesRepProfileCol: salesRep.profileCol,
+});
+
+// Job record type: the job page's "Job type" row (GET/POST /jobs/:id/record-type;
+// recordType.js). JN first, status remapped into the target workflow, then a note.
+require('./recordType')(app, {
+  sbGet, sbPatch, jnSendJson, jnGetJobFull, jnAddNote, requireAuth,
+  loadActor: intake.loadActor, jnAccountSettings: intake.jnAccountSettings,
+});
+
+// Job files: every JobNimbus file on a job with signed download links
+// (GET /jobs/:id/files, GET /jnfile/:jnid; jobFiles.js). /jnphoto stays as is.
+require('./jobFiles')(app, {
+  sbGet, jnListJobFiles, requireAuth, loadActor: intake.loadActor, loadJnScopeProfile,
+  JN_BASE, JN_TOKEN,
+  FILE_LINK_SECRET: (process.env.FILE_LINK_SECRET || JN_WEBHOOK_TOKEN || '').trim(),
 });
 
 require('./wyhAi')(app, {
