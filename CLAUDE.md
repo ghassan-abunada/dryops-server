@@ -128,6 +128,14 @@ server.js for eligibility rules and dedupe logic.
   dated in that month (manual invoices are respected)
 - Runs log to `supplemental_billing_runs` in Supabase
   (supabase_supplemental_billing.sql)
+- Per-job rule: `suppEligibility(job)` in `suppEligibility.js` (record types,
+  excluded statuses, ignored status dates; `{ eligible, placeholder, reasons }`)
+  — the monthly loop and the job page share it. The job page's Contents ›
+  Storage billing section calls `GET/PUT /jobs/:id/storage` (storage.js: the
+  three JN fields, verdict, storage invoices, run outcomes; JN-first write,
+  note on a flag flip; admins/owners write). `jnJobFields` mirrors the fields
+  into `jobs.in_storage` / `storage_vaults` / `storage_monthly_price` (app
+  `supabase/add_job_storage.sql`)
 - Endpoints (admin): `POST /admin/supplemental-billing/run` (body
   `{"dryrun":false}` for a live run; default dryrun preview),
   `GET /admin/supplemental-billing/status`
