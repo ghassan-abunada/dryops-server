@@ -7181,11 +7181,12 @@ require('./jobFiles')(app, {
 });
 
 // Job PDFs: drying log, mitigation report, estimate, invoice (GET / POST
-// /jobs/:id/pdf/:kind; jobPdf.js). Renders with pdfkit from scope_sheets,
-// rooms / materials / equipment, photos and estimate_docs; can save to the
+// /jobs/:id/pdf/:kind; jobPdf.js). Renders with pdfkit from the drying log
+// the page sends (drylogPdf.js), scope_sheets, rooms / materials / equipment,
+// photos and estimate_docs; can save to the
 // documents bucket, upload to the job's JobNimbus files and post a note.
 jobPdf(app, {
-  requireAuth, loadActor: intake.loadActor, sbGet, sbInsert, jnUploadFile, jnAddNote, locationLogoUrl, logoPngFromUrl,
+  requireAuth, loadActor: intake.loadActor, sbGet, sbInsert, jnUploadFile, jnAddNote, locationLogoUrl, logoPngFromUrl, jnDownloadFile,
   SUPABASE_URL, SUPABASE_SERVICE_KEY, sharp,
   FILE_LINK_SECRET: (process.env.FILE_LINK_SECRET || JN_WEBHOOK_TOKEN || '').trim(),
 });

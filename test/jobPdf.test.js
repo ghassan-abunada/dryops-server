@@ -12,6 +12,8 @@ const OTHER = '22222222-2222-4222-8222-222222222222';
 const DOC = '33333333-3333-4333-8333-333333333333';
 const SECRET = 'test-secret';
 const fixture = () => JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'dryingLog.json'), 'utf8'));
+// The drying log as the desktop page sends it (DryOps buildDrylogData); the kind prints only from the body.
+const drylog = () => JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'drylogData.json'), 'utf8'));
 
 // A priced estimate body whose docTotals equals grand_total.
 const body = {
@@ -105,32 +107,40 @@ test('400 on a bad kind or job id, 401 without a token, 404 unknown job', async 
   assert.strictEqual((await call('POST', { as: 'ghost', body: {} })).statusCode, 403);
 });
 
-test('403 outside the actor\'s locations; a technician in scope may read', async () => {
-  const { call } = setup({ snapshot: { id: 's1', version: 2, status: 'reviewed', sheet: null, drying_log: fixture() } });
-  const far = await call('GET', { as: 'techElsewhere' });
+test('403 outside the actor\'s locations; a technician in scope may read (through the signed link)', async () => {
+  const { call } = setup();
+  const far = await call('POST', { as: 'techElsewhere', body: { drylog: drylog() } });
   assert.strictEqual(far.statusCode, 403);
-  const ok = await call('GET', { as: 'tech' });
+  const made = await call('POST', { as: 'tech', body: { drylog: drylog() } });
+  assert.strictEqual(made.statusCode, 200, JSON.stringify(made.body));
+  const q = Object.fromEntries(new URL(`https://x${made.body.pdf_url}`).searchParams.entries());
+  const ok = await call('GET', { query: q });
   assert.strictEqual(ok.statusCode, 200);
   assert.strictEqual(ok.headers['Content-Type'], 'application/pdf');
-  assert.match(ok.headers['Content-Disposition'], /^inline; filename="Drying Log - Maria Delgado - 2026-06-12.pdf"/);
+  assert.match(ok.headers['Content-Disposition'], /^inline; filename="Drying Log - Maria Delgado - 2026-08-18.pdf"/);
   assert.strictEqual(ok.body.slice(0, 5).toString(), '%PDF-');
-  const dl = await call('GET', { as: 'tech', query: { disposition: 'attachment' } });
+  const dl = await call('GET', { query: { ...q, disposition: 'attachment' } });
   assert.match(dl.headers['Content-Disposition'], /^attachment;/);
+  // A plain GET has no log to print: the page sends it.
+  const bare = await call('GET', { as: 'tech' });
+  assert.strictEqual(bare.statusCode, 409);
+  assert.strictEqual(bare.body.needs_drying_log, true);
 });
 
-test('drying log: 409 needs_drying_log without a snapshot; a body log renders; a bad body is 400', async () => {
+test('drying log: 409 needs_drying_log without a body log; a body log renders; a bad body is 400', async () => {
   const { call } = setup();
   const r = await call('POST', { as: 'admin', body: {} });
   assert.strictEqual(r.statusCode, 409);
   assert.strictEqual(r.body.needs_drying_log, true);
-  const bad = await call('POST', { as: 'admin', body: { drying_log: { v: 1, days: 'x' } } });
+  const bad = await call('POST', { as: 'admin', body: { drylog: { rooms: 'x' } } });
   assert.strictEqual(bad.statusCode, 400);
-  const ok = await call('POST', { as: 'tech', body: { drying_log: fixture() } });
+  const ok = await call('POST', { as: 'tech', body: { drylog: drylog() } });
   assert.strictEqual(ok.statusCode, 200);
   assert.strictEqual(ok.body.ok, true);
   assert.strictEqual(ok.body.kind, 'drying-log');
-  assert.strictEqual(ok.body.filename, 'Drying Log - Maria Delgado - 2026-06-12.pdf');
-  assert.strictEqual(ok.body.pages, 1);
+  assert.strictEqual(ok.body.filename, 'Drying Log - Maria Delgado - 2026-08-18.pdf');
+  assert.strictEqual(ok.body.pages, 3);
+  assert.deepStrictEqual({ days: ok.body.days, rooms: ok.body.rooms, photos: ok.body.photos }, { days: 7, rooms: 2, photos: 0 });
   assert.ok(ok.body.bytes > 1000);
   assert.strictEqual(ok.body.document, null);
   assert.strictEqual(ok.body.jn_file_id, null);
@@ -147,24 +157,23 @@ test('drying log: 409 needs_drying_log without a snapshot; a body log renders; a
 });
 
 test('save / jn / note: technicians are refused; owners get a documents row, a JN file and a note', async () => {
-  const snap = { id: 's1', version: 3, status: 'reviewed', sheet: null, drying_log: fixture() };
-  const { call, writes, fetches, jn } = setup({ snapshot: snap });
-  const refused = await call('POST', { as: 'tech', body: { save: true } });
+  const { call, writes, fetches, jn } = setup();
+  const refused = await call('POST', { as: 'tech', body: { save: true, drylog: drylog() } });
   assert.strictEqual(refused.statusCode, 403);
-  const r = await call('POST', { as: 'manager', body: { save: true, jn: true, note: true } });
+  const r = await call('POST', { as: 'manager', body: { save: true, jn: true, note: true, drylog: drylog() } });
   assert.strictEqual(r.statusCode, 200, JSON.stringify(r.body));
   // storage upload to the documents bucket, then the documents row
   const up = fetches.find((f) => f.url.startsWith('https://sb.test/storage/v1/object/documents/'));
   assert.ok(up, 'uploaded to storage');
   assert.strictEqual(up.method, 'POST');
   assert.strictEqual(up.headers['Content-Type'], 'application/pdf');
-  assert.match(up.url, new RegExp(`/documents/${JOB}/\\d+-Drying%20Log%20-%20Maria%20Delgado%20-%202026-06-12.pdf$`));
+  assert.match(up.url, new RegExp(`/documents/${JOB}/\\d+-Drying%20Log%20-%20Maria%20Delgado%20-%202026-08-18.pdf$`));
   assert.strictEqual(writes.length, 1);
   const [table, row] = writes[0];
   assert.strictEqual(table, 'documents');
   assert.strictEqual(row.job_id, JOB);
   assert.strictEqual(row.type, 'drying_log');
-  assert.strictEqual(row.name, 'Drying Log - Maria Delgado - 2026-06-12.pdf');
+  assert.strictEqual(row.name, 'Drying Log - Maria Delgado - 2026-08-18.pdf');
   assert.strictEqual(row.jn_file_id, 'jn-file-1');
   assert.strictEqual(row.size, r.body.bytes);
   assert.match(row.storage_url, /^https:\/\/sb.test\/storage\/v1\/object\/public\/documents\//);
@@ -175,24 +184,22 @@ test('save / jn / note: technicians are refused; owners get a documents row, a J
   const file = jn.find((x) => x[0] === 'file'), note = jn.find((x) => x[0] === 'note');
   assert.strictEqual(file[1], 'jn-job');
   assert.strictEqual(file[2], row.name);
-  assert.match(note[2], /^Drying log attached: 3 days · 6\/10\/26 – 6\/12\/26 · all materials at dry standard\.\n/);
+  assert.match(note[2], /^Drying log attached: 7 days · 08\/12 – 08\/18 · 2 rooms · 3 materials\.\n/);
   assert.deepStrictEqual(note[3], { jnLocationId: 7, createdBy: 'jn-mgr' });
-  assert.strictEqual(r.body.snapshot_version, 3);
 });
 
 test('save: an empty insert reply re-selects the row; a storage failure is 502; a JN failure is 502', async () => {
-  const snap = { id: 's1', version: 1, status: 'draft', sheet: null, drying_log: fixture() };
-  const a = setup({ snapshot: snap, insertReturns: 'empty' });
-  const r = await a.call('POST', { as: 'admin', body: { save: true } });
+  const a = setup({ insertReturns: 'empty' });
+  const r = await a.call('POST', { as: 'admin', body: { save: true, drylog: drylog() } });
   assert.strictEqual(r.statusCode, 200);
   assert.strictEqual(r.body.document.id, 'doc-row');
-  const b = setup({ snapshot: snap, storageFails: true });
-  assert.strictEqual((await b.call('POST', { as: 'admin', body: { save: true } })).statusCode, 502);
-  const c = setup({ snapshot: snap, jnFails: true });
-  assert.strictEqual((await c.call('POST', { as: 'admin', body: { jn: true } })).statusCode, 502);
-  const d = setup({ snapshot: snap });
+  const b = setup({ storageFails: true });
+  assert.strictEqual((await b.call('POST', { as: 'admin', body: { save: true, drylog: drylog() } })).statusCode, 502);
+  const c = setup({ jnFails: true });
+  assert.strictEqual((await c.call('POST', { as: 'admin', body: { jn: true, drylog: drylog() } })).statusCode, 502);
+  const d = setup();
   d.st.job = { ...d.st.job, jn_id: null };
-  assert.strictEqual((await d.call('POST', { as: 'admin', body: { jn: true } })).statusCode, 409);
+  assert.strictEqual((await d.call('POST', { as: 'admin', body: { jn: true, drylog: drylog() } })).statusCode, 409);
 });
 
 test('mitigation report renders with or without a snapshot', async () => {

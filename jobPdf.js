@@ -39,7 +39,8 @@ const crypto = require('crypto');
 const { uuidRe } = require('./noteReader');
 const { signFileLink, verifyFileLink, contentDisposition, LINK_TTL_SECS } = require('./jobFiles');
 const K = require('./pdfKit');
-const { dryingLogModel, renderDryingLogPdf, validateDryingLog, summaryLine } = require('./dryingLogPdf');
+const { dryingLogModel, validateDryingLog } = require('./dryingLogPdf');
+const { renderDrylogPdf, validateDrylog, drylogSummary } = require('./drylogPdf');
 const { renderMitigationReportPdf } = require('./mitigationReportPdf');
 const { renderEstimatePdf } = require('./estimatePdf');
 const P = require('./estimatePricing');
@@ -96,7 +97,7 @@ const todayCentral = (now) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Amer
 
 module.exports = function mountJobPdf(app, deps) {
   const {
-    requireAuth, loadActor, sbGet, sbInsert, jnUploadFile, jnAddNote, locationLogoUrl, logoPngFromUrl,
+    requireAuth, loadActor, sbGet, sbInsert, jnUploadFile, jnAddNote, locationLogoUrl, logoPngFromUrl, jnDownloadFile = null,
     SUPABASE_URL, SUPABASE_SERVICE_KEY, FILE_LINK_SECRET, fetchFn = (...a) => fetch(...a), sharp = null, now = () => new Date(),
   } = deps;
   const enc = encodeURIComponent;
@@ -222,19 +223,53 @@ module.exports = function mountJobPdf(app, deps) {
   // ── Per-kind render ───────────────────────────────────────────────────────
   class HttpError extends Error { constructor(status, body) { super(typeof body === 'string' ? body : body.error || 'error'); this.status = status; this.body = typeof body === 'string' ? { error: body } : body; } }
 
-  async function renderDryingLog({ job, location, logoPng, p, body }) {
-    const snap = await loadSnapshot(job.id, p.version);
-    let logData = snap ? snap.drying_log : null;
-    if (!logData) {
-      if (!body || !body.drying_log) throw new HttpError(409, { error: 'This job has no scope sheet snapshot yet — generate one on the Scope tab, or send the drying log in the request body.', needs_drying_log: true });
-      const err = validateDryingLog(body.drying_log);
-      if (err) throw new HttpError(400, { error: `Bad drying_log: ${err}` });
-      logData = body.drying_log;
-    }
-    const model = dryingLogModel(logData);
-    const buf = await renderDryingLogPdf({ model, job, location, logoPng });
-    const date = model.summary.last_date || todayCentral(now());
-    return { buf, filename: filenameFor('drying-log', job, { date }), note: `Drying log attached: ${summaryLine(model)}.`, meta: { snapshot_version: snap ? snap.version : null } };
+  /**
+   * Room photos for the drying log: "jn:<file id>" from JobNimbus, anything
+   * else by URL (DryOps uploads). Resized with sharp; without sharp the PDF
+   * prints without photos. A photo that fails is skipped, never fatal.
+   */
+  async function loadDrylogPhotos(data) {
+    const out = new Map();
+    if (!sharp) return out;
+    const srcs = [...new Set(data.rooms.flatMap((r) => (r.photos || []).map((p) => p.src)).filter(Boolean))].slice(0, PHOTO_CAP);
+    let next = 0, failed = 0;
+    await Promise.all(Array.from({ length: 4 }, async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= srcs.length) break;
+        const src = srcs[i];
+        try {
+          let raw;
+          if (src.startsWith('jn:')) {
+            if (!jnDownloadFile) throw new Error('no JobNimbus download');
+            raw = await jnDownloadFile(src.slice(3));
+          } else {
+            const r = await fetchFn(src);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            raw = Buffer.from(await r.arrayBuffer());
+          }
+          const img = sharp(raw).rotate().resize({ width: PHOTO_PX, height: PHOTO_PX, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 78, mozjpeg: true });
+          const buf = await img.toBuffer();
+          const meta = await sharp(buf).metadata();
+          out.set(src, { buf, w: meta.width || 4, h: meta.height || 3 });
+        } catch (e) { failed++; if (failed <= 3) warn('drylog photo skipped', src, e.message); }
+      }
+    }));
+    return out;
+  }
+
+  // The drying log prints what the page shows: the body carries the log
+  // (DryOps lib/drylog/model.ts buildDrylogData); nothing is read from a
+  // snapshot, so a GET without a cached render has nothing to print.
+  async function renderDryingLog({ job, location, logoPng, body }) {
+    if (!body || !body.drylog) throw new HttpError(409, { error: 'Open the Drying log section and download from there — the PDF prints the log as the page shows it.', needs_drying_log: true });
+    const err = validateDrylog(body.drylog);
+    if (err) throw new HttpError(400, { error: `Bad drylog: ${err}` });
+    const data = body.drylog;
+    const photos = await loadDrylogPhotos(data);
+    const buf = await renderDrylogPdf({ data, job, location, logoPng, photos, generated: now() });
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(data.dateEnd || '')) ? data.dateEnd : todayCentral(now());
+    return { buf, filename: filenameFor('drying-log', job, { date }), note: `Drying log attached: ${drylogSummary(data)}.`, meta: { days: data.days, rooms: data.rooms.length, photos: photos.size } };
   }
 
   async function renderMitigation({ job, location, logoPng, p, body }) {
