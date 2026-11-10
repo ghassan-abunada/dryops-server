@@ -67,19 +67,38 @@ async function deliver(channel, msg) {
   return channel.kind === 'telegram' ? sendTelegram(cfg, msg) : channel.kind === 'slack' ? sendSlack(cfg, msg) : { ok: false, error: 'Unknown channel kind' };
 }
 
-// Active channels for a location (plus company-wide ones with location_id
-// null) subscribed to ANY of `events`. A Demo location (the App Review
-// account's, location_type 'Demo') never reaches company-wide channels.
+// The locations a channel sends for: its `location_ids` list, else the older
+// single `location_id`; null = company-wide (every location).
+function channelLocationIds(ch) {
+  const ids = Array.isArray(ch.location_ids) ? ch.location_ids.filter(Boolean).map(String) : [];
+  if (ids.length) return ids;
+  return ch.location_id ? [String(ch.location_id)] : null;
+}
+
+// Active channels for a location (one channel may list several locations in
+// `location_ids`; company-wide ones have no location at all) subscribed to
+// ANY of `events`. A Demo location (the App Review account's, location_type
+// 'Demo') never reaches company-wide channels. Until `location_ids` exists
+// (DryOps supabase/add_channel_locations.sql) the first query fails and the
+// lookup falls back to the single `location_id` column.
 async function loadChannels(sbGet, events, locationId) {
   const evs = (Array.isArray(events) ? events : [events]).filter(Boolean);
   if (!evs.length) return [];
   const evFilter = evs.length === 1 ? `events.cs.{${evs[0]}}` : `or(${evs.map((e) => `events.cs.{${e}}`).join(',')})`;
-  const locFilter = locationId ? `or(location_id.is.null,location_id.eq.${encodeURIComponent(String(locationId))})` : 'location_id.is.null';
-  const rows = await sbGet(`notification_channels?active=eq.true&and=(${evFilter},${locFilter})&select=id,kind,name,config,location_id`);
+  const loc = locationId ? encodeURIComponent(String(locationId)) : null;
+  const multiFilter = loc ? `or(location_id.is.null,location_id.eq.${loc},location_ids.cs.{${loc}})` : 'location_id.is.null';
+  const singleFilter = loc ? `or(location_id.is.null,location_id.eq.${loc})` : 'location_id.is.null';
+  let rows = await sbGet(`notification_channels?active=eq.true&and=(${evFilter},${multiFilter})&select=id,kind,name,config,location_id,location_ids`);
+  if (!Array.isArray(rows)) rows = await sbGet(`notification_channels?active=eq.true&and=(${evFilter},${singleFilter})&select=id,kind,name,config,location_id`);
   if (!Array.isArray(rows)) return [];
-  if (locationId && rows.some((r) => r.location_id == null)) {
-    const loc = await sbGet(`locations?id=eq.${encodeURIComponent(String(locationId))}&select=location_type`);
-    if (Array.isArray(loc) && loc[0] && loc[0].location_type === 'Demo') return rows.filter((r) => r.location_id != null);
+  // The query is a superset: keep a channel only when its own list covers this location.
+  rows = rows.filter((r) => {
+    const ids = channelLocationIds(r);
+    return ids == null || (locationId != null && ids.includes(String(locationId)));
+  });
+  if (locationId && rows.some((r) => channelLocationIds(r) == null)) {
+    const l = await sbGet(`locations?id=eq.${loc}&select=location_type`);
+    if (Array.isArray(l) && l[0] && l[0].location_type === 'Demo') return rows.filter((r) => channelLocationIds(r) != null);
   }
   return rows;
 }
@@ -97,4 +116,4 @@ async function notifyChannels({ sbGet, events, locationId, msg, log }) {
   return sent;
 }
 
-module.exports = { sendTelegram, sendSlack, deliver, loadChannels, notifyChannels, escHtml };
+module.exports = { sendTelegram, sendSlack, deliver, loadChannels, channelLocationIds, notifyChannels, escHtml };

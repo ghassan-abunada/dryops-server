@@ -6,6 +6,7 @@ const { readCallrailCall, describeBody: describeCallrailBody } = require('./call
 const jnScope = require('./jnScope');
 const { descriptionCol } = require('./jobSync');
 const { storageCols } = require('./storage');
+const jobPdf = require('./jobPdf');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -83,6 +84,9 @@ app.use((req, res, next) => {
 
 // ── Serve static files ────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
+// The job PDF routes may carry a whole drying log in the body (jobPdf.js);
+// a parser bound to that path runs first so the global 2 MB limit skips it.
+app.use(jobPdf.JSON_LIMIT_PATH, express.json({ limit: jobPdf.JSON_LIMIT }));
 app.use(express.json({ limit: '2mb' }));
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
@@ -7179,6 +7183,17 @@ require('./storage')(app, {
 require('./jobFiles')(app, {
   sbGet, jnListJobFiles, requireAuth, loadActor: intake.loadActor, loadJnScopeProfile,
   JN_BASE, JN_TOKEN,
+  FILE_LINK_SECRET: (process.env.FILE_LINK_SECRET || JN_WEBHOOK_TOKEN || '').trim(),
+});
+
+// Job PDFs: drying log, mitigation report, estimate, invoice (GET / POST
+// /jobs/:id/pdf/:kind; jobPdf.js). Renders with pdfkit from the drying log
+// the page sends (drylogPdf.js), scope_sheets, rooms / materials / equipment,
+// photos and estimate_docs; can save to the
+// documents bucket, upload to the job's JobNimbus files and post a note.
+jobPdf(app, {
+  requireAuth, loadActor: intake.loadActor, sbGet, sbInsert, jnUploadFile, jnAddNote, locationLogoUrl, logoPngFromUrl, jnDownloadFile,
+  SUPABASE_URL, SUPABASE_SERVICE_KEY, sharp,
   FILE_LINK_SECRET: (process.env.FILE_LINK_SECRET || JN_WEBHOOK_TOKEN || '').trim(),
 });
 

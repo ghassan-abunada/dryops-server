@@ -1,0 +1,81 @@
+{
+  "v": 1,
+  "job": { "id": "11111111-1111-4111-8111-111111111111", "name": "Delgado, Maria (DAL - MIT)", "address": "1600 Sara Ln, Richardson, TX 75081" },
+  "dry_standard_note": "Dry standard per material from an unaffected area at inspection; 16% when not recorded.",
+  "days": [
+    {
+      "date": "2026-06-10", "visit_id": "v-insp", "visit_kind": "inspection",
+      "outside": { "temp_f": 91, "rh": 48, "gpp": 108 },
+      "rooms": [
+        {
+          "room_id": "r-kitchen", "name": "Kitchen",
+          "reading": { "temp_f": 78, "rh": 62, "gpp": 90 },
+          "dehu_outlets": [],
+          "materials": [
+            { "material_id": "m-drywall", "type": "Drywall", "mc": 32.5, "dry_standard_mc": 14, "dry": false, "delta": null },
+            { "material_id": "m-baseboard", "type": "Baseboard", "mc": 28, "dry_standard_mc": 12, "dry": false, "delta": null }
+          ],
+          "equipment": [{ "type": "Air Mover", "qty": 4 }, { "type": "Dehumidifier", "qty": 1 }]
+        },
+        {
+          "room_id": "r-hall", "name": "Hallway",
+          "reading": { "temp_f": 77, "rh": 60, "gpp": 86 },
+          "dehu_outlets": [],
+          "materials": [
+            { "material_id": "m-subfloor", "type": "Subfloor", "mc": 22, "dry_standard_mc": null, "dry": false, "delta": null }
+          ],
+          "equipment": [{ "type": "Air Mover", "qty": 2 }]
+        }
+      ]
+    },
+    {
+      "date": "2026-06-11", "visit_id": "v-mon1", "visit_kind": "monitor",
+      "outside": { "temp_f": 89, "rh": 50, "gpp": 104 },
+      "rooms": [
+        {
+          "room_id": "r-kitchen", "name": "Kitchen",
+          "reading": { "temp_f": 82, "rh": 40, "gpp": 66 },
+          "dehu_outlets": [{ "temp_f": 96, "rh": 18, "gpp": 46 }],
+          "materials": [
+            { "material_id": "m-drywall", "type": "Drywall", "mc": 21.1, "dry_standard_mc": 14, "dry": false, "delta": 11.4 },
+            { "material_id": "m-baseboard", "type": "Baseboard", "mc": 15, "dry_standard_mc": 12, "dry": false, "delta": 13 }
+          ],
+          "equipment": [{ "type": "Air Mover", "qty": 4 }, { "type": "Dehumidifier", "qty": 1 }]
+        },
+        {
+          "room_id": "r-hall", "name": "Hallway",
+          "reading": { "temp_f": 81, "rh": 42, "gpp": 68 },
+          "dehu_outlets": [],
+          "materials": [],
+          "equipment": [{ "type": "Air Mover", "qty": 2 }]
+        }
+      ]
+    },
+    {
+      "date": "2026-06-12", "visit_id": "v-close", "visit_kind": "closeout",
+      "outside": null,
+      "rooms": [
+        {
+          "room_id": "r-kitchen", "name": "Kitchen",
+          "reading": { "temp_f": 80, "rh": 38, "gpp": 60 },
+          "dehu_outlets": [],
+          "materials": [
+            { "material_id": "m-drywall", "type": "Drywall", "mc": 13.5, "dry_standard_mc": 14, "dry": true, "delta": 7.6 },
+            { "material_id": "m-baseboard", "type": "Baseboard", "mc": 11, "dry_standard_mc": 12, "dry": true, "delta": 4 }
+          ],
+          "equipment": []
+        },
+        {
+          "room_id": "r-hall", "name": "Hallway",
+          "reading": { "temp_f": 79, "rh": 40, "gpp": 62 },
+          "dehu_outlets": [],
+          "materials": [
+            { "material_id": "m-subfloor", "type": "Subfloor", "mc": 14, "dry_standard_mc": null, "dry": true, "delta": 8 }
+          ],
+          "equipment": []
+        }
+      ]
+    }
+  ],
+  "summary": { "first_date": "2026-06-10", "last_date": "2026-06-12", "days": 3, "all_dry": true }
+}
