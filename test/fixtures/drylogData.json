@@ -1,0 +1,285 @@
+{
+  "client": "Jane Roe",
+  "claim": "CLM-77",
+  "address": "9 Elm St, Dallas, TX",
+  "insurer": "State Farm",
+  "dateLoss": "2026-08-10",
+  "dateStart": "2026-08-12",
+  "dateEnd": "2026-08-18",
+  "demoDate": "2026-08-13",
+  "companyName": "A1 Restoration",
+  "days": 7,
+  "dateLabels": [
+    "08/12",
+    "08/13",
+    "08/14",
+    "08/15",
+    "08/16",
+    "08/17",
+    "08/18"
+  ],
+  "rooms": [
+    {
+      "key": "room-1",
+      "name": "Kitchen",
+      "days": 6,
+      "dateStart": "2026-08-13",
+      "dateEnd": "2026-08-18",
+      "dateLabels": [
+        "08/13",
+        "08/14",
+        "08/15",
+        "08/16",
+        "08/17",
+        "08/18"
+      ],
+      "custom": true,
+      "tempF": 78,
+      "rh": 60,
+      "gpp": "86.1",
+      "dp": "63",
+      "dailyPsychro": [
+        {
+          "tempF": 78,
+          "rh": 60,
+          "gpp": 86.1,
+          "dpF": 63
+        },
+        {
+          "tempF": 76.6,
+          "rh": 56,
+          "gpp": 76.5,
+          "dpF": 59.8
+        },
+        {
+          "tempF": 75.2,
+          "rh": 52,
+          "gpp": 67.7,
+          "dpF": 56.4
+        },
+        {
+          "tempF": 73.8,
+          "rh": 48,
+          "gpp": 59.5,
+          "dpF": 52.9
+        },
+        {
+          "tempF": 72.4,
+          "rh": 44,
+          "gpp": 51.9,
+          "dpF": 49.3
+        },
+        {
+          "tempF": 71,
+          "rh": 40,
+          "gpp": 45,
+          "dpF": 45.5
+        }
+      ],
+      "materials": [
+        {
+          "key": "mat-drywall",
+          "material": "Drywall",
+          "initialMC": 40,
+          "finalMC": 12,
+          "demoed": true,
+          "demoDay": 3,
+          "startDay": null,
+          "dryStd": 15,
+          "seedOffset": 0,
+          "anchors": null,
+          "projection": [
+            {
+              "day": 1,
+              "mc": 40,
+              "demoed": false,
+              "anchored": false
+            },
+            {
+              "day": 2,
+              "mc": 39,
+              "demoed": false,
+              "anchored": false
+            },
+            {
+              "day": 3,
+              "mc": null,
+              "demoed": true
+            },
+            {
+              "day": 4,
+              "mc": null,
+              "afterDemo": true
+            },
+            {
+              "day": 5,
+              "mc": null,
+              "afterDemo": true
+            },
+            {
+              "day": 6,
+              "mc": null,
+              "afterDemo": true
+            }
+          ]
+        },
+        {
+          "key": "mat-studs",
+          "material": "Studs",
+          "initialMC": 35,
+          "finalMC": null,
+          "demoed": false,
+          "demoDay": null,
+          "startDay": 3,
+          "dryStd": 19,
+          "seedOffset": 1,
+          "anchors": {
+            "1": 33,
+            "3": 28
+          },
+          "projection": [
+            {
+              "day": 1,
+              "mc": null,
+              "notStarted": true
+            },
+            {
+              "day": 2,
+              "mc": null,
+              "notStarted": true
+            },
+            {
+              "day": 3,
+              "mc": 35,
+              "demoed": false,
+              "anchored": false
+            },
+            {
+              "day": 4,
+              "mc": 28,
+              "demoed": false,
+              "anchored": true
+            },
+            {
+              "day": 5,
+              "mc": 26,
+              "demoed": false,
+              "anchored": false
+            },
+            {
+              "day": 6,
+              "mc": 18,
+              "demoed": false,
+              "anchored": false
+            }
+          ]
+        }
+      ],
+      "equipment": [
+        {
+          "type": "Dehumidifier",
+          "qty": 2,
+          "label": ""
+        },
+        {
+          "type": "Other",
+          "qty": 1,
+          "label": "Injectidry"
+        }
+      ],
+      "notes": "Toe-kick still wet.",
+      "photos": [
+        {
+          "id": "p1",
+          "src": "jn:ph-77",
+          "caption": null
+        }
+      ]
+    },
+    {
+      "key": "room-2",
+      "name": "Hall",
+      "days": 7,
+      "dateStart": "2026-08-12",
+      "dateEnd": "2026-08-18",
+      "dateLabels": [
+        "08/12",
+        "08/13",
+        "08/14",
+        "08/15",
+        "08/16",
+        "08/17",
+        "08/18"
+      ],
+      "custom": false,
+      "tempF": null,
+      "rh": null,
+      "gpp": null,
+      "dp": null,
+      "dailyPsychro": [],
+      "materials": [
+        {
+          "key": "mat-hall",
+          "material": "Hardwood",
+          "initialMC": 28,
+          "finalMC": 11,
+          "demoed": false,
+          "demoDay": null,
+          "startDay": null,
+          "dryStd": 12,
+          "seedOffset": 100,
+          "anchors": {
+            "2": 22
+          },
+          "projection": [
+            {
+              "day": 1,
+              "mc": 28,
+              "demoed": false,
+              "anchored": false
+            },
+            {
+              "day": 2,
+              "mc": 23,
+              "demoed": false,
+              "anchored": false
+            },
+            {
+              "day": 3,
+              "mc": 22,
+              "demoed": false,
+              "anchored": true
+            },
+            {
+              "day": 4,
+              "mc": 19,
+              "demoed": false,
+              "anchored": false
+            },
+            {
+              "day": 5,
+              "mc": 19,
+              "demoed": false,
+              "anchored": false
+            },
+            {
+              "day": 6,
+              "mc": 12,
+              "demoed": false,
+              "anchored": false
+            },
+            {
+              "day": 7,
+              "mc": 11,
+              "demoed": false,
+              "anchored": false
+            }
+          ]
+        }
+      ],
+      "equipment": [],
+      "notes": "",
+      "photos": []
+    }
+  ]
+}

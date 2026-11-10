@@ -1,0 +1,3310 @@
+{
+ "version": "2026-10-31",
+ "category_label": {
+  "WTR": "WATER EXTRACTION & REMEDIATION",
+  "DMO": "GENERAL DEMOLITION",
+  "CLN": "CLEANING",
+  "HMR": "HAZARDOUS MATERIAL REMEDIATION",
+  "CON": "CONTENT MANIPULATION",
+  "CAB": "CABINETRY",
+  "ELE": "ELECTRICAL",
+  "PLM": "PLUMBING",
+  "APP": "APPLIANCES",
+  "FNC": "FINISH CARPENTRY / TRIMWORK",
+  "DOR": "DOORS",
+  "FCC": "FLOOR COVERING - CARPET",
+  "FCW": "FLOOR COVERING - WOOD",
+  "FCT": "FLOOR COVERING - CERAMIC TILE",
+  "DRY": "DRYWALL",
+  "INS": "INSULATION",
+  "WDT": "WINDOW TREATMENT",
+  "ACT": "ACOUSTICAL TREATMENTS"
+ },
+ "group_label": {
+  "general": "GENERAL",
+  "extraction": "",
+  "detach": "DETACH",
+  "demo": "DEMO",
+  "equipment": "EQUIPMENT",
+  "sanitize": "SANITIZE"
+ },
+ "room_groups": [
+  "extraction",
+  "detach",
+  "demo",
+  "equipment",
+  "sanitize"
+ ],
+ "rows": [
+  {
+   "id": "emergency_call",
+   "family": "emergency_call",
+   "desc": "Emergency service call - during business hours",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 47
+  },
+  {
+   "id": "emergency_call.ah",
+   "family": "emergency_call",
+   "desc": "Emergency service call - after business hours",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": true,
+   "seen": 47
+  },
+  {
+   "id": "setup_monitoring",
+   "family": "setup_monitoring",
+   "desc": "Equipment setup, take down, and monitoring (hourly charge)",
+   "unit": "HR",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 113
+  },
+  {
+   "id": "setup_monitoring.ah",
+   "family": "setup_monitoring",
+   "desc": "Equip. setup, take down & monitoring - after hrs",
+   "unit": "HR",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": true,
+   "seen": 20
+  },
+  {
+   "id": "content_manipulation",
+   "family": "content_manipulation",
+   "desc": "Content Manipulation charge - per hour",
+   "unit": "HR",
+   "act": "+",
+   "cat": "CON",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 112,
+   "catSeen": true
+  },
+  {
+   "id": "content_manipulation.ah",
+   "family": "content_manipulation",
+   "desc": "Content Manipulation charge - per hour - after hours",
+   "unit": "HR",
+   "act": "+",
+   "cat": "CON",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": true,
+   "seen": 16,
+   "catSeen": true
+  },
+  {
+   "id": "block_pad_furniture",
+   "family": "block_pad_furniture",
+   "desc": "Block and pad furniture in room",
+   "unit": "EA",
+   "act": "+",
+   "cat": "CON",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 0
+  },
+  {
+   "id": "haul_debris",
+   "family": "haul_debris",
+   "desc": "Haul debris - per pickup truck load - including dump fees",
+   "unit": "EA",
+   "act": "-",
+   "cat": "DMO",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 90
+  },
+  {
+   "id": "dumpster_40",
+   "family": "dumpster_40",
+   "desc": "Dumpster load - Approx. 40 yards, 7-8 tons of debris",
+   "unit": "EA",
+   "act": "+",
+   "cat": "DMO",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 1
+  },
+  {
+   "id": "dumpster_12",
+   "family": "dumpster_12",
+   "desc": "Dumpster load - Approx. 12 yards, 1-3 tons of debris",
+   "unit": "EA",
+   "act": "+",
+   "cat": "DMO",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 0
+  },
+  {
+   "id": "equipment_decon",
+   "family": "equipment_decon",
+   "desc": "Equipment decontamination charge - per piece of equipment",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 42
+  },
+  {
+   "id": "ppe_gloves",
+   "family": "ppe_gloves",
+   "desc": "Personal protective gloves - Heavy duty (per pair)",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 38
+  },
+  {
+   "id": "ppe",
+   "family": "ppe",
+   "desc": "Add for personal protective equipment (hazardous cleanup)",
+   "unit": "EA",
+   "act": "+",
+   "cat": "HMR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 54
+  },
+  {
+   "id": "ppe_heavy",
+   "family": "ppe_heavy",
+   "desc": "Add for personal protective equipment - Heavy duty",
+   "unit": "EA",
+   "act": "+",
+   "cat": "HMR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 6
+  },
+  {
+   "id": "respirator_half",
+   "family": "respirator_half",
+   "desc": "Respirator - Half face - multi-purpose resp. (per day)",
+   "unit": "DA",
+   "act": "+",
+   "cat": "HMR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 7
+  },
+  {
+   "id": "respirator_full",
+   "family": "respirator_full",
+   "desc": "Respirator - Full face - multi-purpose resp. (per day)",
+   "unit": "DA",
+   "act": "+",
+   "cat": "HMR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 0
+  },
+  {
+   "id": "respirator_cartridge",
+   "family": "respirator_cartridge",
+   "desc": "Respirator cartridge - HEPA only (per pair)",
+   "unit": "EA",
+   "act": "+",
+   "cat": "HMR",
+   "group": "general",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 7
+  },
+  {
+   "id": "hepa_filter_nafan",
+   "family": "hepa_filter_nafan",
+   "desc": "Add for HEPA filter (for negative air exhaust fan)",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 36
+  },
+  {
+   "id": "hepa_filter_vacuum",
+   "family": "hepa_filter_vacuum",
+   "desc": "Add for HEPA filter (for canister/backpack vacuums)",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 22
+  },
+  {
+   "id": "carbon_filter",
+   "family": "carbon_filter",
+   "desc": "Carbon vapor filter (for air scrubber) - 16\" x 16\"",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 6
+  },
+  {
+   "id": "nafan",
+   "family": "nafan",
+   "desc": "Negative air fan/Air scrubber (24 hr period) - No monit.",
+   "unit": "DA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 87,
+   "formula": "units*days"
+  },
+  {
+   "id": "ducting_large",
+   "family": "ducting_large",
+   "desc": "Ducting - lay-flat - Large",
+   "unit": "LF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 6
+  },
+  {
+   "id": "ducting",
+   "family": "ducting",
+   "desc": "Ducting - lay-flat",
+   "unit": "LF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 2
+  },
+  {
+   "id": "containment",
+   "family": "containment",
+   "desc": "Containment Barrier/Airlock/Decon. Chamber",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 23
+  },
+  {
+   "id": "zipper_heavy",
+   "family": "zipper_heavy",
+   "desc": "Peel & seal zipper - heavy duty",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 7
+  },
+  {
+   "id": "zipper",
+   "family": "zipper",
+   "desc": "Peel & seal zipper",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 0
+  },
+  {
+   "id": "floor_prot_cardboard",
+   "family": "floor_prot_cardboard",
+   "desc": "Floor protection - cardboard and tape",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 81,
+   "formula": "F"
+  },
+  {
+   "id": "floor_prot_paper",
+   "family": "floor_prot_paper",
+   "desc": "Floor protection - heavy paper and tape",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 16,
+   "formula": "F"
+  },
+  {
+   "id": "floor_prot_film",
+   "family": "floor_prot_film",
+   "desc": "Floor protection - self-adhesive plastic film",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 8,
+   "formula": "F"
+  },
+  {
+   "id": "floor_prot_6mil",
+   "family": "floor_prot_6mil",
+   "desc": "Floor protection - plastic and tape - 6 mil - double layer",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 7,
+   "formula": "F"
+  },
+  {
+   "id": "floor_prot_10mil",
+   "family": "floor_prot_10mil",
+   "desc": "Floor protection - plastic and tape - 10 mil",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 6,
+   "formula": "F"
+  },
+  {
+   "id": "floor_prot_cloth",
+   "family": "floor_prot_cloth",
+   "desc": "Floor protection - cloth - skid resistant, breathable",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4,
+   "formula": "F"
+  },
+  {
+   "id": "protect_plastic",
+   "family": "protect_plastic",
+   "desc": "Protect - Cover with plastic",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 11
+  },
+  {
+   "id": "supervisory",
+   "family": "supervisory",
+   "desc": "Hazardous Waste/Mold Cleaning- Supervisory/Admin- per hour",
+   "unit": "HR",
+   "act": "+",
+   "cat": "HMR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 12
+  },
+  {
+   "id": "hmr_labor_min",
+   "family": "hmr_labor_min",
+   "desc": "Hazardous waste/mold rem. labor min",
+   "unit": "EA",
+   "act": "+",
+   "cat": "HMR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4
+  },
+  {
+   "id": "hazardous_hauling",
+   "family": "hazardous_hauling",
+   "desc": "Hazardous waste hauling & disposal - (Bid Item)",
+   "unit": "EA",
+   "act": "+",
+   "cat": "HMR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 6
+  },
+  {
+   "id": "hazardous_bag",
+   "family": "hazardous_bag",
+   "desc": "Plastic bag - used for hazardous waste cleanup - Large",
+   "unit": "EA",
+   "act": "+",
+   "cat": "HMR",
+   "group": "general",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 3
+  },
+  {
+   "id": "ozone",
+   "family": "ozone",
+   "desc": "Deodorize building - Ozone & hydroxyl treatment",
+   "unit": "CF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "general",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 1
+  },
+  {
+   "id": "lift_carpet",
+   "family": "lift_carpet",
+   "desc": "Lift carpet for drying",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 0,
+   "formula": "F"
+  },
+  {
+   "id": "lift_carpet.ah",
+   "family": "lift_carpet",
+   "desc": "Lift carpet for drying - after hours",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": true,
+   "seen": 22,
+   "formula": "F"
+  },
+  {
+   "id": "labor_min_plumbing",
+   "family": "labor_min_plumbing",
+   "desc": "Plumbing labor minimum",
+   "unit": "EA",
+   "act": "+",
+   "cat": "PLM",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 7
+  },
+  {
+   "id": "labor_min_electrical",
+   "family": "labor_min_electrical",
+   "desc": "Electrical labor minimum",
+   "unit": "EA",
+   "act": "+",
+   "cat": "ELE",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 3
+  },
+  {
+   "id": "labor_min_finish",
+   "family": "labor_min_finish",
+   "desc": "Finish carpentry labor minimum",
+   "unit": "EA",
+   "act": "+",
+   "cat": "FNC",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 6
+  },
+  {
+   "id": "labor_min_cabinetry",
+   "family": "labor_min_cabinetry",
+   "desc": "Cabinetry labor minimum",
+   "unit": "EA",
+   "act": "+",
+   "cat": "CAB",
+   "group": "general",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 2
+  },
+  {
+   "id": "labor_min_floor_cleaning",
+   "family": "labor_min_floor_cleaning",
+   "desc": "Floor cleaning labor minimum",
+   "unit": "EA",
+   "act": "+",
+   "cat": "CLN",
+   "group": "general",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 3
+  },
+  {
+   "id": "extract_carpet",
+   "family": "extract_carpet",
+   "desc": "Water extraction from carpeted floor",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    1
+   ],
+   "ah": false,
+   "seen": 3,
+   "formula": "F"
+  },
+  {
+   "id": "extract_carpet.ah",
+   "family": "extract_carpet",
+   "desc": "Water extraction from carpeted floor- after hours",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    1
+   ],
+   "ah": true,
+   "seen": 4,
+   "formula": "F"
+  },
+  {
+   "id": "extract_carpet.c2",
+   "family": "extract_carpet",
+   "desc": "Water extraction from carpeted floor - Category 2 water",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    2
+   ],
+   "ah": false,
+   "seen": 0,
+   "formula": "F"
+  },
+  {
+   "id": "extract_carpet.c2ah",
+   "family": "extract_carpet",
+   "desc": "Water extract from carpeted floor - Cat 2 wtr- after hours",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    2
+   ],
+   "ah": true,
+   "seen": 7,
+   "formula": "F"
+  },
+  {
+   "id": "extract_carpet.c3",
+   "family": "extract_carpet",
+   "desc": "Water extraction from carpeted floor - Category 3 water",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 0,
+   "formula": "F"
+  },
+  {
+   "id": "extract_carpet.c3ah",
+   "family": "extract_carpet",
+   "desc": "Water extract from carpeted floor - Cat 3 wtr- after hours",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    3
+   ],
+   "ah": true,
+   "seen": 6,
+   "formula": "F"
+  },
+  {
+   "id": "extract_carpet_heavy",
+   "family": "extract_carpet_heavy",
+   "desc": "Water extraction from carpeted floor - Heavy",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    1
+   ],
+   "ah": false,
+   "seen": 8,
+   "formula": "F"
+  },
+  {
+   "id": "extract_carpet_heavy.ah",
+   "family": "extract_carpet_heavy",
+   "desc": "Water extraction from carpeted floor - Heavy - after hours",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    1
+   ],
+   "ah": true,
+   "seen": 6,
+   "formula": "F"
+  },
+  {
+   "id": "extract_carpet_heavy.c2",
+   "family": "extract_carpet_heavy",
+   "desc": "Water extraction from carpeted floor - Cat 2 water - Heavy",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    2
+   ],
+   "ah": false,
+   "seen": 0,
+   "formula": "F"
+  },
+  {
+   "id": "extract_carpet_heavy.c2ah",
+   "family": "extract_carpet_heavy",
+   "desc": "Water extract carpeted flr - Cat 2 wtr - Heavy- after hrs",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    2
+   ],
+   "ah": true,
+   "seen": 8,
+   "formula": "F"
+  },
+  {
+   "id": "extract_carpet_heavy.c3",
+   "family": "extract_carpet_heavy",
+   "desc": "Water extraction from carpeted floor - Cat 3 water - Heavy",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 4,
+   "formula": "F"
+  },
+  {
+   "id": "extract_hard",
+   "family": "extract_hard",
+   "desc": "Water extraction from hard surface floor",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    1
+   ],
+   "ah": false,
+   "seen": 12,
+   "formula": "F"
+  },
+  {
+   "id": "extract_hard.ah",
+   "family": "extract_hard",
+   "desc": "Water extraction from hard surface floor - after hours",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    1
+   ],
+   "ah": true,
+   "seen": 22,
+   "formula": "F"
+  },
+  {
+   "id": "extract_hard.c2",
+   "family": "extract_hard",
+   "desc": "Water extraction from hard surface floor - Cat 2 water",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    2
+   ],
+   "ah": false,
+   "seen": 3,
+   "formula": "F"
+  },
+  {
+   "id": "extract_hard.c2ah",
+   "family": "extract_hard",
+   "desc": "Water extract from hrd surf flr - Cat 2 wtr - after hours",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    2
+   ],
+   "ah": true,
+   "seen": 6,
+   "formula": "F"
+  },
+  {
+   "id": "extract_hard.c3",
+   "family": "extract_hard",
+   "desc": "Water extraction from hard surface floor - Cat 3 water",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 4,
+   "formula": "F"
+  },
+  {
+   "id": "extract_hard.c3ah",
+   "family": "extract_hard",
+   "desc": "Water extract from hard surf flr - Cat 3 wtr - after hours",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "extraction",
+   "tax": "none",
+   "cats": [
+    3
+   ],
+   "ah": true,
+   "seen": 8,
+   "formula": "F"
+  },
+  {
+   "id": "outlet_cover",
+   "family": "outlet_cover",
+   "desc": "Remove Outlet or switch cover",
+   "unit": "EA",
+   "act": "-",
+   "cat": "ELE",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 146
+  },
+  {
+   "id": "light_fixture",
+   "family": "light_fixture",
+   "desc": "Remove Light fixture",
+   "unit": "EA",
+   "act": "-",
+   "cat": "ELE",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 14
+  },
+  {
+   "id": "register",
+   "family": "register",
+   "desc": "Remove Heat/AC register - Mechanically attached",
+   "unit": "EA",
+   "act": "-",
+   "cat": "WTR",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 18
+  },
+  {
+   "id": "register_reset",
+   "family": "register_reset",
+   "desc": "Heat/AC register - Mechanically attached - Detach & reset",
+   "unit": "EA",
+   "act": "R",
+   "cat": "WTR",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 8
+  },
+  {
+   "id": "blind_1in",
+   "family": "blind_1in",
+   "desc": "Remove Window blind - PVC - 1\" - 14.1 to 20 SF",
+   "unit": "EA",
+   "act": "-",
+   "cat": "WDT",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 10
+  },
+  {
+   "id": "blind_2in",
+   "family": "blind_2in",
+   "desc": "Remove Window blind - PVC - 2\" - 7.1 to 14 SF",
+   "unit": "EA",
+   "act": "-",
+   "cat": "WDT",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4
+  },
+  {
+   "id": "supply_line",
+   "family": "supply_line",
+   "desc": "Remove Plumbing fixture supply line",
+   "unit": "EA",
+   "act": "-",
+   "cat": "PLM",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 30
+  },
+  {
+   "id": "p_trap",
+   "family": "p_trap",
+   "desc": "Remove P-trap assembly - ABS (plastic)",
+   "unit": "EA",
+   "act": "-",
+   "cat": "PLM",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 21
+  },
+  {
+   "id": "p_trap_rr",
+   "family": "p_trap_rr",
+   "desc": "R&R P-trap assembly - ABS (plastic)",
+   "unit": "EA",
+   "act": "&",
+   "cat": "PLM",
+   "group": "detach",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4
+  },
+  {
+   "id": "interior_door",
+   "family": "interior_door",
+   "desc": "Remove Interior door unit",
+   "unit": "EA",
+   "act": "-",
+   "cat": "DOR",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 92
+  },
+  {
+   "id": "interior_door_premium",
+   "family": "interior_door_premium",
+   "desc": "Remove Interior door unit - Premium grade",
+   "unit": "EA",
+   "act": "-",
+   "cat": "DOR",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 13
+  },
+  {
+   "id": "interior_door_detach",
+   "family": "interior_door_detach",
+   "desc": "Interior door - Detach",
+   "unit": "EA",
+   "act": "+",
+   "cat": "DOR",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4
+  },
+  {
+   "id": "vanity_detach",
+   "family": "vanity_detach",
+   "desc": "Cabinet - vanity and countertop - Detach",
+   "unit": "LF",
+   "act": "+",
+   "cat": "CAB",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 27
+  },
+  {
+   "id": "lower_cabinet_detach",
+   "family": "lower_cabinet_detach",
+   "desc": "Cabinet - lower (base) unit - Detach",
+   "unit": "LF",
+   "act": "+",
+   "cat": "CAB",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 11
+  },
+  {
+   "id": "upper_cabinet_detach",
+   "family": "upper_cabinet_detach",
+   "desc": "Cabinet - upper (wall) unit - Detach",
+   "unit": "LF",
+   "act": "+",
+   "cat": "CAB",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 3
+  },
+  {
+   "id": "countertop_detach",
+   "family": "countertop_detach",
+   "desc": "Countertop - solid surface/granite - Detach",
+   "unit": "SF",
+   "act": "+",
+   "cat": "CAB",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 5
+  },
+  {
+   "id": "sink_single",
+   "family": "sink_single",
+   "desc": "Sink - single basin - Detach",
+   "unit": "EA",
+   "act": "+",
+   "cat": "PLM",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 24
+  },
+  {
+   "id": "sink_double",
+   "family": "sink_double",
+   "desc": "Sink - double basin - Detach",
+   "unit": "EA",
+   "act": "+",
+   "cat": "PLM",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 8
+  },
+  {
+   "id": "toilet_detach",
+   "family": "toilet_detach",
+   "desc": "Toilet - Detach",
+   "unit": "EA",
+   "act": "+",
+   "cat": "PLM",
+   "group": "detach",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 14
+  },
+  {
+   "id": "toilet_reset",
+   "family": "toilet_reset",
+   "desc": "Toilet - Detach & reset",
+   "unit": "EA",
+   "act": "R",
+   "cat": "PLM",
+   "group": "detach",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4
+  },
+  {
+   "id": "dishwasher_detach",
+   "family": "dishwasher_detach",
+   "desc": "Dishwasher - Detach",
+   "unit": "EA",
+   "act": "+",
+   "cat": "APP",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 17
+  },
+  {
+   "id": "dishwasher_reset",
+   "family": "dishwasher_reset",
+   "desc": "Dishwasher - Detach & reset",
+   "unit": "EA",
+   "act": "R",
+   "cat": "APP",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 2
+  },
+  {
+   "id": "refrigerator_detach",
+   "family": "refrigerator_detach",
+   "desc": "Refrigerator - Detach",
+   "unit": "EA",
+   "act": "+",
+   "cat": "APP",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 11
+  },
+  {
+   "id": "washer_detach",
+   "family": "washer_detach",
+   "desc": "Washer/Washing machine - Detach",
+   "unit": "EA",
+   "act": "+",
+   "cat": "APP",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 11
+  },
+  {
+   "id": "dryer_detach",
+   "family": "dryer_detach",
+   "desc": "Dryer - electric - Detach",
+   "unit": "EA",
+   "act": "+",
+   "cat": "APP",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 8
+  },
+  {
+   "id": "range_detach",
+   "family": "range_detach",
+   "desc": "Range - freestanding - electric - Detach",
+   "unit": "EA",
+   "act": "+",
+   "cat": "APP",
+   "group": "detach",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 6
+  },
+  {
+   "id": "baseboard",
+   "family": "baseboard",
+   "desc": "Tear out baseboard",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 286,
+   "formula": "PF"
+  },
+  {
+   "id": "baseboard.ah",
+   "family": "baseboard",
+   "desc": "Tear out baseboard - after hours",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": true,
+   "seen": 21,
+   "formula": "PF"
+  },
+  {
+   "id": "baseboard.c3",
+   "family": "baseboard",
+   "desc": "Tear out baseboard and bag for disposal - up to Cat 3",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 84,
+   "formula": "PF"
+  },
+  {
+   "id": "baseboard_bag",
+   "family": "baseboard_bag",
+   "desc": "Tear out baseboard and bag for disposal",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 20,
+   "formula": "PF"
+  },
+  {
+   "id": "baseboard_bag.c3",
+   "family": "baseboard_bag",
+   "desc": "Tear out baseboard and bag for disposal - up to Cat 3",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 84,
+   "formula": "PF"
+  },
+  {
+   "id": "baseboard_oversized",
+   "family": "baseboard_oversized",
+   "desc": "Tear out oversized or multi-member baseboard",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4,
+   "formula": "PF"
+  },
+  {
+   "id": "baseboard_oversized.ah",
+   "family": "baseboard_oversized",
+   "desc": "Tear out oversized or multi-member baseboard - after hours",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": true,
+   "seen": 5,
+   "formula": "PF"
+  },
+  {
+   "id": "tile_base_addon",
+   "family": "tile_base_addon",
+   "desc": "Add-on for tearing out trim/base from tile/grout",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 2,
+   "formula": "PF"
+  },
+  {
+   "id": "trim",
+   "family": "trim",
+   "desc": "Tear out trim",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 194,
+   "formula": "14*doors"
+  },
+  {
+   "id": "trim.ah",
+   "family": "trim",
+   "desc": "Tear out trim - after hours",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": true,
+   "seen": 14,
+   "formula": "14*doors"
+  },
+  {
+   "id": "trim.c3",
+   "family": "trim",
+   "desc": "Tear out trim and bag for disposal - up to Cat 3",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 66,
+   "formula": "14*doors"
+  },
+  {
+   "id": "trim_bag",
+   "family": "trim_bag",
+   "desc": "Tear out trim and bag for disposal",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 22,
+   "formula": "14*doors"
+  },
+  {
+   "id": "trim_bag.c3",
+   "family": "trim_bag",
+   "desc": "Tear out trim and bag for disposal - up to Cat 3",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 66,
+   "formula": "14*doors"
+  },
+  {
+   "id": "drywall_lf2",
+   "family": "drywall_lf2",
+   "desc": "Tear out wet drywall, cleanup, bag, per LF - up to 2' tall",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 236,
+   "formula": "PF"
+  },
+  {
+   "id": "drywall_lf2.ah",
+   "family": "drywall_lf2",
+   "desc": "Tear out wet drywall, cleanup, bag, per LF - 2' aft hrs",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": true,
+   "seen": 4,
+   "formula": "PF"
+  },
+  {
+   "id": "drywall_lf2.c3",
+   "family": "drywall_lf2",
+   "desc": "Tear out wet drywall, cleanup, bag, per LF - to 2' - Cat 3",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 55,
+   "formula": "PF"
+  },
+  {
+   "id": "drywall_lf4",
+   "family": "drywall_lf4",
+   "desc": "Tear out wet drywall, cleanup, bag, per LF - up to 4' tall",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 1,
+   "formula": "PF"
+  },
+  {
+   "id": "drywall_lf4.c3",
+   "family": "drywall_lf4",
+   "desc": "Tear out wet drywall, cleanup, bag, per LF - to 4' - Cat 3",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 0,
+   "formula": "PF"
+  },
+  {
+   "id": "drywall_sf",
+   "family": "drywall_sf",
+   "desc": "Tear out wet drywall, cleanup, bag for disposal",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 63,
+   "formula": "W"
+  },
+  {
+   "id": "drywall_sf.ah",
+   "family": "drywall_sf",
+   "desc": "Tear out wet drywall, cleanup, bag - after hours",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": true,
+   "seen": 2,
+   "formula": "W"
+  },
+  {
+   "id": "drywall_sf.c3",
+   "family": "drywall_sf",
+   "desc": "Tear out wet drywall, cleanup, bag - Cat 3",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 43,
+   "formula": "W"
+  },
+  {
+   "id": "insulation_lf",
+   "family": "insulation_lf",
+   "desc": "Tear out and bag wet insulation, per LF - to 2' tall",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 62,
+   "formula": "PF"
+  },
+  {
+   "id": "insulation_lf.c3",
+   "family": "insulation_lf",
+   "desc": "Tear out and bag wet insulation, per LF - 2' - Cat 3",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 34,
+   "formula": "PF"
+  },
+  {
+   "id": "insulation_sf",
+   "family": "insulation_sf",
+   "desc": "Tear out and bag wet insulation",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 27,
+   "formula": "W"
+  },
+  {
+   "id": "insulation_sf.ah",
+   "family": "insulation_sf",
+   "desc": "Tear out and bag wet insulation - after hours",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": true,
+   "seen": 4,
+   "formula": "W"
+  },
+  {
+   "id": "insulation_sf.c3",
+   "family": "insulation_sf",
+   "desc": "Tear out and bag wet insulation - Category 3 water",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 40,
+   "formula": "W"
+  },
+  {
+   "id": "carpet",
+   "family": "carpet",
+   "desc": "Tear out wet non-salvageable carpet, cut & bag for disp.",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 72,
+   "formula": "F"
+  },
+  {
+   "id": "carpet.ah",
+   "family": "carpet",
+   "desc": "Tear out wet non-salvage cpt, cut/bag - after hours",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": true,
+   "seen": 5,
+   "formula": "F"
+  },
+  {
+   "id": "carpet.c3",
+   "family": "carpet",
+   "desc": "Tear out wet non-salvageable carpet, cut/bag - Cat 3 water",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 74,
+   "formula": "F"
+  },
+  {
+   "id": "carpet_glued.c3",
+   "family": "carpet_glued",
+   "desc": "Tear out wet non-salv. gluedn. cpt, cut/bag - Cat 3 water",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 6,
+   "formula": "F"
+  },
+  {
+   "id": "pad",
+   "family": "pad",
+   "desc": "Tear out wet carpet pad and bag for disposal",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 72,
+   "formula": "F"
+  },
+  {
+   "id": "pad.ah",
+   "family": "pad",
+   "desc": "Tear out wet carpet pad, cut/bag - after hours",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": true,
+   "seen": 3,
+   "formula": "F"
+  },
+  {
+   "id": "pad.c3",
+   "family": "pad",
+   "desc": "Tear out wet carpet pad, cut/bag - Category 3 water",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 76,
+   "formula": "F"
+  },
+  {
+   "id": "tackless",
+   "family": "tackless",
+   "desc": "Tear out tackless strip and bag for disposal",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 36,
+   "formula": "PF"
+  },
+  {
+   "id": "tackless.ah",
+   "family": "tackless",
+   "desc": "Tear out tackless strip and bag for disposal - after hours",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": true,
+   "seen": 3,
+   "formula": "PF"
+  },
+  {
+   "id": "tackless.c3",
+   "family": "tackless",
+   "desc": "Tear out tackless strip and bag for disposal - Category 3",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 47,
+   "formula": "PF"
+  },
+  {
+   "id": "floating_floor",
+   "family": "floating_floor",
+   "desc": "Tear out non-salv floating floor & bag for disposal",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 65,
+   "formula": "F"
+  },
+  {
+   "id": "floating_floor.c3",
+   "family": "floating_floor",
+   "desc": "Tear out non-salv floating floor & bag - Category 3 water",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 15,
+   "formula": "F"
+  },
+  {
+   "id": "wood_floor",
+   "family": "wood_floor",
+   "desc": "Tear out non-salv solid/eng. wood flr & bag for disposal",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 23,
+   "formula": "F"
+  },
+  {
+   "id": "wood_floor.c3",
+   "family": "wood_floor",
+   "desc": "Tear out non-salv wood floor & bag - Category 3 water",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 7,
+   "formula": "F"
+  },
+  {
+   "id": "wood_glued_addon",
+   "family": "wood_glued_addon",
+   "desc": "Add for tear out wd flr glued down over concrete substrate",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 6,
+   "formula": "F"
+  },
+  {
+   "id": "tile_floor",
+   "family": "tile_floor",
+   "desc": "Tear out non-salvageable tile floor & bag for disposal",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 4,
+   "formula": "F"
+  },
+  {
+   "id": "tile_floor.c3",
+   "family": "tile_floor",
+   "desc": "Tear out non-salvageable tile floor & bag - Cat 3 water",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 15,
+   "formula": "F"
+  },
+  {
+   "id": "tile_slab_addon",
+   "family": "tile_slab_addon",
+   "desc": "Additional labor to remove tile from concrete slab",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 1,
+   "formula": "F"
+  },
+  {
+   "id": "mortar_bed_addon",
+   "family": "mortar_bed_addon",
+   "desc": "Add on to tear out mortar bed for tile",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 6,
+   "formula": "F"
+  },
+  {
+   "id": "underlayment",
+   "family": "underlayment",
+   "desc": "Tear out non-salv underlayment & bag for disposal",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 15,
+   "formula": "F"
+  },
+  {
+   "id": "subfloor",
+   "family": "subfloor",
+   "desc": "Tear out subfloor & bag for disposal",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2
+   ],
+   "ah": false,
+   "seen": 0,
+   "formula": "F"
+  },
+  {
+   "id": "subfloor.c3",
+   "family": "subfloor",
+   "desc": "Tear out subfloor & bag for disposal - Category 3",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    3
+   ],
+   "ah": false,
+   "seen": 6,
+   "formula": "F"
+  },
+  {
+   "id": "toe_kick",
+   "family": "toe_kick",
+   "desc": "Tear out toe kick and bag for disposal",
+   "unit": "LF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 36
+  },
+  {
+   "id": "paneling",
+   "family": "paneling",
+   "desc": "Tear out wet paneling, bag for disposal",
+   "unit": "SF",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4,
+   "formula": "W"
+  },
+  {
+   "id": "acoustic_tile",
+   "family": "acoustic_tile",
+   "desc": "Tear off acoustic ceiling tile (no haul off)",
+   "unit": "SF",
+   "act": "-",
+   "cat": "HMR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 24,
+   "formula": "C"
+  },
+  {
+   "id": "cabinet_lower_tear_out",
+   "family": "cabinet_lower_tear_out",
+   "desc": "Tear out cabinetry - lower (base) units",
+   "unit": "LF",
+   "act": "-",
+   "cat": "CAB",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 19
+  },
+  {
+   "id": "cabinet_vanity_tear_out",
+   "family": "cabinet_vanity_tear_out",
+   "desc": "Tear out cabinetry - vanity",
+   "unit": "LF",
+   "act": "-",
+   "cat": "CAB",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 5
+  },
+  {
+   "id": "cabinet_vanity_top_tear_out",
+   "family": "cabinet_vanity_top_tear_out",
+   "desc": "Tear out cabinetry - vanity and countertop",
+   "unit": "LF",
+   "act": "-",
+   "cat": "CAB",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 11
+  },
+  {
+   "id": "cabinet_full_tear_out",
+   "family": "cabinet_full_tear_out",
+   "desc": "Tear out cabinetry - full height unit",
+   "unit": "LF",
+   "act": "-",
+   "cat": "CAB",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 2
+  },
+  {
+   "id": "countertop_tear_out",
+   "family": "countertop_tear_out",
+   "desc": "Tear out countertop - solid surface/granite",
+   "unit": "SF",
+   "act": "-",
+   "cat": "CAB",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 11
+  },
+  {
+   "id": "countertop_laminate_tear_out",
+   "family": "countertop_laminate_tear_out",
+   "desc": "Tear out countertop - flat laid plastic laminate",
+   "unit": "LF",
+   "act": "-",
+   "cat": "CAB",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 7
+  },
+  {
+   "id": "drill_holes",
+   "family": "drill_holes",
+   "desc": "Drill holes for wall cavity drying",
+   "unit": "EA",
+   "act": "-",
+   "cat": "WTR",
+   "group": "demo",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 8
+  },
+  {
+   "id": "asbestos_encapsulant",
+   "family": "asbestos_encapsulant",
+   "desc": "Apply asbestos fiber encapsulating compound",
+   "unit": "SF",
+   "act": "+",
+   "cat": "HMR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 45
+  },
+  {
+   "id": "asbestos_drywall",
+   "family": "asbestos_drywall",
+   "desc": "Tear off asbestos drywall (no haul off)",
+   "unit": "SF",
+   "act": "-",
+   "cat": "HMR",
+   "group": "demo",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 18,
+   "formula": "W"
+  },
+  {
+   "id": "air_mover",
+   "family": "air_mover",
+   "desc": "Air mover (per 24 hour period) - No monitoring",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "equipment",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 470,
+   "formula": "units*days"
+  },
+  {
+   "id": "dehu_69",
+   "family": "dehu_69",
+   "desc": "Dehumidifier (per 24 hr period)- up to 69 ppd- No monitor.",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "equipment",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4,
+   "formula": "units*days"
+  },
+  {
+   "id": "dehu_70",
+   "family": "dehu_70",
+   "desc": "Dehumidifier (per 24 hr period) - 70-109 ppd - No monitor.",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "equipment",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 61,
+   "formula": "units*days"
+  },
+  {
+   "id": "dehu_110",
+   "family": "dehu_110",
+   "desc": "Dehumidifier (per 24 hr period)- 110-159 ppd - No monitor.",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "equipment",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 190,
+   "formula": "units*days"
+  },
+  {
+   "id": "dehu_160",
+   "family": "dehu_160",
+   "desc": "Dehumidifier (per 24 hr period) - 160+ ppd - No monitor.",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "equipment",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 7,
+   "formula": "units*days"
+  },
+  {
+   "id": "dehu_desiccant",
+   "family": "dehu_desiccant",
+   "desc": "Dehumidifier (per 24 hour period) - Desiccant - No monit.",
+   "unit": "EA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "equipment",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 0,
+   "formula": "units*days"
+  },
+  {
+   "id": "nafan_room",
+   "family": "nafan_room",
+   "desc": "Negative air fan/Air scrubber (24 hr period) - No monit.",
+   "unit": "DA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "equipment",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 87,
+   "formula": "units*days"
+  },
+  {
+   "id": "wood_floor_mat",
+   "family": "wood_floor_mat",
+   "desc": "Wood floor drying extraction mat (per 24 hr prd) No monit.",
+   "unit": "DA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "equipment",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 16,
+   "formula": "units*days"
+  },
+  {
+   "id": "wall_cavity_dryer",
+   "family": "wall_cavity_dryer",
+   "desc": "Wall cavity drying-Inj. type (per 24 hr period) No monit.",
+   "unit": "DA",
+   "act": "+",
+   "cat": "WTR",
+   "group": "equipment",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 0,
+   "formula": "units*days"
+  },
+  {
+   "id": "antimicrobial_floor",
+   "family": "antimicrobial_floor",
+   "desc": "Apply plant-based anti-microbial agent to the floor",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 29,
+   "formula": "F"
+  },
+  {
+   "id": "antimicrobial_part_floor",
+   "family": "antimicrobial_part_floor",
+   "desc": "Apply plant-based anti-microbial agent to part of the floor",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 33
+  },
+  {
+   "id": "antimicrobial_more_floor",
+   "family": "antimicrobial_more_floor",
+   "desc": "Apply plant-based anti-microbial agent to more than the floor",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 279,
+   "formula": "F+2*PF"
+  },
+  {
+   "id": "antimicrobial_floor_perimeter",
+   "family": "antimicrobial_floor_perimeter",
+   "desc": "Apply plant-based anti-microbial agent to the floor perimeter",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 5,
+   "formula": "2*PF"
+  },
+  {
+   "id": "antimicrobial_part_floor_perimeter",
+   "family": "antimicrobial_part_floor_perimeter",
+   "desc": "Apply plant-based anti-microbial agent to part of the floor perimeter",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4
+  },
+  {
+   "id": "antimicrobial_more_floor_perimeter",
+   "family": "antimicrobial_more_floor_perimeter",
+   "desc": "Apply plant-based anti-microbial agent to more than the floor perimeter",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 16,
+   "formula": "2*PF"
+  },
+  {
+   "id": "antimicrobial_surface",
+   "family": "antimicrobial_surface",
+   "desc": "Apply plant-based anti-microbial agent to the surface area",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 62
+  },
+  {
+   "id": "antimicrobial_ceiling",
+   "family": "antimicrobial_ceiling",
+   "desc": "Apply plant-based anti-microbial agent to the ceiling",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 3,
+   "formula": "C"
+  },
+  {
+   "id": "antimicrobial_part_ceiling",
+   "family": "antimicrobial_part_ceiling",
+   "desc": "Apply plant-based anti-microbial agent to part of the ceiling",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4
+  },
+  {
+   "id": "antimicrobial_more_ceiling",
+   "family": "antimicrobial_more_ceiling",
+   "desc": "Apply plant-based anti-microbial agent to more than the ceiling",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4,
+   "formula": "C"
+  },
+  {
+   "id": "antimicrobial_part_walls",
+   "family": "antimicrobial_part_walls",
+   "desc": "Apply plant-based anti-microbial agent to part of the walls",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 2
+  },
+  {
+   "id": "antimicrobial_part_walls_ceiling",
+   "family": "antimicrobial_part_walls_ceiling",
+   "desc": "Apply plant-based anti-microbial agent to part of the walls and ceiling",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 13
+  },
+  {
+   "id": "antimicrobial_more_walls_ceiling",
+   "family": "antimicrobial_more_walls_ceiling",
+   "desc": "Apply plant-based anti-microbial agent to more than the walls and ceiling",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 3,
+   "formula": "WC"
+  },
+  {
+   "id": "hepa_vacuum_detailed",
+   "family": "hepa_vacuum_detailed",
+   "desc": "HEPA Vacuuming - Detailed - (PER SF)",
+   "unit": "SF",
+   "act": "+",
+   "cat": "HMR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 300,
+   "formula": "F+PF",
+   "catSeen": true
+  },
+  {
+   "id": "hepa_vacuum_light",
+   "family": "hepa_vacuum_light",
+   "desc": "HEPA Vacuuming - Light - (PER SF)",
+   "unit": "SF",
+   "act": "+",
+   "cat": "HMR",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 40,
+   "formula": "F"
+  },
+  {
+   "id": "clean_stud_wall",
+   "family": "clean_stud_wall",
+   "desc": "Clean stud wall",
+   "unit": "SF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 112,
+   "formula": "PF",
+   "catSeen": true
+  },
+  {
+   "id": "clean_floor",
+   "family": "clean_floor",
+   "desc": "Clean floor",
+   "unit": "SF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 46,
+   "formula": "F",
+   "catSeen": true
+  },
+  {
+   "id": "clean_floor_tile",
+   "family": "clean_floor_tile",
+   "desc": "Clean floor - tile",
+   "unit": "SF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 11,
+   "formula": "F",
+   "catSeen": true
+  },
+  {
+   "id": "clean_floor_tile_heavy",
+   "family": "clean_floor_tile_heavy",
+   "desc": "Clean floor - tile - Heavy clean",
+   "unit": "SF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 15,
+   "formula": "F"
+  },
+  {
+   "id": "clean_floor_heavy",
+   "family": "clean_floor_heavy",
+   "desc": "Clean the floor - Heavy",
+   "unit": "SF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 96,
+   "formula": "F"
+  },
+  {
+   "id": "clean_more_walls_ceiling_heavy",
+   "family": "clean_more_walls_ceiling_heavy",
+   "desc": "Clean more than the walls and ceiling - Heavy",
+   "unit": "SF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 140,
+   "formula": "WC"
+  },
+  {
+   "id": "clean_walls_ceiling_heavy",
+   "family": "clean_walls_ceiling_heavy",
+   "desc": "Clean the walls and ceiling - Heavy",
+   "unit": "SF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 22,
+   "formula": "WC"
+  },
+  {
+   "id": "clean_more_walls_heavy",
+   "family": "clean_more_walls_heavy",
+   "desc": "Clean more than the walls - Heavy",
+   "unit": "SF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 20,
+   "formula": "W"
+  },
+  {
+   "id": "clean_more_floor_perimeter_heavy",
+   "family": "clean_more_floor_perimeter_heavy",
+   "desc": "Clean more than the floor perimeter - Heavy",
+   "unit": "LF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 102,
+   "formula": "PF"
+  },
+  {
+   "id": "clean_part_ceiling_heavy",
+   "family": "clean_part_ceiling_heavy",
+   "desc": "Clean part of the ceiling - Heavy",
+   "unit": "SF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "none",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 4
+  },
+  {
+   "id": "clean_baseboard",
+   "family": "clean_baseboard",
+   "desc": "Clean baseboard",
+   "unit": "LF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 64,
+   "formula": "PF"
+  },
+  {
+   "id": "clean_door_side",
+   "family": "clean_door_side",
+   "desc": "Clean door (per side)",
+   "unit": "EA",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 133,
+   "formula": "2*doors"
+  },
+  {
+   "id": "clean_cabinetry_lower",
+   "family": "clean_cabinetry_lower",
+   "desc": "Clean cabinetry - lower - inside and out",
+   "unit": "LF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 27
+  },
+  {
+   "id": "clean_cabinetry_upper",
+   "family": "clean_cabinetry_upper",
+   "desc": "Clean cabinetry - upper - inside and out",
+   "unit": "LF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 17
+  },
+  {
+   "id": "clean_countertop_heavy",
+   "family": "clean_countertop_heavy",
+   "desc": "Clean countertop - Heavy",
+   "unit": "SF",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 12
+  },
+  {
+   "id": "clean_light_fixture",
+   "family": "clean_light_fixture",
+   "desc": "Clean light fixture",
+   "unit": "EA",
+   "act": "+",
+   "cat": "CLN",
+   "group": "sanitize",
+   "tax": "cleaning",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 25
+  },
+  {
+   "id": "sand_framing_walls",
+   "family": "sand_framing_walls",
+   "desc": "Sand exposed framing - Walls",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 6,
+   "formula": "W"
+  },
+  {
+   "id": "sand_framing_floor",
+   "family": "sand_framing_floor",
+   "desc": "Sand exposed framing - Floor",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 5,
+   "formula": "F"
+  },
+  {
+   "id": "seal_framing",
+   "family": "seal_framing",
+   "desc": "Seal stud wall for odor control (shellac)",
+   "unit": "SF",
+   "act": "+",
+   "cat": "WTR",
+   "group": "sanitize",
+   "tax": "material",
+   "cats": [
+    1,
+    2,
+    3
+   ],
+   "ah": false,
+   "seen": 1,
+   "formula": "W"
+  }
+ ]
+}
