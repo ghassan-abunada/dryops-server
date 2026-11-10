@@ -5,6 +5,7 @@ const callAccess = require('./callAccess');
 const { readCallrailCall, describeBody: describeCallrailBody } = require('./callrailPayload');
 const jnScope = require('./jnScope');
 const { descriptionCol } = require('./jobSync');
+const { storageCols } = require('./storage');
 const jobPdf = require('./jobPdf');
 
 const app = express();
@@ -392,6 +393,11 @@ function jnJobFields(job) {
   set('status', job.status_name || undefined);
   // JN description → jobs.description ('' clears it; jobSync.descriptionCol).
   Object.assign(row, descriptionCol(job));
+  // "In Storage?" / "# of Vaults" / "Supplemental Price" → in_storage,
+  // storage_vaults, storage_monthly_price (storage.js; columns from the app's
+  // supabase/add_job_storage.sql). Explicit false is kept; absent keys leave
+  // the columns alone.
+  Object.assign(row, storageCols(job));
   // JobNimbus lead source (every record type): the Stats "Lead Sources" panel
   // at testing locations groups by it (columns from add_job_intake.sql).
   Object.assign(row, jnSourceCols(job));
@@ -6404,25 +6410,16 @@ app.post('/webhooks/jobnimbus/photo-report', async (req, res) => {
 // (comma-separated overrides).
 const SUPP_BILLING_LIVE = process.env.SUPP_BILLING_LIVE === 'true';
 const SUPP_BILLING_DAY = Math.max(1, Math.min(28, parseInt(process.env.SUPP_BILLING_DAY || '1', 10) || 1));
-const SUPP_RECORD_TYPES = (process.env.SUPP_RECORD_TYPES || 'Contents')
-  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-// Attorney excluded per owner decision 2026-08-26: jobs in legal dispute keep
-// their In-Storage flag but must not receive automatic supplemental invoices.
-// PB In Progress / PB Scheduled excluded per owner 2026-08-26: pack-back is
-// underway, so the month is settled on the pack-back invoice, not a supp.
-const SUPP_EXCLUDED_STATUSES = (process.env.SUPP_EXCLUDED_STATUSES || 'Paid & Closed,PB complete,Lost,Non-Opportunity,Attorney,PB In Progress,PB Scheduled')
-  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+// The per-job rule (record types, excluded statuses, ignored status dates and
+// the decision itself) lives in suppEligibility.js so the job page's Storage
+// billing section (storage.js) gives the same answer as the monthly run.
+const {
+  suppEligibility, SUPP_RECORD_TYPES, SUPP_EXCLUDED_STATUSES,
+} = require('./suppEligibility');
 // The JN catalog product used by every existing storage invoice (verified
 // 2026-08-25: all supplemental invoices since July use this item + template).
 const SUPP_STORAGE_ITEM_JNID = 'mestzfhuma6y3nosvqj9ctt';
 const SUPP_STORAGE_ITEM_NAME = 'Contents - Offsite Content Storage';
-const SUPP_IN_STORAGE_STATUS = 'in storage';
-// Owner 2026-08-26: a bulk status edit on 2026-01-03 left 16 jobs parked in
-// "In storage" — jobs whose status last changed on an ignored Denver date are
-// excluded from billing entirely. Comma-separated YYYY-MM-DD env override.
-const SUPP_IGNORE_STATUS_DATES = new Set((process.env.SUPP_IGNORE_STATUS_DATES || '2026-01-03')
-  .split(',').map(s => s.trim()).filter(Boolean));
-const denverDateOf = (secs) => new Date(secs * 1000).toLocaleDateString('en-CA', { timeZone: 'America/Denver' });
 const SUPP_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
   'August', 'September', 'October', 'November', 'December'];
@@ -6463,19 +6460,16 @@ async function suppFetchEligible() {
   for (const j of [...flagged, ...inStatus]) if (j && j.jnid) byId.set(j.jnid, j);
   const eligible = [], noPrice = [];
   for (const j of byId.values()) {
-    if (j.is_active === false || j.is_archived === true) continue;
-    if (!SUPP_RECORD_TYPES.includes(String(j.record_type_name || '').toLowerCase())) continue;
-    const status = String(j.status_name || '').toLowerCase();
-    const inStorage = j.cf_boolean_1 === true || status === SUPP_IN_STORAGE_STATUS;
-    if (!inStorage || SUPP_EXCLUDED_STATUSES.includes(status)) continue;
-    if (j.date_status_change && SUPP_IGNORE_STATUS_DATES.has(denverDateOf(j.date_status_change))) continue;
-    const price = Number(j.cf_double_1);
+    // suppEligibility.js holds the rule (active, record type, In Storage flag
+    // or status, excluded statuses, ignored status-change dates).
+    const verdict = suppEligibility(j);
+    if (!verdict.eligible) continue;
     // No price set → still billed, as a $0 PLACEHOLDER draft (owner decision
     // 2026-08-26): the empty draft lands in the office's invoice queue where
     // they set the real amount before sending, instead of the job silently
     // storing for free.
-    if (price > 0) eligible.push(j);
-    else noPrice.push({ ...j, placeholder: true });
+    if (verdict.placeholder) noPrice.push({ ...j, placeholder: true });
+    else eligible.push(j);
   }
   return { eligible, noPrice };
 }
@@ -7170,6 +7164,18 @@ const jobSync = require('./jobSync')(app, {
 require('./recordType')(app, {
   sbGet, sbPatch, jnSendJson, jnGetJobFull, jnAddNote, requireAuth,
   loadActor: intake.loadActor, jnAccountSettings: intake.jnAccountSettings,
+});
+
+// Storage billing per job (Contents): the job page's Storage billing section
+// (GET/PUT /jobs/:id/storage; storage.js) — the three JN storage fields, the
+// same eligibility verdict the monthly run uses, the job's storage invoices
+// and its recent run outcomes. Writes go to JobNimbus first, like the sales rep.
+require('./storage')(app, {
+  sbGet, sbPatch, jnSendJson, jnGetJobFull, jnAddNote, requireAuth, loadActor: intake.loadActor,
+  suppEligibility, suppLooksLikeSupplemental, suppItemHasStorage, denverNextFirst,
+  config: { SUPP_BILLING_LIVE, SUPP_BILLING_DAY, SUPP_STORAGE_ITEM_JNID },
+  jnInvoicesUrl: (jnid) => `v2/invoices?size=100&related=${encodeURIComponent(jnid)}`,
+  jobInvoicesPageUrl: SUPP_JOB_INVOICES_URL,
 });
 
 // Job files: every JobNimbus file on a job with signed download links

@@ -40,7 +40,7 @@ module.exports = function mountJobSync(app, deps) {
     // while; a webhook landing in between carries newer data. Only write when
     // JobNimbus's own stamp on this record is not older than the one we hold.
     const stamp = row.jn_updated ? `&or=(jn_updated.is.null,jn_updated.lte.${encodeURIComponent(row.jn_updated)})` : '';
-    const select = 'id,jn_id,number,name,status,record_type,description,insurer,claim_number,adjuster_name,insurance_type,tested,date_loss,cat,lead_type,sales_rep,sales_rep_profile_id,jn_updated,last_synced';
+    const select = 'id,jn_id,number,name,status,record_type,description,insurer,claim_number,adjuster_name,insurance_type,tested,date_loss,cat,lead_type,sales_rep,sales_rep_profile_id,in_storage,storage_vaults,storage_monthly_price,jn_updated,last_synced';
     const r = await fetch(`${SUPABASE_URL}/rest/v1/jobs?jn_id=eq.${encodeURIComponent(String(jnid))}${stamp}&select=${select}`, {
       method: 'PATCH', headers: sbHeaders, body: JSON.stringify(row),
     });
