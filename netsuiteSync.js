@@ -170,13 +170,24 @@ function fullRunDue({ y, m, d, h }, lastFullDay) {
   return { full: h === 3 && lastFullDay !== dayKey, dayKey };
 }
 
+/**
+ * A PostgREST answer as a value. `Prefer: return=minimal` writes answer 201 or 204
+ * with an EMPTY body, which `response.json()` throws on ("Unexpected end of JSON
+ * input"): that failed every scheduled run after the first 500 card rows (2026-11-08
+ * to 11-10), leaving card charges stale while the run was logged as an error.
+ */
+function parseRestBody(text) {
+  return text ? JSON.parse(text) : null;
+}
+
 function mountNetsuiteSync(app, deps) {
   const { SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAuth, requireAdmin, denverNow } = deps;
   const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' };
   const rest = async (path, init = {}) => {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { ...init, headers: { ...headers, ...(init.headers || {}) } });
-    if (!r.ok) throw new Error(`${path.split('?')[0]} ${r.status} ${(await r.text()).slice(0, 300)}`);
-    return r.status === 204 ? null : r.json();
+    const text = await r.text();
+    if (!r.ok) throw new Error(`${path.split('?')[0]} ${r.status} ${text.slice(0, 300)}`);
+    return parseRestBody(text);
   };
   const rpc = (fn, body) => rest(`rpc/${fn}`, { method: 'POST', body: JSON.stringify(body || {}) });
   let running = null;
@@ -306,4 +317,4 @@ function mountNetsuiteSync(app, deps) {
 }
 
 module.exports = mountNetsuiteSync;
-Object.assign(module.exports, { CONFIRMED, DATA_START, monthStartsFrom, windowFrom, buildMap, pnlRow, bankEntries, cardRow, fullRunDue });
+Object.assign(module.exports, { CONFIRMED, DATA_START, monthStartsFrom, windowFrom, buildMap, pnlRow, bankEntries, cardRow, fullRunDue, parseRestBody });
