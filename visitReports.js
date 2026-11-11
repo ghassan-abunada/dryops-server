@@ -79,6 +79,7 @@ function validateMonitorReport(raw) {
 
   const report = {
     v: 1, kind: 'monitor',
+    ...(Number.isInteger(Number(raw.techs)) && Number(raw.techs) >= 1 && Number(raw.techs) <= 30 ? { techs: Number(raw.techs) } : {}),
     session_date: typeof raw.session_date === 'string' && DATE_RE.test(raw.session_date) ? raw.session_date : (errors.push('session_date must be YYYY-MM-DD'), ''),
     arrival_time: typeof raw.arrival_time === 'string' && TIME_RE.test(raw.arrival_time) ? raw.arrival_time : (errors.push('arrival_time must be HH:MM'), ''),
     departure_time: typeof raw.departure_time === 'string' && TIME_RE.test(raw.departure_time) ? raw.departure_time : null,
@@ -212,7 +213,7 @@ function placedPhrase(r) {
 function summarizeMonitorReport(r) {
   const lines = [];
   lines.push(`MONITOR REPORT · ${monthDay(r.session_date)}${r.fire ? ' · fire' : ''}`);
-  lines.push(`Arrived ${fmtClock(r.arrival_time)}${r.departure_time ? ` · left ${fmtClock(r.departure_time)}` : ''}`);
+  lines.push(`Arrived ${fmtClock(r.arrival_time)}${r.departure_time ? ` · left ${fmtClock(r.departure_time)}` : ''}${r.techs ? ` · ${r.techs} tech${r.techs === 1 ? '' : 's'}` : ''}`);
   if (readingComplete(r.outside)) lines.push(`Outside ${fmtReading(r.outside)}`);
   lines.push(`Rooms (${(r.rooms || []).length}):`);
   for (const room of r.rooms || []) lines.push(monitorRoomLine(room, !!r.fire));
@@ -335,6 +336,7 @@ function validateInspectionReport(raw) {
   if (raw.dry_standards && typeof raw.dry_standards === 'object') for (const [k, v] of Object.entries(raw.dry_standards).slice(0, 60)) dry[String(k).slice(0, 40)] = numIn(v, `dry standard ${k}`, 0, 100);
   const report = {
     v: 1, kind: 'inspection',
+    ...(Number.isInteger(Number(raw.techs)) && Number(raw.techs) >= 1 && Number(raw.techs) <= 30 ? { techs: Number(raw.techs) } : {}),
     arrival_time: typeof raw.arrival_time === 'string' && TIME_RE.test(raw.arrival_time) ? raw.arrival_time : (errors.push('arrival_time must be HH:MM'), ''),
     departure_time: typeof raw.departure_time === 'string' && TIME_RE.test(raw.departure_time) ? raw.departure_time : null,
     loss_type: oneOf(raw.loss_type, ['water', 'fire', 'mold']),
@@ -501,7 +503,7 @@ function emergencyLine(e) {
 function summarizeInspectionReport(r) {
   const lines = [];
   lines.push('INSPECTION REPORT');
-  lines.push(`Arrived ${fmtClock(r.arrival_time)}${r.departure_time ? ` · left ${fmtClock(r.departure_time)}` : ''}`);
+  lines.push(`Arrived ${fmtClock(r.arrival_time)}${r.departure_time ? ` · left ${fmtClock(r.departure_time)}` : ''}${r.techs ? ` · ${r.techs} tech${r.techs === 1 ? '' : 's'}` : ''}`);
   lines.push(lossLine(r));
   if (r.category != null || r.class != null) lines.push(`${r.category != null ? `Cat ${r.category}` : 'Cat —'} / ${r.class != null ? `Class ${r.class}` : 'Class —'}`);
   if (readingComplete(r.outside)) lines.push(`Outside ${fmtReading(r.outside)}`);
@@ -581,6 +583,7 @@ function validateCloseoutReport(raw) {
 
   const report = {
     v: 1, kind: 'closeout',
+    ...(Number.isInteger(Number(raw.techs)) && Number(raw.techs) >= 1 && Number(raw.techs) <= 30 ? { techs: Number(raw.techs) } : {}),
     removed_on: typeof raw.removed_on === 'string' && DATE_RE.test(raw.removed_on) ? raw.removed_on : (errors.push('removed_on must be YYYY-MM-DD'), ''),
     arrival_time: typeof raw.arrival_time === 'string' && TIME_RE.test(raw.arrival_time) ? raw.arrival_time : (errors.push('arrival_time must be HH:MM'), ''),
     departure_time: typeof raw.departure_time === 'string' && TIME_RE.test(raw.departure_time) ? raw.departure_time : null,
@@ -656,7 +659,7 @@ function drynessLine(r) {
 function summarizeCloseoutReport(r) {
   const lines = [];
   lines.push(`CLOSEOUT REPORT · ${monthDay(r.removed_on)}`);
-  lines.push(`Arrived ${fmtClock(r.arrival_time)}${r.departure_time ? ` · left ${fmtClock(r.departure_time)}` : ''}`);
+  lines.push(`Arrived ${fmtClock(r.arrival_time)}${r.departure_time ? ` · left ${fmtClock(r.departure_time)}` : ''}${r.techs ? ` · ${r.techs} tech${r.techs === 1 ? '' : 's'}` : ''}`);
   lines.push(`Rooms (${r.rooms.length}):`);
   for (const room of r.rooms) lines.push(closeoutRoomLine(room));
   lines.push(drynessLine(r));
