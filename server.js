@@ -4682,6 +4682,7 @@ app.post('/jobs/:id/visits/adhoc', requireAuth, async (req, res) => {
       scheduled_date: today, scheduled_time: null, slot_start_min: null, slot_end_min: null,
       task_type: kind, status: 'in_progress', notes: 'Logged from the Scope tab',
       assigned_to_ids: [actor.id], block_kind: kind === 'demo' ? 'half_day' : 'window', crew_size: null,
+      created_by: actor.id, // the Schedule shows "Scheduled by …"
       jn_task_dirty: true,
     };
     if (kind === 'demo') { row.slot_start_min = 480; row.slot_end_min = 720; }
