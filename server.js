@@ -4011,10 +4011,32 @@ function techRateOk(token) {
   return e.n <= 60;
 }
 
-const VISIT_TYPE_LABEL = { inspection: 'Inspection', monitor: 'Monitor', demo: 'Demo', closeout: 'Closeout', testing: 'Testing' };
+// Twin of lib/slots.ts TASK_TYPES in the app. The last three are plain visits
+// (no report); "other" carries a typed name in inspections.task_label
+// (supabase/add_visit_types.sql in the app repo).
+const VISIT_TYPE_LABEL = {
+  inspection: 'Inspection', monitor: 'Monitor', demo: 'Demo', closeout: 'Closeout', testing: 'Testing',
+  adjuster_walk: 'Adjuster Walk', check_pickup: 'Check Pick-up', other: 'Other',
+};
+// "Log a … now" on the Scope tab only makes sense for the kinds that have a report.
+const ADHOC_KINDS = ['inspection', 'monitor', 'demo', 'closeout', 'testing'];
+function visitTypeName(visit) {
+  const custom = visit && visit.task_type === 'other' ? String(visit.task_label || '').trim() : '';
+  return custom || VISIT_TYPE_LABEL[visit && visit.task_type] || 'Visit';
+}
+// Loads an "Other" visit's typed name when the row was read without it. Kept out
+// of the shared selects so nothing breaks on a database without the column.
+async function withTaskLabel(visit) {
+  if (!visit || visit.task_type !== 'other' || visit.task_label !== undefined) return visit;
+  try {
+    const rows = await sbGet(`inspections?id=eq.${encodeURIComponent(visit.id)}&select=task_label`);
+    visit.task_label = (rows && rows[0] && rows[0].task_label) || null;
+  } catch (e) { visit.task_label = null; }
+  return visit;
+}
 // "Testing (Asbestos + Lead)" for testing visits with test types; the plain label otherwise.
 function visitKindLabel(visit) {
-  const label = VISIT_TYPE_LABEL[visit && visit.task_type] || 'Visit';
+  const label = visitTypeName(visit);
   const types = visit && visit.task_type === 'testing' && Array.isArray(visit.test_types) ? visit.test_types.filter(Boolean) : [];
   return types.length ? `${label} (${types.join(' + ')})` : label;
 }
@@ -4671,7 +4693,7 @@ app.post('/jobs/:id/visits/adhoc', requireAuth, async (req, res) => {
     const actor = await appActor(req);
     if (!actor) return res.status(403).json({ error: 'Profile not found' });
     const kind = String((req.body && req.body.kind) || '');
-    if (!VISIT_TYPE_LABEL[kind]) return res.status(400).json({ error: 'kind must be inspection, monitor, demo or closeout' });
+    if (!ADHOC_KINDS.includes(kind)) return res.status(400).json({ error: 'kind must be inspection, monitor, demo or closeout' });
     const jobs = await sbGet(`jobs?id=eq.${encodeURIComponent(String(req.params.id))}&select=id,jn_id,location_id`);
     const job = jobs && jobs[0];
     if (!job) return res.status(404).json({ error: 'Job not found' });
@@ -4760,6 +4782,7 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
     update = (latest && latest[0]) || { id: null };
   }
   const crewText = report ? require('./reportCollab').crewLine(await reportCollab.crewFor(visitId).catch(() => [])) : '';
+  await withTaskLabel(visit);
   const noteText = visitNoteText(visit, p, actor.name, cleanNote)
     + (report ? '\n\n' + summarizeVisitReport(visit.task_type, report) : '')
     + (crewText ? '\n' + crewText : '');
@@ -4784,6 +4807,7 @@ async function retryVisitJn(visitId) {
   if (!upd) return { status: 404, body: { error: 'Nothing to retry' } };
   if (!upd.jn_note_error) return { status: 200, body: { ok: true, jn: { ok: true, id: upd.jn_note_id } } };
   const report = upd.report_snapshot || reportOf(visit);
+  await withTaskLabel(visit);
   const retryText = visitNoteText(visit, upd.pct, upd.actor_name, upd.note) + (report ? '\n\n' + summarizeVisitReport(visit.task_type, report) : '');
   const jn = await jnAddNote(visit.jn_id, retryText, await visitNoteContext(visit, upd.actor_id));
   const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
@@ -5037,7 +5061,7 @@ function buildJnTaskBody(v, job, techs, settings, taskType, tz) {
   const end = anytime ? we : v.slot_end_min;
   const linked = techs.filter((t) => t.jn_user_id);
   const unlinked = techs.filter((t) => !t.jn_user_id).map((t) => t.full_name || 'Unnamed');
-  const label = VISIT_TYPE_LABEL[v.task_type] || 'Visit';
+  const label = visitTypeName(v);
   const jobName = (job && (job.name || job.client_name)) || v.jn_id;
   const crew = v.crew_size || (v.assigned_to_ids || []).length || null;
   const testTypes = v.task_type === 'testing' && Array.isArray(v.test_types) ? v.test_types.filter(Boolean) : [];
@@ -5078,7 +5102,7 @@ function buildJnTaskBody(v, job, techs, settings, taskType, tz) {
 // pushed before clearing the dirty flag (edits racing the push stay dirty).
 function visitFingerprint(v) {
   return JSON.stringify([v.scheduled_date, v.slot_start_min, v.slot_end_min, v.block_kind, v.crew_size,
-    v.task_type, v.status, v.notes, v.jn_id, [...(v.assigned_to_ids || [])].sort(), v.test_types || null, v.service_min || null]);
+    v.task_type, v.status, v.notes, v.jn_id, [...(v.assigned_to_ids || [])].sort(), v.test_types || null, v.service_min || null, v.task_label || null]);
 }
 
 const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,scheduled_time,slot_start_min,slot_end_min,block_kind,crew_size,task_type,test_types,service_min,status,notes,' +
@@ -5094,12 +5118,14 @@ async function syncVisitJnTask(visitId, { force = false } = {}) {
     const rows = await sbGet(`inspections?id=eq.${encodeURIComponent(id)}&select=${VISIT_TASK_SELECT}`);
     const v = rows && rows[0];
     if (!v) return { ok: false, error: 'Visit not found' };
+    await withTaskLabel(v);
     if (!v.jn_task_dirty && !force) return { ok: true, skipped: 'clean', id: v.jn_task_id };
     const settings = await loadScheduleSettings();
     const clear = async (extra) => {
       // Only clear if the row is still what we pushed.
       const again = await sbGet(`inspections?id=eq.${encodeURIComponent(id)}&select=${VISIT_TASK_SELECT}`);
       const cur = again && again[0];
+      await withTaskLabel(cur);
       if (!cur || visitFingerprint(cur) !== visitFingerprint(v)) return false;
       const done = await sbPatch('inspections', `id=eq.${encodeURIComponent(id)}&updated_at=eq.${encodeURIComponent(cur.updated_at)}`,
         { jn_task_dirty: false, jn_task_synced_at: new Date().toISOString(), jn_task_error: null, jn_task_attempts: 0, ...(extra || {}) });
