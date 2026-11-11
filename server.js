@@ -4257,6 +4257,7 @@ function validateDemoReport(raw) {
     photo_count: intIn(raw.photo_count, 'photo_count', 0, 999, true),
     post_docusketch: bool(raw.post_docusketch, 'post_docusketch'),
     completed_time: completedTime,
+    ...(Number.isInteger(Number(raw.techs)) && Number(raw.techs) >= 1 && Number(raw.techs) <= 30 ? { techs: Number(raw.techs) } : {}),
     notes: text(raw.notes, 'notes', 2000),
     ...(demoExtrasFrom(raw.extras, numIn, intIn) ? { extras: demoExtrasFrom(raw.extras, numIn, intIn) } : {}),
   };
@@ -4415,6 +4416,8 @@ function zonedTimeISO(dateISO, hhmm, tz) {
   try { return new Date(zonedToUnix(dateISO, Number(m[1]) * 60 + Number(m[2]), tz) * 1000).toISOString(); } catch { return null; }
 }
 
+const reportCollab = require('./reportCollab')({ SUPABASE_URL, SB_JSON_HEADERS, sbGet });
+
 async function saveVisitReport({ visitId, kind, report: raw, actor, source }) {
   const spec = REPORT_KINDS[kind];
   if (!spec) return { status: 400, body: { error: `Unknown report kind: ${kind}`, code: 'KIND_UNKNOWN' } };
@@ -4457,6 +4460,8 @@ async function saveVisitReport({ visitId, kind, report: raw, actor, source }) {
       scopeWarning = 'Report saved, but the drying-log rows could not be written. They will be rebuilt on the next save.';
     }
   }
+  // Shared draft (several technicians): remember who did which rooms, then clear it.
+  await reportCollab.finish(visitId).catch((e) => console.warn('[report collab] finish failed', e.message));
   syncVisitJnTask(visitId).catch(() => {});
   return { status: 200, body: { ok: true, visit: patched && patched[0], complete: spec.isComplete(v.report), summary: spec.summarize(v.report), scope, scope_warning: scopeWarning } };
 }
@@ -4512,6 +4517,99 @@ app.post('/visits/:id/report', requireAuth, async (req, res) => {
     console.error('[report error]', err.message);
     res.status(502).json({ error: err.message });
   }
+});
+
+// ── Shared report draft + joining a teammate's visit ─────────────────────────
+// One sync call per few seconds per phone (reportCollab.js). The lead answers
+// the general questions; everyone else works on rooms.
+const COLLAB_VISIT_COLS = 'id,task_type,status,assigned_to_ids,report_submitted_at,report_by_name,demo_report_submitted_at,demo_report_by_name';
+app.post('/tech/visits/:id/report-draft', async (req, res) => {
+  try {
+    const tech = await techGuard(req, res);
+    if (!tech) return;
+    const visit = await loadVisit(String(req.params.id), COLLAB_VISIT_COLS);
+    if (!visit) return res.status(404).json({ error: 'Visit not found' });
+    const out = await reportCollab.sync({ visit, actor: { id: tech.profileId, name: tech.name }, body: req.body });
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    console.error('[tech report-draft error]', err.message);
+    res.status(502).json({ error: 'Could not sync right now.' });
+  }
+});
+app.post('/visits/:id/report-draft', requireAuth, async (req, res) => {
+  try {
+    const actor = await appActor(req);
+    if (!actor) return res.status(403).json({ error: 'Profile not found' });
+    const visit = await loadVisit(String(req.params.id), COLLAB_VISIT_COLS);
+    if (!visit) return res.status(404).json({ error: 'Visit not found' });
+    if (!['admin', 'owner'].includes(actor.role) && !isAssigned(visit, actor.id)) return res.status(403).json({ error: 'Not allowed' });
+    const out = await reportCollab.sync({ visit, actor: { id: actor.id, name: actor.name }, body: req.body });
+    res.status(out.status).json(out.body);
+  } catch (err) {
+    console.error('[report-draft error]', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Any technician can join a teammate's visit: open visits on `date` in the
+// technician's locations that they are not on yet.
+async function joinableVisits(profileId, date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) return [];
+  const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(profileId)}&select=location_id,location_ids`)) || [];
+  const locs = [...new Set([prof[0] && prof[0].location_id, ...((prof[0] && prof[0].location_ids) || [])].filter(Boolean).map(String))];
+  if (!locs.length) return [];
+  const rows = (await sbGet(`inspections?scheduled_date=eq.${date}&status=in.(scheduled,in_progress)&location_id=in.(${locs.map(encodeURIComponent).join(',')})&select=id,task_type,scheduled_time,assigned_to_ids,jobs(name,client_name,address)&order=slot_start_min.asc.nullsfirst&limit=60`)) || [];
+  const open = rows.filter((v) => !isAssigned(v, profileId) && (v.assigned_to_ids || []).length > 0);
+  const ids = [...new Set(open.flatMap((v) => (v.assigned_to_ids || []).map(String)))];
+  const names = new Map();
+  if (ids.length) for (const p of (await sbGet(`profiles?id=in.(${ids.map(encodeURIComponent).join(',')})&select=id,full_name`)) || []) names.set(String(p.id), p.full_name || 'Technician');
+  return open.map((v) => ({
+    id: v.id, task_type: v.task_type, scheduled_time: v.scheduled_time || null,
+    job_name: (v.jobs && (v.jobs.name || v.jobs.client_name)) || 'Job', address: (v.jobs && v.jobs.address) || null,
+    techs: (v.assigned_to_ids || []).map((id) => names.get(String(id)) || 'Technician'),
+  }));
+}
+async function joinVisit(visitId, profileId) {
+  const visit = await loadVisit(visitId, 'id,status,assigned_to_ids');
+  if (!visit) return { status: 404, body: { error: 'Visit not found' } };
+  if (!['scheduled', 'in_progress'].includes(visit.status)) return { status: 409, body: { error: 'This visit is already closed.' } };
+  if (isAssigned(visit, profileId)) return { status: 200, body: { ok: true, already: true } };
+  try {
+    await sbPatch('inspections', `id=eq.${encodeURIComponent(visitId)}`, { assigned_to_ids: [...(visit.assigned_to_ids || []), profileId], jn_task_dirty: true });
+  } catch (e) {
+    // The schedule's double-booking guard (VS001) still applies to a join.
+    const m = /Already booked[^"\\]*/.exec(String(e.message || ''));
+    return { status: 409, body: { error: m ? `${m[0].trim()} — ask dispatch to move that visit, then join.` : 'Could not join this visit.', code: m ? 'BOOKED' : undefined } };
+  }
+  syncVisitJnTask(visitId).catch(() => {});
+  return { status: 200, body: { ok: true } };
+}
+app.post('/tech/joinable', async (req, res) => {
+  try {
+    const token = String((req.body && req.body.token) || '').trim();
+    const tech = await techLinkByToken(token);
+    if (!tech) return res.status(401).json({ error: 'This link is no longer active. Ask dispatch for a new one.' });
+    if (!techRateOk(token)) return res.status(429).json({ error: 'Too many requests — try again in a minute.' });
+    res.json({ ok: true, visits: await joinableVisits(tech.profileId, req.body.date) });
+  } catch (err) { console.error('[tech joinable error]', err.message); res.status(502).json({ error: 'Could not load visits.' }); }
+});
+app.post('/tech/visits/:id/join', async (req, res) => {
+  try {
+    const token = String((req.body && req.body.token) || '').trim();
+    const tech = await techLinkByToken(token);
+    if (!tech) return res.status(401).json({ error: 'This link is no longer active. Ask dispatch for a new one.' });
+    if (!techRateOk(token)) return res.status(429).json({ error: 'Too many requests — try again in a minute.' });
+    const out = await joinVisit(String(req.params.id), tech.profileId);
+    res.status(out.status).json(out.body);
+  } catch (err) { console.error('[tech join error]', err.message); res.status(502).json({ error: 'Could not join right now.' }); }
+});
+app.post('/visits/joinable', requireAuth, async (req, res) => {
+  try { res.json({ ok: true, visits: await joinableVisits(req.userId, req.body && req.body.date) }); }
+  catch (err) { console.error('[joinable error]', err.message); res.status(502).json({ error: err.message }); }
+});
+app.post('/visits/:id/join', requireAuth, async (req, res) => {
+  try { const out = await joinVisit(String(req.params.id), req.userId); res.status(out.status).json(out.body); }
+  catch (err) { console.error('[join error]', err.message); res.status(502).json({ error: err.message }); }
 });
 
 // The estimating bot can fetch the reviewed sheet by its share token (same
@@ -4660,8 +4758,10 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
     const latest = await sbGet(`visit_updates?visit_id=eq.${encodeURIComponent(visitId)}&order=created_at.desc&limit=1&select=*`);
     update = (latest && latest[0]) || { id: null };
   }
+  const crewText = report ? require('./reportCollab').crewLine(await reportCollab.crewFor(visitId).catch(() => [])) : '';
   const noteText = visitNoteText(visit, p, actor.name, cleanNote)
-    + (report ? '\n\n' + summarizeVisitReport(visit.task_type, report) : '');
+    + (report ? '\n\n' + summarizeVisitReport(visit.task_type, report) : '')
+    + (crewText ? '\n' + crewText : '');
   const jn = await jnAddNote(visit.jn_id, noteText, await visitNoteContext(visit, actor.id));
   const jnPatch = jn.ok ? { jn_note_id: jn.id, jn_note_error: null } : { jn_note_error: jn.error || 'JobNimbus note failed' };
   await Promise.all([
