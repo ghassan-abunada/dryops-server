@@ -100,3 +100,83 @@ test('pushRecipientIds: only people assigned to the location, admins and owners 
   assert.deepEqual(pushRecipientIds(profiles, 'L9'), []);
   assert.deepEqual(pushRecipientIds(profiles, null), []);
 });
+
+const ONLY_MESSAGES = 'This customer requested only message replies (no calls). Reply here or respond via your LSA dashboard: https://ads.google.com/localservices/lead?cid=1234567890123&lid=45678901234567890123&utm_source=sms';
+const NOTICE = 'Replies to this number will be sent to the customer. You can also choose to call the customer through this number (or respond via LSA dashboard: https://ads.google.com/localservices/lead?cid=123&lid=456)';
+
+test("isLsaRelayNotice: Google's two automated LSA texts, whole / truncated / part-marked / upper case", () => {
+  const { isLsaRelayNotice } = require('../sms');
+  assert.strictEqual(isLsaRelayNotice(NOTICE), true);
+  assert.ok(NOTICE.length > 160);
+  assert.strictEqual(isLsaRelayNotice(NOTICE.slice(0, 160)), true);
+  assert.strictEqual(isLsaRelayNotice(`(1/2) ${NOTICE}`), true);
+  assert.strictEqual(isLsaRelayNotice(`  ${NOTICE.toUpperCase()}`), true);
+  assert.strictEqual(isLsaRelayNotice('Hi, my basement flooded last night. Can someone come out?'), false);
+  assert.strictEqual(isLsaRelayNotice('Thanks! Replies to this number will be sent to the customer'), false);
+  assert.strictEqual(isLsaRelayNotice(''), false);
+  assert.strictEqual(isLsaRelayNotice(null), false);
+  assert.strictEqual(isLsaRelayNotice(undefined), false);
+  assert.strictEqual(isLsaRelayNotice('This customer requested only message replies (no calls).'), true);
+  assert.strictEqual(isLsaRelayNotice(ONLY_MESSAGES), true);
+  assert.ok(ONLY_MESSAGES.length > 160);
+  assert.strictEqual(isLsaRelayNotice(ONLY_MESSAGES.slice(0, 160)), true);
+  assert.strictEqual(isLsaRelayNotice(`(2/2) ${ONLY_MESSAGES}`), true);
+  assert.strictEqual(isLsaRelayNotice('This customer requested a quote'), false);
+});
+
+test("ingestMessage: Google's LSA notices are stored but never become the preview / latest message, and never push", async () => {
+  const mountSms = require('../sms');
+  const inserts = []; const patches = []; const pushes = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => { inserts.push({ url: String(url), row: JSON.parse(opts.body) }); return { ok: true, text: async () => opts.body }; };
+  try {
+    const app = { get() {}, post() {}, put() {}, patch() {}, delete() {}, use() {} };
+    const { ingestMessage } = mountSms(app, {
+      SUPABASE_URL: 'http://sb.test', SUPABASE_SERVICE_KEY: 'k',
+      sbGet: async (q) => (q.startsWith('profiles') ? [{ id: 'p1', role: 'admin', location_ids: [7] }] : q.startsWith('push_tokens') ? [{ token: 'ExponentPushToken[x]', profile_id: 'p1' }] : []),
+      sbPatch: async (table, where, patch) => { patches.push(patch); return null; },
+      sbUpsert: async () => null,
+      summarizeForPush: async () => ({ title: 't', body: 'b' }),
+      push: { send: async (messages) => { pushes.push(messages); } },
+    });
+    const tick = () => new Promise((r) => setImmediate(r));
+    const base = { id: 'c1', location_id: 7, source: 'Google LSA', job_id: 'j1', customer_phone_number: '+13035550100' };
+    const msg = (content, at) => ({ direction: 'inbound', content, tracking: '+13035550199', customer: '+13035550100', created_at: at });
+
+    // A normal inbound text rolls up and pushes.
+    let out = await ingestMessage(msg('My basement flooded', '2026-11-12T10:00:00Z'), { trackingRow: {}, conv: { ...base } });
+    await tick(); await tick();
+    assert.strictEqual(out.inserted, true);
+    assert.strictEqual(out.conversation.last_preview, 'My basement flooded');
+    assert.strictEqual(out.conversation.last_message_at, '2026-11-12T10:00:00Z');
+    assert.strictEqual(out.conversation.last_direction, 'inbound');
+    assert.strictEqual(out.conversation.last_inbound_at, '2026-11-12T10:00:00Z');
+    assert.strictEqual(out.conversation.first_inbound_at, '2026-11-12T10:00:00Z');
+    assert.strictEqual(pushes.length, 1);
+
+    // The notice that follows is stored, the roll-up and the phones stay as they were.
+    const before = out.conversation;
+    for (const [id, content] of [['c1a', NOTICE], ['c1b', `(1/2) ${NOTICE}`], ['c1c', ONLY_MESSAGES], ['c1d', `(2/2) ${ONLY_MESSAGES}`]]) {   // fresh ids: the push throttle is per thread
+      const nPatches = patches.length; const nInserts = inserts.length;
+      out = await ingestMessage({ ...msg(content, '2026-11-12T10:00:05Z'), callrail_conversation_id: 'CR1', customer_name: 'Pat', lead_status: 'good_lead' }, { trackingRow: {}, conv: { ...before, id } });
+      await tick(); await tick();
+      assert.strictEqual(out.inserted, true);
+      assert.strictEqual(inserts.length, nInserts + 1);
+      assert.match(inserts[inserts.length - 1].url, /sms_messages$/);
+      assert.strictEqual(inserts[inserts.length - 1].row.content, content);
+      assert.strictEqual(out.conversation.last_preview, 'My basement flooded');
+      assert.strictEqual(out.conversation.last_message_at, '2026-11-12T10:00:00Z');
+      assert.strictEqual(out.conversation.last_inbound_at, '2026-11-12T10:00:00Z');
+      assert.strictEqual(out.conversation.first_inbound_at, '2026-11-12T10:00:00Z');
+      // the other roll-up fields still land
+      assert.deepStrictEqual(patches.slice(nPatches), [{ callrail_conversation_id: 'CR1', customer_name: 'Pat', lead_status: 'good_lead' }]);
+      assert.strictEqual(pushes.length, 1);
+    }
+
+    // A notice that opens a thread leaves it without a preview or inbound stamps.
+    out = await ingestMessage(msg(NOTICE, '2026-11-12T11:00:00Z'), { trackingRow: {}, conv: { ...base, id: 'c2' } });
+    for (const k of ['last_preview', 'last_message_at', 'last_direction', 'last_inbound_at', 'first_inbound_at']) assert.strictEqual(out.conversation[k], undefined, k);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
