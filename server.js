@@ -70,6 +70,8 @@ const CALLRAIL_API_KEY = (process.env.CALLRAIL_API_KEY || '').trim();
 // if CALLRAIL_ACCOUNT_IDS doesn't name them.
 const CALLRAIL_API_KEYS = {};      // accountId → key
 const CALLRAIL_BARE_KEYS = [];     // keys still waiting for their account lookup
+const CALLRAIL_KEY_STATUS = {};    // key → { hint, state, error, accounts, at } for the admin listing (never the key itself)
+const keyHint = (k) => '…' + String(k).slice(-4);
 for (const entry of (process.env.CALLRAIL_API_KEYS || '').split(',').map(s => s.trim()).filter(Boolean)) {
   const i = entry.search(/[=:]/);
   if (i > 0) { const id = entry.slice(0, i).trim(), key = entry.slice(i + 1).trim(); if (id && key) CALLRAIL_API_KEYS[id] = key; }
@@ -96,19 +98,22 @@ function registerCallrailAccount(id, key) {
 // that CallRail rejects, is logged each pass so it shows in Railway).
 async function resolveBareCallrailKeys() {
   for (const key of CALLRAIL_BARE_KEYS.slice()) {
+    const st = CALLRAIL_KEY_STATUS[key] = { hint: keyHint(key), state: 'pending', error: null, accounts: [], at: new Date().toISOString() };
     try {
       const r = await fetch('https://api.callrail.com/v3/a.json?per_page=100', { headers: { Authorization: `Token token="${key}"`, Accept: 'application/json' } });
-      if (!r.ok) { console.warn('[callrail] bare key …' + key.slice(-4) + ' rejected by CallRail:', r.status); continue; }
+      if (!r.ok) { st.error = `CallRail HTTP ${r.status}`; console.warn('[callrail] bare key', st.hint, 'rejected by CallRail:', r.status); continue; }
       const j = await r.json();
       const accounts = (j && (j.accounts || j.data)) || [];
-      if (!accounts.length) { console.warn('[callrail] bare key …' + key.slice(-4) + ' sees no accounts'); continue; }
+      if (!accounts.length) { st.error = 'key sees no accounts'; console.warn('[callrail] bare key', st.hint, 'sees no accounts'); continue; }
       for (const a of accounts) registerCallrailAccount(a.id, key);
       CALLRAIL_BARE_KEYS.splice(CALLRAIL_BARE_KEYS.indexOf(key), 1);
-      console.log('[callrail] key …' + key.slice(-4) + ' → account(s)', accounts.map(a => `${a.id} ${a.name}`).join(', '));
-    } catch (e) { console.warn('[callrail] bare key lookup failed:', e.message); }
+      st.state = 'resolved'; st.accounts = accounts.map(a => `${a.id} ${a.name}`);
+      console.log('[callrail] key', st.hint, '→ account(s)', st.accounts.join(', '));
+    } catch (e) { st.error = e.message; console.warn('[callrail] bare key lookup failed:', e.message); }
   }
   if (CALLRAIL_BARE_KEYS.length) setTimeout(resolveBareCallrailKeys, 5 * 60 * 1000);
 }
+for (const [id, key] of Object.entries(CALLRAIL_API_KEYS)) CALLRAIL_KEY_STATUS[key] = { hint: keyHint(key), state: 'pinned', error: null, accounts: [id], at: null };
 if (CALLRAIL_BARE_KEYS.length) resolveBareCallrailKeys();
 const CALLRAIL_WEBHOOK_TOKEN = (process.env.CALLRAIL_WEBHOOK_TOKEN || '').trim();
 
@@ -1250,6 +1255,9 @@ app.get('/admin/callrail/accounts', (req, res, next) => CALLRAIL_ACCOUNT_IDS.len
       accounts: accounts.map(a => ({ id: a.id, name: a.name, status: a.status || null, configured: configured.has(String(a.id)), key: a.key })),
       // Configured ids the key can no longer see (user removed from the account?).
       unreachable: CALLRAIL_ACCOUNT_IDS.filter(id => !seen.has(String(id))),
+      // CALLRAIL_API_KEYS entries: pinned / resolved / pending (+ last error). Empty = env var not set on this deploy.
+      extra_keys: Object.values(CALLRAIL_KEY_STATUS),
+      default_key: CALLRAIL_API_KEY ? keyHint(CALLRAIL_API_KEY) : null,
     });
   } catch (err) {
     return res.status(502).json({ error: err.message });
