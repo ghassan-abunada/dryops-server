@@ -77,6 +77,22 @@ for (const entry of (process.env.CALLRAIL_API_KEYS || '').split(',').map(s => s.
   if (i > 0) { const id = entry.slice(0, i).trim(), key = entry.slice(i + 1).trim(); if (id && key) CALLRAIL_API_KEYS[id] = key; }
   else CALLRAIL_BARE_KEYS.push(entry);
 }
+// Also accept one variable per account named by CallRail's numeric account
+// id (what the CallRail UI shows, e.g. 938747669=BCI) with the key as the
+// value — that is how the owner entered them on Railway. The numeric id is
+// not the ACC… id the v3 API uses, so these are treated as bare keys and the
+// account is looked up at boot like any other.
+// Node quirk: process.env lists an all-digits name but returns undefined for
+// its value (integer-like property names), so read the raw environment —
+// /proc/self/environ on Linux (Railway), `env` elsewhere.
+function rawEnvEntries() {
+  const parse = (text, sep) => text.split(sep).filter(Boolean).map(l => { const i = l.indexOf('='); return i > 0 ? [l.slice(0, i), l.slice(i + 1)] : null; }).filter(Boolean);
+  try { const fs = require('fs'); if (fs.existsSync('/proc/self/environ')) return parse(fs.readFileSync('/proc/self/environ', 'utf8'), '\0'); } catch {}
+  try { return parse(require('child_process').execFileSync('env', { encoding: 'utf8' }), '\n'); } catch { return []; }
+}
+for (const [name, val] of rawEnvEntries()) {
+  if (/^\d{6,}$/.test(name) && val && val.trim()) CALLRAIL_BARE_KEYS.push(val.trim());
+}
 function callrailKeyFor(accountId) { return CALLRAIL_API_KEYS[String(accountId)] || CALLRAIL_API_KEY; }
 function callrailAuth(accountId) { return { Authorization: `Token token="${callrailKeyFor(accountId)}"`, Accept: 'application/json' }; }
 // One or more CallRail account ids (comma-separated) — one API key can span
