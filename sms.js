@@ -60,6 +60,11 @@ function previewOf(content, mediaUrls) {
   if (t) return t.slice(0, 160);
   return Array.isArray(mediaUrls) && mediaUrls.length ? `Photo${mediaUrls.length > 1 ? 's' : ''}` : '';
 }
+// Google's automated texts on an LSA message lead. Stored, never surfaced.
+// (twin of the app's lib/messages/lsa.ts)
+function isLsaRelayNotice(content) {
+  return /^(?:\(\d+\/\d+\)\s*)?(?:Replies to this number will be sent to the customer\b|This customer requested only message replies\b)/i.test(String(content || '').trim());
+}
 function toISO(v) {
   if (v === undefined || v === null || v === '') return null;
   const d = new Date(v); return isNaN(d.getTime()) ? null : d.toISOString();
@@ -322,10 +327,11 @@ module.exports = function mountSms(app, deps) {
     // Roll-up.
     const at = m.created_at || now;
     const patch = {};
-    if (!conv.last_message_at || at >= conv.last_message_at) { patch.last_message_at = at; patch.last_preview = previewOf(m.content, m.media_urls); patch.last_direction = m.direction; }
+    const notice = isLsaRelayNotice(m.content);   // Google's notices never become the thread's preview / latest message
+    if (!notice && (!conv.last_message_at || at >= conv.last_message_at)) { patch.last_message_at = at; patch.last_preview = previewOf(m.content, m.media_urls); patch.last_direction = m.direction; }
     if (m.direction === 'inbound') {
-      if (!conv.last_inbound_at || at > conv.last_inbound_at) patch.last_inbound_at = at;
-      if (!conv.first_inbound_at || at < conv.first_inbound_at) patch.first_inbound_at = at;
+      if (!notice && (!conv.last_inbound_at || at > conv.last_inbound_at)) patch.last_inbound_at = at;
+      if (!notice && (!conv.first_inbound_at || at < conv.first_inbound_at)) patch.first_inbound_at = at;
     } else {
       if (!conv.last_outbound_at || at > conv.last_outbound_at) patch.last_outbound_at = at;
       const firstIn = conv.first_inbound_at || patch.first_inbound_at;
@@ -357,7 +363,7 @@ module.exports = function mountSms(app, deps) {
         }
       }).catch(() => {});
     }
-    if (inserted && m.direction === 'inbound' && notify) pushInbound(conv, message).catch((e) => warn('push', e.message));
+    if (inserted && m.direction === 'inbound' && notify && !notice) pushInbound(conv, message).catch((e) => warn('push', e.message));
     // A text typed in CallRail's own inbox arrives without its sender; the
     // conversation record names the user (owner 2026-10-28: show the person, never "CallRail").
     if (inserted && m.direction === 'outbound' && !m.sent_by_name && m.callrail_message_id) {
@@ -783,6 +789,7 @@ module.exports.classifyTextDelivery = classifyTextDelivery;
 module.exports.toE164 = toE164;
 module.exports.rankJobs = rankJobs;
 module.exports.previewOf = previewOf;
+module.exports.isLsaRelayNotice = isLsaRelayNotice;
 module.exports.pushRecipientIds = pushRecipientIds;
 module.exports.validateContent = validateContent;
 module.exports.callrailSendError = callrailSendError;
