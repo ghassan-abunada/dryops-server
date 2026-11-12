@@ -345,7 +345,7 @@ module.exports = function mountHomeowner(app, deps) {
       }
       if (choice === 'none') {
         await sbPatch('inspections', `id=eq.${enc(visit.id)}`, { ho_window_status: 'declined', ho_replied_at: nowISO(), ho_reply_text: 'portal:none' });
-        const text = `Neither offered window works for the ${visit.task_type} on ${visit.scheduled_date}` + (clean(body.body, 500) ? ` — ${clean(body.body, 500)}` : '');
+        const text = `Neither offered window works for the ${visit.task_type === 'other' ? 'visit' : String(visit.task_type || 'visit').replace(/_/g, ' ')} on ${visit.scheduled_date}` + (clean(body.body, 500) ? ` — ${clean(body.body, 500)}` : '');
         const request = await createRequest({ job, kind: 'reschedule', body: text, visitId: visit.id, photoUrls: [] });
         return res.json({ ok: true, status: 'declined', request });
       }
