@@ -7389,6 +7389,12 @@ mountNetsuiteIntake(app, {
 // only when NETSUITE_SYNC=on; `POST /admin/financials/sync` runs one by hand.
 require('./netsuiteSync')(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, requireAuth, requireAdmin, denverNow });
 
+// Google LSA leads: the export bot (lsa-bot/) posts each manager's Detailed Lead Report here.
+require('./lsaImport')(app, {
+  express, SUPABASE_URL, SUPABASE_SERVICE_KEY,
+  LSA_IMPORT_KEY: (process.env.LSA_IMPORT_KEY || '').trim(),
+});
+
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
 });

@@ -261,3 +261,4 @@ writes to JobNimbus.
   payloads without calling the LLM or writing), `GET /admin/collections/status`,
   `POST /admin/collections/jobs/:jobId/refresh` (single job, forced; the app's
   "Re-check" button).
+- `LSA_IMPORT_KEY` — bearer key the LSA export bot (lsa-bot/) uses on `POST /lsa/import` (lsaImport.js, schema `supabase_lsa_leads.sql`); unset = the endpoint answers 503
