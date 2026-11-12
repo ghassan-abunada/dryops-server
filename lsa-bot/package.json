@@ -1,0 +1,14 @@
+{
+  "name": "dryops-lsa-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Downloads the Google Local Services Ads detailed lead report for every manager account and hands the files to DryOps.",
+  "scripts": {
+    "login": "node lsaBot.js login",
+    "export": "node lsaBot.js run",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "playwright-core": "^1.49.0"
+  }
+}
