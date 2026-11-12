@@ -23,7 +23,7 @@ function recordingSig(secret, callrailId, exp) {
 module.exports = function mountWyh(app, deps) {
   const {
     requireAuth, sbGet, sbPatch, sbInsert, jnGetJson, jnAddNote, jnFetchAccountUsers, loadActor, UUID_RE,
-    callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, RECORDING_SECRET,
+    callrailApi, callrailKeyFor, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, RECORDING_SECRET,
     sendEmail, escapeHtml, WEB_APP_URL,
   } = deps;
   const enc = encodeURIComponent;
@@ -292,7 +292,9 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
       // {"url": ".../recording/redirect?access_key=…"} (verified 2026-10-26);
       // that url 302s to the MP3 and must be fetched WITHOUT our Authorization
       // header. Older accounts may redirect straight away — handle both.
-      let upstream = await fetch(found.recording, { redirect: 'manual', headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json' } });
+      // The key must belong to the account the call lives in (per-account keys).
+      const apiKey = callrailKeyFor ? callrailKeyFor(found.account) : CALLRAIL_API_KEY;
+      let upstream = await fetch(found.recording, { redirect: 'manual', headers: { Authorization: `Token token="${apiKey}"`, Accept: 'application/json' } });
       const ct = String(upstream.headers.get('content-type') || '');
       if (upstream.ok && /json/i.test(ct)) {
         const j = await upstream.json().catch(() => null);
