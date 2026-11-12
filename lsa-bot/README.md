@@ -41,6 +41,14 @@ exits 0 only when every account exported.
 | `DRYOPS_IMPORT_URL` | if set, each file is POSTed here as `text/csv` with `?account=&from=&to=` | unset |
 | `DRYOPS_IMPORT_KEY` | bearer key for that endpoint | unset |
 
+Put the two `DRYOPS_` values in `lsa-bot/.env` (git-ignored) and the bot picks
+them up by itself:
+
+```
+DRYOPS_IMPORT_URL=https://dryops-server-production.up.railway.app/lsa/import
+DRYOPS_IMPORT_KEY=<the server's LSA_IMPORT_KEY>
+```
+
 Hourly on a Mac or Linux box (cron):
 
 ```

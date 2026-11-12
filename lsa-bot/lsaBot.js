@@ -32,6 +32,10 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { resolveWindow, monthChunks, ymd, compact } = require('./dates');
 
+// Settings may live in lsa-bot/.env (never committed); real environment variables win.
+const ENV_FILE = path.join(__dirname, '.env');
+if (fs.existsSync(ENV_FILE) && process.loadEnvFile) process.loadEnvFile(ENV_FILE);
+
 const PICKER_URL = 'https://ads.google.com/localservices/accountpicker';
 const PROFILE_DIR = path.resolve(process.env.LSA_PROFILE_DIR || path.join(__dirname, 'profile'));
 const OUT_DIR = path.resolve(process.env.LSA_OUT_DIR || path.join(__dirname, 'out'));
