@@ -58,10 +58,28 @@ if (!LEAD_ENC_KEYS[LEAD_ENC_CURRENT]) {
 // CallRail (call tracking). API key + account id for pulling numbers/calls;
 // a separate shared secret gates the post-call webhook (?token=... in the URL).
 const CALLRAIL_API_KEY = (process.env.CALLRAIL_API_KEY || '').trim();
-// One or more CallRail account ids (comma-separated) — the same API key can
-// access multiple accounts. Accepts CALLRAIL_ACCOUNT_IDS or the legacy singular.
-const CALLRAIL_ACCOUNT_IDS = (process.env.CALLRAIL_ACCOUNT_IDS || process.env.CALLRAIL_ACCOUNT_ID || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
+// Per-account API keys. A CallRail key belongs to a user, and CallRail refuses
+// the same email on two separate accounts, so an expansion with its own
+// account (BCI, A3) gets its own user + key:
+//   CALLRAIL_API_KEYS="<accountId>=<key>,<accountId>=<key>"
+// CALLRAIL_API_KEY stays the default for every account not listed (JN ENT and
+// OGS Expansion share one user). Accounts named here are ingested even if
+// CALLRAIL_ACCOUNT_IDS forgets them.
+const CALLRAIL_API_KEYS = Object.fromEntries(
+  (process.env.CALLRAIL_API_KEYS || '').split(',').map(s => s.trim()).filter(Boolean).map(pair => {
+    const i = pair.search(/[=:]/);
+    return i > 0 ? [pair.slice(0, i).trim(), pair.slice(i + 1).trim()] : [pair, ''];
+  }).filter(([id, key]) => id && key),
+);
+function callrailKeyFor(accountId) { return CALLRAIL_API_KEYS[String(accountId)] || CALLRAIL_API_KEY; }
+function callrailAuth(accountId) { return { Authorization: `Token token="${callrailKeyFor(accountId)}"`, Accept: 'application/json' }; }
+// One or more CallRail account ids (comma-separated) — one API key can span
+// several accounts. Accepts CALLRAIL_ACCOUNT_IDS or the legacy singular; ids
+// that carry their own key in CALLRAIL_API_KEYS are included automatically.
+const CALLRAIL_ACCOUNT_IDS = Array.from(new Set([
+  ...(process.env.CALLRAIL_ACCOUNT_IDS || process.env.CALLRAIL_ACCOUNT_ID || '').split(',').map(s => s.trim()).filter(Boolean),
+  ...Object.keys(CALLRAIL_API_KEYS),
+]));
 const CALLRAIL_WEBHOOK_TOKEN = (process.env.CALLRAIL_WEBHOOK_TOKEN || '').trim();
 
 // ── Fail fast on missing secrets ──────────────────────────────────────────────
@@ -820,7 +838,7 @@ async function sbRpc(fn) {
 }
 async function callrailApi(accountId, pathAndQuery) {
   const r = await fetch(`https://api.callrail.com/v3/a/${accountId}/${pathAndQuery}`, {
-    headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json' },
+    headers: callrailAuth(accountId),
   });
   const text = await r.text();
   let json = null; try { json = JSON.parse(text); } catch {}
@@ -830,19 +848,29 @@ async function callrailApi(accountId, pathAndQuery) {
 async function callrailApiWrite(accountId, method, path, body) {
   const r = await fetch(`https://api.callrail.com/v3/a/${accountId}/${path}`, {
     method,
-    headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json', 'Content-Type': 'application/json' },
+    headers: { ...callrailAuth(accountId), 'Content-Type': 'application/json' },
     body: JSON.stringify(body || {}),
   });
   const text = await r.text();
   let json = null; try { json = JSON.parse(text); } catch {}
   return { ok: r.ok, status: r.status, json, text: text.slice(0, 300) };
 }
+// Every account any of our keys can see (deduped by id). Each entry carries
+// `key`: 'default' or the account id whose per-account key saw it.
 async function callrailAccounts() {
-  const r = await fetch('https://api.callrail.com/v3/a.json', {
-    headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json' },
-  });
-  if (!r.ok) return [];
-  const j = await r.json(); return (j && (j.accounts || j.data)) || [];
+  const keys = [['default', CALLRAIL_API_KEY], ...Object.entries(CALLRAIL_API_KEYS)].filter(([, k]) => k);
+  const byId = new Map();
+  for (const [label, key] of keys) {
+    try {
+      const r = await fetch('https://api.callrail.com/v3/a.json?per_page=100', {
+        headers: { Authorization: `Token token="${key}"`, Accept: 'application/json' },
+      });
+      if (!r.ok) { console.warn('[callrail] accounts list failed for key', label, r.status); continue; }
+      const j = await r.json();
+      for (const a of (j && (j.accounts || j.data)) || []) if (!byId.has(String(a.id))) byId.set(String(a.id), { ...a, key: label });
+    } catch (e) { console.warn('[callrail] accounts list error for key', label, e.message); }
+  }
+  return [...byId.values()];
 }
 // Optional CallRail fields we ask for on every pull: attribution (source…),
 // plus the WYH review signals — tags ("Schedule Booked"), lead_status, the
@@ -1182,20 +1210,14 @@ if (SUPABASE_SERVICE_KEY && CALLRAIL_API_KEY && CALLRAIL_ACCOUNT_IDS.length && C
 // it to CALLRAIL_ACCOUNT_IDS on Railway, then backfill + install webhooks.
 // Before any ids are configured it is reachable without auth (first setup).
 app.get('/admin/callrail/accounts', (req, res, next) => CALLRAIL_ACCOUNT_IDS.length ? requireCallAccess(req, res, next) : next(), async (req, res) => {
-  if (!CALLRAIL_API_KEY) return res.status(400).json({ error: 'CALLRAIL_API_KEY is not set' });
+  if (!CALLRAIL_API_KEY && !Object.keys(CALLRAIL_API_KEYS).length) return res.status(400).json({ error: 'CALLRAIL_API_KEY is not set' });
   try {
-    const r = await fetch('https://api.callrail.com/v3/a.json?per_page=100', {
-      headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json' },
-    });
-    const text = await r.text();
-    let json = null; try { json = JSON.parse(text); } catch {}
-    if (!r.ok) return res.status(r.status).json({ error: 'CallRail API error', status: r.status, body: text.slice(0, 300) });
-    const accounts = (json && (json.accounts || json.data)) || [];
+    const accounts = await callrailAccounts();
     const configured = new Set(CALLRAIL_ACCOUNT_IDS.map(String));
     const seen = new Set(accounts.map(a => String(a.id)));
     return res.json({
       ok: true,
-      accounts: accounts.map(a => ({ id: a.id, name: a.name, status: a.status || null, configured: configured.has(String(a.id)) })),
+      accounts: accounts.map(a => ({ id: a.id, name: a.name, status: a.status || null, configured: configured.has(String(a.id)), key: a.key })),
       // Configured ids the key can no longer see (user removed from the account?).
       unreachable: CALLRAIL_ACCOUNT_IDS.filter(id => !seen.has(String(id))),
     });
@@ -7256,7 +7278,7 @@ const salesRep = require('./salesRep')(app, {
 require('./wyh')(app, {
   requireAuth, sbGet, sbPatch, sbInsert, jnGetJson, jnAddNote, jnFetchAccountUsers, UUID_RE,
   loadActor: intake.loadActor,
-  callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
+  callrailApi, callrailKeyFor, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
   // Emails the call taker when feedback is saved or a note is posted (Resend).
   sendEmail, escapeHtml, WEB_APP_URL,
   // Signs the short-lived recording links the app's inline player streams from.
