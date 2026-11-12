@@ -1176,21 +1176,29 @@ if (SUPABASE_SERVICE_KEY && CALLRAIL_API_KEY && CALLRAIL_ACCOUNT_IDS.length && C
   }, 90 * 1000).unref?.();
 }
 
-// TEMPORARY setup helper: returns CallRail accounts (id + name) using the API
-// key, ONLY while no account ids are configured yet. Self-disables (410) once
-// CALLRAIL_ACCOUNT_IDS is set, so it needs no manual removal.
-app.get('/admin/callrail/accounts', async (req, res) => {
+// Every CallRail account the API key can reach, with whether the server
+// ingests it (CALLRAIL_ACCOUNT_IDS). Used when a new expansion gets its own
+// CallRail account: add the API user to that account, read its id here, add
+// it to CALLRAIL_ACCOUNT_IDS on Railway, then backfill + install webhooks.
+// Before any ids are configured it is reachable without auth (first setup).
+app.get('/admin/callrail/accounts', (req, res, next) => CALLRAIL_ACCOUNT_IDS.length ? requireCallAccess(req, res, next) : next(), async (req, res) => {
   if (!CALLRAIL_API_KEY) return res.status(400).json({ error: 'CALLRAIL_API_KEY is not set' });
-  if (CALLRAIL_ACCOUNT_IDS.length) return res.status(410).json({ error: 'Already configured (CALLRAIL_ACCOUNT_IDS set)' });
   try {
-    const r = await fetch('https://api.callrail.com/v3/a.json', {
+    const r = await fetch('https://api.callrail.com/v3/a.json?per_page=100', {
       headers: { Authorization: `Token token="${CALLRAIL_API_KEY}"`, Accept: 'application/json' },
     });
     const text = await r.text();
     let json = null; try { json = JSON.parse(text); } catch {}
     if (!r.ok) return res.status(r.status).json({ error: 'CallRail API error', status: r.status, body: text.slice(0, 300) });
     const accounts = (json && (json.accounts || json.data)) || [];
-    return res.json({ ok: true, accounts: accounts.map(a => ({ id: a.id, name: a.name })) });
+    const configured = new Set(CALLRAIL_ACCOUNT_IDS.map(String));
+    const seen = new Set(accounts.map(a => String(a.id)));
+    return res.json({
+      ok: true,
+      accounts: accounts.map(a => ({ id: a.id, name: a.name, status: a.status || null, configured: configured.has(String(a.id)) })),
+      // Configured ids the key can no longer see (user removed from the account?).
+      unreachable: CALLRAIL_ACCOUNT_IDS.filter(id => !seen.has(String(id))),
+    });
   } catch (err) {
     return res.status(502).json({ error: err.message });
   }
@@ -1277,7 +1285,12 @@ let lastBackfillResult = null; // captured for the self-disabling diag endpoint
 app.post('/admin/callrail/backfill', requireCallAccess, async (req, res) => {
   if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return res.status(400).json({ error: 'CallRail is not configured on the server' });
   if (callrailBackfillRunning) return res.status(409).json({ error: 'A backfill is already running' });
-  const { start_date, end_date } = req.body || {};
+  const { start_date, end_date, account_ids } = req.body || {};
+  // Optional account_ids: backfill only those (e.g. a newly added expansion
+  // account) instead of pulling every account's history again.
+  const wanted = Array.isArray(account_ids) && account_ids.length ? account_ids.map(String) : null;
+  const accounts = wanted ? CALLRAIL_ACCOUNT_IDS.filter(id => wanted.includes(String(id))) : CALLRAIL_ACCOUNT_IDS;
+  if (!accounts.length) return res.status(400).json({ error: 'None of account_ids is in CALLRAIL_ACCOUNT_IDS', configured: CALLRAIL_ACCOUNT_IDS });
   // Only OPTIONAL attribution fields (source/medium/campaign/first_call/gclid);
   // phone, answered, duration, direction, start_time, customer_* are defaults.
   const fields = CALLRAIL_CALL_FIELDS;
@@ -1288,7 +1301,7 @@ app.post('/admin/callrail/backfill', requireCallAccess, async (req, res) => {
 
   // Probe account #1 page 1 synchronously so config/auth/param errors + the
   // available call count surface in the response (the full pull runs in bg).
-  const probeAcct = CALLRAIL_ACCOUNT_IDS[0];
+  const probeAcct = accounts[0];
   const p = await fetchCallsPage(probeAcct, 1, fields, dateQ);
   const pcalls = (p.json && (p.json.calls || p.json.data)) || [];
   const probe = {
@@ -1300,13 +1313,13 @@ app.post('/admin/callrail/backfill', requireCallAccess, async (req, res) => {
   };
 
   callrailBackfillRunning = true;
-  lastBackfillResult = { phase: 'started', probe, fetched: 0, upserted: 0, error: null, at: new Date().toISOString() };
-  res.status(202).json({ ok: true, started: true, probe }); // respond now; process below
+  lastBackfillResult = { phase: 'started', probe, accounts, fetched: 0, upserted: 0, error: null, at: new Date().toISOString() };
+  res.status(202).json({ ok: true, started: true, accounts, probe }); // respond now; process below
 
   (async () => {
     let fetched = 0, upserted = 0, firstErr = null;
     try {
-      for (const acct of CALLRAIL_ACCOUNT_IDS) {
+      for (const acct of accounts) {
         for (let page = 1; page <= 200; page++) {
           const r = await fetchCallsPage(acct, page, fields, dateQ);
           if (!r.ok) { firstErr = firstErr || `fetch ${acct} p${page} HTTP ${r.status}`; console.error('[callrail-backfill] api', acct, r.status); break; }
