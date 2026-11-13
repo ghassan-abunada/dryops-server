@@ -1,0 +1,464 @@
+[
+  {
+    "name": "initial walk, complete",
+    "kind": "initial_walk",
+    "report": {
+      "service": "offsite",
+      "rooms": [
+        {
+          "name": "Kitchen",
+          "wide_photo": true
+        },
+        {
+          "name": "Living room",
+          "wide_photo": true,
+          "notes": "Piano stays"
+        },
+        {
+          "name": "Primary bedroom",
+          "wide_photo": false
+        },
+        {
+          "name": "kitchen",
+          "wide_photo": true
+        }
+      ],
+      "insurance": {
+        "not_insurance": false,
+        "carrier": "State Farm",
+        "claim_number": "CLM-9",
+        "adjuster_name": "Pat Adjuster",
+        "adjuster_phone": "2145550199",
+        "adjuster_email": ""
+      },
+      "work_auth": {
+        "status": "signed",
+        "reason": ""
+      },
+      "vault_estimate": 4,
+      "packout": {
+        "scheduled": true,
+        "date": "2026-11-16",
+        "start_min": 480,
+        "end_min": 600,
+        "reason": ""
+      },
+      "notes": "Gate code 4471"
+    },
+    "expected": {
+      "missing": [],
+      "complete": true,
+      "summary": "Initial walk report\nService: Offsite storage\nRooms to pack (3): Kitchen, Living room, Primary bedroom\nWide photos: 2 of 3 rooms (missing: Primary bedroom)\nLiving room: Piano stays\nInsurance: State Farm · claim CLM-9 · adjuster Pat Adjuster\nWork authorization: Signed\nVault estimate: 4\nPack-out: scheduled Mon 11/16, 8am–10am\nNotes: Gate code 4471",
+      "line": "Offsite · 3 rooms · pack-out Mon 11/16",
+      "normalized": {
+        "service": "offsite",
+        "rooms": [
+          {
+            "name": "Kitchen",
+            "wide_photo": true
+          },
+          {
+            "name": "Living room",
+            "wide_photo": true,
+            "notes": "Piano stays"
+          },
+          {
+            "name": "Primary bedroom",
+            "wide_photo": false
+          }
+        ],
+        "insurance": {
+          "not_insurance": false,
+          "carrier": "State Farm",
+          "claim_number": "CLM-9",
+          "adjuster_name": "Pat Adjuster",
+          "adjuster_phone": "2145550199",
+          "adjuster_email": ""
+        },
+        "work_auth": {
+          "status": "signed",
+          "reason": ""
+        },
+        "vault_estimate": 4,
+        "packout": {
+          "scheduled": true,
+          "date": "2026-11-16",
+          "start_min": 480,
+          "end_min": 600,
+          "reason": ""
+        },
+        "notes": "Gate code 4471"
+      }
+    }
+  },
+  {
+    "name": "initial walk, manipulation, not insurance, nothing scheduled",
+    "kind": "initial_walk",
+    "report": {
+      "service": "manipulation",
+      "rooms": [
+        {
+          "name": "Garage",
+          "wide_photo": true
+        }
+      ],
+      "insurance": {
+        "not_insurance": true
+      },
+      "work_auth": {
+        "status": "not_signed",
+        "reason": "Spouse must sign"
+      },
+      "vault_estimate": 3,
+      "packout": {
+        "scheduled": false,
+        "reason": "Waiting on the adjuster"
+      }
+    },
+    "expected": {
+      "missing": [],
+      "complete": true,
+      "summary": "Initial walk report\nService: Content manipulation\nRooms to pack (1): Garage\nWide photos: 1 of 1 rooms\nInsurance: not an insurance job\nWork authorization: Not signed (Spouse must sign)\nManipulation: not scheduled yet (Waiting on the adjuster)",
+      "line": "Manipulation · 1 room · not scheduled",
+      "normalized": {
+        "service": "manipulation",
+        "rooms": [
+          {
+            "name": "Garage",
+            "wide_photo": true
+          }
+        ],
+        "insurance": {
+          "not_insurance": true,
+          "carrier": "",
+          "claim_number": "",
+          "adjuster_name": "",
+          "adjuster_phone": "",
+          "adjuster_email": ""
+        },
+        "work_auth": {
+          "status": "not_signed",
+          "reason": "Spouse must sign"
+        },
+        "vault_estimate": null,
+        "packout": {
+          "scheduled": false,
+          "date": "",
+          "start_min": null,
+          "end_min": null,
+          "reason": "Waiting on the adjuster"
+        },
+        "notes": ""
+      }
+    }
+  },
+  {
+    "name": "initial walk, empty",
+    "kind": "initial_walk",
+    "report": {},
+    "expected": {
+      "missing": [
+        "Offsite storage or manipulation",
+        "Rooms to pack",
+        "Insurance carrier",
+        "Claim number",
+        "Work authorization",
+        "Pack-out scheduled"
+      ],
+      "complete": false,
+      "summary": "Initial walk report\nService: not decided\nRooms to pack: none listed\nInsurance: carrier missing · claim # missing\nWork authorization: not answered",
+      "line": "",
+      "normalized": {
+        "service": null,
+        "rooms": [],
+        "insurance": {
+          "not_insurance": false,
+          "carrier": "",
+          "claim_number": "",
+          "adjuster_name": "",
+          "adjuster_phone": "",
+          "adjuster_email": ""
+        },
+        "work_auth": {
+          "status": null,
+          "reason": ""
+        },
+        "vault_estimate": null,
+        "packout": {
+          "scheduled": null,
+          "date": "",
+          "start_min": null,
+          "end_min": null,
+          "reason": ""
+        },
+        "notes": ""
+      }
+    }
+  },
+  {
+    "name": "initial walk, half answered",
+    "kind": "initial_walk",
+    "report": {
+      "service": "both",
+      "rooms": [
+        {
+          "name": "Office",
+          "wide_photo": false
+        }
+      ],
+      "insurance": {
+        "carrier": "Allstate"
+      },
+      "work_auth": {
+        "status": "not_signed"
+      },
+      "packout": {
+        "scheduled": true,
+        "date": "next week",
+        "start_min": 510,
+        "end_min": 400
+      }
+    },
+    "expected": {
+      "missing": [
+        "Claim number",
+        "Why the work authorization is not signed",
+        "Pack-out date"
+      ],
+      "complete": false,
+      "summary": "Initial walk report\nService: Offsite storage + manipulation\nRooms to pack (1): Office\nWide photos: 0 of 1 rooms (missing: Office)\nInsurance: Allstate · claim # missing\nWork authorization: Not signed\nPack-out: scheduled date missing",
+      "line": "Offsite + manipulation · 1 room",
+      "normalized": {
+        "service": "both",
+        "rooms": [
+          {
+            "name": "Office",
+            "wide_photo": false
+          }
+        ],
+        "insurance": {
+          "not_insurance": false,
+          "carrier": "Allstate",
+          "claim_number": "",
+          "adjuster_name": "",
+          "adjuster_phone": "",
+          "adjuster_email": ""
+        },
+        "work_auth": {
+          "status": "not_signed",
+          "reason": ""
+        },
+        "vault_estimate": null,
+        "packout": {
+          "scheduled": true,
+          "date": "",
+          "start_min": 510,
+          "end_min": null,
+          "reason": ""
+        },
+        "notes": ""
+      }
+    }
+  },
+  {
+    "name": "pack out to the warehouse",
+    "kind": "pack_out",
+    "report": {
+      "techs_on_site": 4,
+      "destination": {
+        "kind": "warehouse",
+        "warehouse_id": "w1",
+        "warehouse_name": "Fort Worth warehouse",
+        "vault_labels": [
+          "FTW-001",
+          "FTW-002",
+          "FTW-003"
+        ]
+      },
+      "vault_ids": [
+        "v1",
+        "v2",
+        "v3"
+      ],
+      "vault_count": 9,
+      "photos_taken": true,
+      "inventory_done": true,
+      "notes": "TV wrapped separately"
+    },
+    "expected": {
+      "missing": [],
+      "complete": true,
+      "summary": "Pack-out report\nTechnicians on site: 4\nStored at: Fort Worth warehouse\nVaults (3): FTW-001, FTW-002, FTW-003\nPhotos taken: Yes\nInventory done: Yes\nNotes: TV wrapped separately",
+      "line": "3 vaults · Fort Worth warehouse",
+      "normalized": {
+        "techs_on_site": 4,
+        "destination": {
+          "kind": "warehouse",
+          "warehouse_id": "w1",
+          "warehouse_name": "Fort Worth warehouse",
+          "vault_labels": [
+            "FTW-001",
+            "FTW-002",
+            "FTW-003"
+          ]
+        },
+        "vault_ids": [
+          "v1",
+          "v2",
+          "v3"
+        ],
+        "vault_count": 3,
+        "photos_taken": true,
+        "inventory_done": true,
+        "notes": "TV wrapped separately"
+      }
+    }
+  },
+  {
+    "name": "pack out to a storage unit",
+    "kind": "pack_out",
+    "report": {
+      "techs_on_site": "2",
+      "destination": {
+        "kind": "unit",
+        "facility": "CubeSmart Hulen",
+        "unit": "B214",
+        "access": "Gate 4471#"
+      },
+      "vault_ids": [
+        "ignored"
+      ],
+      "vault_count": 1,
+      "photos_taken": true,
+      "inventory_done": false
+    },
+    "expected": {
+      "missing": [],
+      "complete": true,
+      "summary": "Pack-out report\nTechnicians on site: 2\nStored at: CubeSmart Hulen, unit B214\nAccess: Gate 4471#\nVaults / loads: 1\nPhotos taken: Yes\nInventory done: No",
+      "line": "1 vault · CubeSmart Hulen",
+      "normalized": {
+        "techs_on_site": 2,
+        "destination": {
+          "kind": "unit",
+          "facility": "CubeSmart Hulen",
+          "unit": "B214",
+          "access": "Gate 4471#"
+        },
+        "vault_ids": [],
+        "vault_count": 1,
+        "photos_taken": true,
+        "inventory_done": false,
+        "notes": ""
+      }
+    }
+  },
+  {
+    "name": "pack out, storage unit missing its number",
+    "kind": "pack_out",
+    "report": {
+      "techs_on_site": 0,
+      "destination": {
+        "kind": "unit",
+        "facility": "",
+        "unit": ""
+      }
+    },
+    "expected": {
+      "missing": [
+        "Technicians on site",
+        "Storage facility",
+        "Unit number",
+        "How many vaults or loads",
+        "Photos taken",
+        "Inventory done"
+      ],
+      "complete": false,
+      "summary": "Pack-out report\nStored at: storage unit",
+      "line": "storage unit",
+      "normalized": {
+        "techs_on_site": null,
+        "destination": {
+          "kind": "unit",
+          "facility": "",
+          "unit": "",
+          "access": ""
+        },
+        "vault_ids": [],
+        "vault_count": null,
+        "photos_taken": null,
+        "inventory_done": null,
+        "notes": ""
+      }
+    }
+  },
+  {
+    "name": "pack back, everything returned",
+    "kind": "pack_back",
+    "report": {
+      "techs_on_site": 3,
+      "everything_returned": true,
+      "remaining": "ignored",
+      "photos_taken": true,
+      "notes": ""
+    },
+    "expected": {
+      "missing": [],
+      "complete": true,
+      "summary": "Pack-back report\nTechnicians on site: 3\nEverything returned: Yes\nPhotos taken: Yes",
+      "line": "Everything returned",
+      "normalized": {
+        "techs_on_site": 3,
+        "everything_returned": true,
+        "remaining": "ignored",
+        "photos_taken": true,
+        "notes": ""
+      }
+    }
+  },
+  {
+    "name": "pack back, some left",
+    "kind": "pack_back",
+    "report": {
+      "techs_on_site": 2,
+      "everything_returned": false,
+      "remaining": "Two vaults of garage items",
+      "photos_taken": false
+    },
+    "expected": {
+      "missing": [],
+      "complete": true,
+      "summary": "Pack-back report\nTechnicians on site: 2\nEverything returned: No (still in storage: Two vaults of garage items)\nPhotos taken: No",
+      "line": "Some items still in storage",
+      "normalized": {
+        "techs_on_site": 2,
+        "everything_returned": false,
+        "remaining": "Two vaults of garage items",
+        "photos_taken": false,
+        "notes": ""
+      }
+    }
+  },
+  {
+    "name": "pack back, empty",
+    "kind": "pack_back",
+    "report": null,
+    "expected": {
+      "missing": [
+        "Technicians on site",
+        "Everything returned",
+        "Photos taken"
+      ],
+      "complete": false,
+      "summary": "Pack-back report",
+      "line": "",
+      "normalized": {
+        "techs_on_site": null,
+        "everything_returned": null,
+        "remaining": "",
+        "photos_taken": null,
+        "notes": ""
+      }
+    }
+  }
+]

@@ -1,0 +1,22 @@
+{
+  "partners": [
+    { "location_id": "mitA", "service": "contents", "partner_location_id": "conA", "is_default": true },
+    { "location_id": "mitB", "service": "contents", "partner_location_id": "conB", "is_default": true },
+    { "location_id": "mitB", "service": "contents", "partner_location_id": "conA", "is_default": false },
+    { "location_id": "reb", "service": "contents", "partner_location_id": "conA", "is_default": true },
+    { "location_id": "reb", "service": "contents", "partner_location_id": "conB", "is_default": false },
+    { "location_id": "mitA", "service": "rebuild", "partner_location_id": "reb", "is_default": true },
+    { "location_id": "mitA", "service": "testing", "partner_location_id": "tst", "is_default": true },
+    { "location_id": "mitSelf", "service": "contents", "partner_location_id": "mitSelf", "is_default": true }
+  ],
+  "cases": [
+    { "name": "a mitigation job goes to its own default", "service": "contents", "source": "mitA", "referrers": [], "expected": [{ "partner_location_id": "conA", "via": "own", "from_location_id": "mitA", "is_default": true }] },
+    { "name": "alternates follow the default", "service": "contents", "source": "mitB", "referrers": [], "expected": [{ "partner_location_id": "conB", "via": "own", "from_location_id": "mitB", "is_default": true }, { "partner_location_id": "conA", "via": "own", "from_location_id": "mitB", "is_default": false }] },
+    { "name": "a rebuild job follows the mitigation location that referred it", "service": "contents", "source": "reb", "referrers": ["mitB"], "expected": [{ "partner_location_id": "conB", "via": "referrer", "from_location_id": "mitB", "is_default": true }, { "partner_location_id": "conA", "via": "own", "from_location_id": "reb", "is_default": true }] },
+    { "name": "a referrer with the same default adds nothing", "service": "contents", "source": "reb", "referrers": ["mitA"], "expected": [{ "partner_location_id": "conA", "via": "referrer", "from_location_id": "mitA", "is_default": true }, { "partner_location_id": "conB", "via": "own", "from_location_id": "reb", "is_default": false }] },
+    { "name": "a referrer with no partner falls back to the source", "service": "contents", "source": "reb", "referrers": ["mitNone", null], "expected": [{ "partner_location_id": "conA", "via": "own", "from_location_id": "reb", "is_default": true }, { "partner_location_id": "conB", "via": "own", "from_location_id": "reb", "is_default": false }] },
+    { "name": "a location can be its own partner", "service": "contents", "source": "mitSelf", "referrers": [], "expected": [{ "partner_location_id": "mitSelf", "via": "own", "from_location_id": "mitSelf", "is_default": true }] },
+    { "name": "the source is never its own referrer", "service": "contents", "source": "mitA", "referrers": ["mitA"], "expected": [{ "partner_location_id": "conA", "via": "own", "from_location_id": "mitA", "is_default": true }] },
+    { "name": "nothing set", "service": "abatement", "source": "mitA", "referrers": [], "expected": [] }
+  ]
+}

@@ -1,0 +1,582 @@
+{
+  "today": "2026-11-13",
+  "leads": [
+    {
+      "name": "walked, landed, pack-out booked",
+      "lead": {
+        "job_id": "j1",
+        "jn_id": "jn1",
+        "name": "Lauren Wyatt (FTW - CON)",
+        "client_name": "Lauren Wyatt",
+        "status": "PO in progress",
+        "stage": "In Production",
+        "location_id": "conA",
+        "location_name": "FTW Contents",
+        "created_at": "2026-11-07T15:20:00Z",
+        "referred_by": "A1 Dallas",
+        "referring_job_name": "Lauren Wyatt (24 - DAL - MIT)",
+        "insurance_type": "Insurance",
+        "insurer": "State Farm",
+        "claim_number": "CLM-9",
+        "contents_service": "offsite",
+        "in_storage": false,
+        "storage_vaults": null,
+        "walk_visit_id": "w1",
+        "walk_date": "2026-11-09",
+        "walk_status": "completed",
+        "walk_completed_at": "2026-11-09T18:00:00Z",
+        "walk_report": {
+          "service": "offsite",
+          "rooms": [
+            {
+              "name": "Kitchen",
+              "wide_photo": true
+            },
+            {
+              "name": "Living room",
+              "wide_photo": true
+            }
+          ],
+          "insurance": {
+            "carrier": "State Farm",
+            "claim_number": "CLM-9"
+          },
+          "work_auth": {
+            "status": "signed"
+          },
+          "vault_estimate": 4,
+          "packout": {
+            "scheduled": true,
+            "date": "2026-11-12",
+            "start_min": 480,
+            "end_min": 600
+          }
+        },
+        "packout_visit_id": "p1",
+        "packout_task_type": "pack_out",
+        "packout_date": "2026-11-12",
+        "packout_status": "scheduled",
+        "packout_booked_at": "2026-11-09T18:01:00Z",
+        "photo_count": 42,
+        "review": null
+      },
+      "expected": {
+        "timing": {
+          "walkDays": 2,
+          "packoutDays": 3,
+          "line": "Walked 2 days after referral · Pack-out scheduled 3 days after the walk"
+        },
+        "auto": {
+          "walked": "yes",
+          "landed": true,
+          "work_auth_signed": true,
+          "photo_wide": true,
+          "has_carrier": true,
+          "has_claim": true,
+          "storage_kind": "offsite"
+        },
+        "status": "ready",
+        "walk": {
+          "text": "Walked Mon 11/9",
+          "tone": "green"
+        },
+        "packout": {
+          "text": "PO Thu 11/12",
+          "tone": "gray"
+        },
+        "storage": "Offsite",
+        "facts": {
+          "referred_on": "Sat 11/7",
+          "referred_by": "A1 Dallas",
+          "timing": "Walked 2 days after referral · Pack-out scheduled 3 days after the walk",
+          "walked_on": "Mon 11/9",
+          "insurer": "State Farm",
+          "claim_number": "CLM-9"
+        }
+      }
+    },
+    {
+      "name": "walk booked, not done",
+      "lead": {
+        "job_id": "j1",
+        "jn_id": "jn1",
+        "name": "Lauren Wyatt (FTW - CON)",
+        "client_name": "Lauren Wyatt",
+        "status": "Lead",
+        "stage": "Lead",
+        "location_id": "conA",
+        "location_name": "FTW Contents",
+        "created_at": "2026-11-07T15:20:00Z",
+        "referred_by": "A1 Dallas",
+        "referring_job_name": "Lauren Wyatt (24 - DAL - MIT)",
+        "insurance_type": "Insurance",
+        "insurer": null,
+        "claim_number": null,
+        "contents_service": null,
+        "in_storage": false,
+        "storage_vaults": null,
+        "walk_visit_id": "w1",
+        "walk_date": "2026-11-14",
+        "walk_status": "scheduled",
+        "walk_completed_at": "2026-11-09T18:00:00Z",
+        "walk_report": null,
+        "packout_visit_id": null,
+        "packout_task_type": null,
+        "packout_date": null,
+        "packout_status": null,
+        "packout_booked_at": "2026-11-09T18:01:00Z",
+        "photo_count": 42,
+        "review": null
+      },
+      "expected": {
+        "timing": {
+          "walkDays": 7,
+          "packoutDays": null,
+          "line": "Walk booked for Sat 11/14, not done yet · No pack-out on the schedule"
+        },
+        "auto": {
+          "walked": "not_yet",
+          "has_carrier": false,
+          "has_claim": false
+        },
+        "status": "not_walked",
+        "walk": {
+          "text": "Booked Sat 11/14",
+          "tone": "gray"
+        },
+        "packout": {
+          "text": "—",
+          "tone": "gray"
+        },
+        "storage": "—",
+        "facts": {
+          "referred_on": "Sat 11/7",
+          "referred_by": "A1 Dallas",
+          "timing": "Walk booked for Sat 11/14, not done yet · No pack-out on the schedule",
+          "walked_on": null,
+          "insurer": null,
+          "claim_number": null
+        }
+      }
+    },
+    {
+      "name": "nothing booked",
+      "lead": {
+        "job_id": "j1",
+        "jn_id": "jn1",
+        "name": "Lauren Wyatt (FTW - CON)",
+        "client_name": "Lauren Wyatt",
+        "status": "Lead",
+        "stage": "Lead",
+        "location_id": "conA",
+        "location_name": "FTW Contents",
+        "created_at": "2026-11-07T15:20:00Z",
+        "referred_by": "A1 Dallas",
+        "referring_job_name": "Lauren Wyatt (24 - DAL - MIT)",
+        "insurance_type": "Insurance",
+        "insurer": "State Farm",
+        "claim_number": "CLM-9",
+        "contents_service": null,
+        "in_storage": false,
+        "storage_vaults": null,
+        "walk_visit_id": null,
+        "walk_date": null,
+        "walk_status": null,
+        "walk_completed_at": "2026-11-09T18:00:00Z",
+        "walk_report": null,
+        "packout_visit_id": null,
+        "packout_task_type": null,
+        "packout_date": null,
+        "packout_status": null,
+        "packout_booked_at": "2026-11-09T18:01:00Z",
+        "photo_count": 42,
+        "review": null
+      },
+      "expected": {
+        "timing": {
+          "walkDays": null,
+          "packoutDays": null,
+          "line": "Not walked yet · 6 days since referral · No pack-out on the schedule"
+        },
+        "auto": {
+          "has_carrier": true,
+          "has_claim": true
+        },
+        "status": "not_walked",
+        "walk": {
+          "text": "Not booked",
+          "tone": "red"
+        },
+        "packout": {
+          "text": "—",
+          "tone": "gray"
+        },
+        "storage": "—",
+        "facts": {
+          "referred_on": "Sat 11/7",
+          "referred_by": "A1 Dallas",
+          "timing": "Not walked yet · 6 days since referral · No pack-out on the schedule",
+          "walked_on": null,
+          "insurer": "State Farm",
+          "claim_number": "CLM-9"
+        }
+      }
+    },
+    {
+      "name": "manipulation, a wide photo missing, not signed, lost",
+      "lead": {
+        "job_id": "j1",
+        "jn_id": "jn1",
+        "name": "Lauren Wyatt (FTW - CON)",
+        "client_name": "Lauren Wyatt",
+        "status": "Not Sold",
+        "stage": "Lost",
+        "location_id": "conA",
+        "location_name": "FTW Contents",
+        "created_at": "2026-11-07T15:20:00Z",
+        "referred_by": "A1 Dallas",
+        "referring_job_name": "Lauren Wyatt (24 - DAL - MIT)",
+        "insurance_type": "Insurance",
+        "insurer": "State Farm",
+        "claim_number": "CLM-9",
+        "contents_service": null,
+        "in_storage": false,
+        "storage_vaults": null,
+        "walk_visit_id": "w1",
+        "walk_date": "2026-11-09",
+        "walk_status": "completed",
+        "walk_completed_at": "2026-11-09T18:00:00Z",
+        "walk_report": {
+          "service": "manipulation",
+          "rooms": [
+            {
+              "name": "Garage",
+              "wide_photo": false
+            }
+          ],
+          "insurance": {
+            "carrier": "State Farm",
+            "claim_number": "CLM-9"
+          },
+          "work_auth": {
+            "status": "not_signed",
+            "reason": "Spouse"
+          },
+          "vault_estimate": 4,
+          "packout": {
+            "scheduled": true,
+            "date": "2026-11-12",
+            "start_min": 480,
+            "end_min": 600
+          }
+        },
+        "packout_visit_id": "p1",
+        "packout_task_type": "content_manipulation",
+        "packout_date": "2026-11-09",
+        "packout_status": "scheduled",
+        "packout_booked_at": "2026-11-09T18:01:00Z",
+        "photo_count": 42,
+        "review": null
+      },
+      "expected": {
+        "timing": {
+          "walkDays": 2,
+          "packoutDays": 0,
+          "line": "Walked 2 days after referral · Manipulation scheduled for the day of the walk"
+        },
+        "auto": {
+          "walked": "yes",
+          "landed": false,
+          "work_auth_signed": false,
+          "photo_wide": false,
+          "has_carrier": true,
+          "has_claim": true,
+          "storage_kind": "manipulation"
+        },
+        "status": "ready",
+        "walk": {
+          "text": "Walked Mon 11/9",
+          "tone": "green"
+        },
+        "packout": {
+          "text": "Manip. Mon 11/9",
+          "tone": "gray"
+        },
+        "storage": "Manipulation",
+        "facts": {
+          "referred_on": "Sat 11/7",
+          "referred_by": "A1 Dallas",
+          "timing": "Walked 2 days after referral · Manipulation scheduled for the day of the walk",
+          "walked_on": "Mon 11/9",
+          "insurer": "State Farm",
+          "claim_number": "CLM-9"
+        }
+      }
+    },
+    {
+      "name": "in storage with vaults, walked as an inspection with no report",
+      "lead": {
+        "job_id": "j1",
+        "jn_id": "jn1",
+        "name": "Lauren Wyatt (FTW - CON)",
+        "client_name": "Lauren Wyatt",
+        "status": "In storage",
+        "stage": "In Production",
+        "location_id": "conA",
+        "location_name": "FTW Contents",
+        "created_at": "2026-11-07T15:20:00Z",
+        "referred_by": "A1 Dallas",
+        "referring_job_name": "Lauren Wyatt (24 - DAL - MIT)",
+        "insurance_type": "Insurance",
+        "insurer": "State Farm",
+        "claim_number": "CLM-9",
+        "contents_service": null,
+        "in_storage": true,
+        "storage_vaults": 6,
+        "walk_visit_id": "w1",
+        "walk_date": "2026-11-09",
+        "walk_status": "completed",
+        "walk_completed_at": "2026-11-09T18:00:00Z",
+        "walk_report": null,
+        "packout_visit_id": "p1",
+        "packout_task_type": "pack_out",
+        "packout_date": "2026-11-12",
+        "packout_status": "scheduled",
+        "packout_booked_at": "2026-11-09T18:01:00Z",
+        "photo_count": 42,
+        "review": null
+      },
+      "expected": {
+        "timing": {
+          "walkDays": 2,
+          "packoutDays": 3,
+          "line": "Walked 2 days after referral · Pack-out scheduled 3 days after the walk"
+        },
+        "auto": {
+          "walked": "yes",
+          "landed": true,
+          "has_carrier": true,
+          "has_claim": true,
+          "storage_kind": "offsite"
+        },
+        "status": "ready",
+        "walk": {
+          "text": "Walked Mon 11/9",
+          "tone": "green"
+        },
+        "packout": {
+          "text": "PO Thu 11/12",
+          "tone": "gray"
+        },
+        "storage": "Offsite · 6",
+        "facts": {
+          "referred_on": "Sat 11/7",
+          "referred_by": "A1 Dallas",
+          "timing": "Walked 2 days after referral · Pack-out scheduled 3 days after the walk",
+          "walked_on": "Mon 11/9",
+          "insurer": "State Farm",
+          "claim_number": "CLM-9"
+        }
+      }
+    }
+  ],
+  "reviews": [
+    {
+      "name": "everything in order, coached",
+      "review": {
+        "walked": "yes",
+        "landed": true,
+        "not_landed_note": null,
+        "work_auth_signed": true,
+        "photo_wide": true,
+        "has_carrier": true,
+        "has_claim": true,
+        "storage_kind": "offsite",
+        "packout_timely": true,
+        "info_sufficient": true,
+        "notes": "Clean file.",
+        "operator_feedback_given": true,
+        "operator_feedback": "Great photos; book the pack-out before leaving the walk.",
+        "operator_response": "Will do",
+        "needs_follow_up": false,
+        "follow_up_reason": null,
+        "follow_up_note": null
+      },
+      "expected": {
+        "missing": {
+          "checklist": [],
+          "coaching": [],
+          "submit": []
+        },
+        "canSubmit": true,
+        "note": "WYH - Gus Abunada\nPackout: referred Sat 11/7 by A1 Dallas\n\nChecklist\n[✓] Walked (Mon 11/9)\n[✓] Landed\n[✓] Work authorization signed\n[✓] Wide photos of each room\n[✓] Carrier listed (State Farm)\n[✓] Claim number listed (CLM-9)\nSold: Offsite storage\n[✓] Pack-out scheduled in a timely manner (Walked 2 days after referral · Pack-out scheduled 3 days after the walk)\n[✓] Enough information in the file\n\nCoaching:\nFeedback: Great photos; book the pack-out before leaving the walk.\nResponse: Will do\n\nNotes: Clean file."
+      }
+    },
+    {
+      "name": "gaps to fix, no feedback given",
+      "review": {
+        "walked": "yes",
+        "landed": true,
+        "not_landed_note": null,
+        "work_auth_signed": false,
+        "photo_wide": false,
+        "has_carrier": true,
+        "has_claim": false,
+        "storage_kind": "offsite",
+        "packout_timely": false,
+        "info_sufficient": false,
+        "notes": null,
+        "operator_feedback_given": false,
+        "operator_feedback": null,
+        "operator_response": null,
+        "needs_follow_up": false,
+        "follow_up_reason": null,
+        "follow_up_note": null
+      },
+      "expected": {
+        "missing": {
+          "checklist": [],
+          "coaching": [],
+          "submit": []
+        },
+        "canSubmit": true,
+        "note": "WYH - Gus Abunada\nPackout: referred Sat 11/7 by A1 Dallas\n\nChecklist\n[✓] Walked (Mon 11/9)\n[✓] Landed\n[ ] Work authorization signed\n[ ] Wide photos of each room\n[✓] Carrier listed (State Farm)\n[ ] Claim number listed\nSold: Offsite storage\n[ ] Pack-out scheduled in a timely manner (Walked 2 days after referral · Pack-out scheduled 3 days after the walk)\n[ ] Enough information in the file\n\nAction Required\n- Get the work authorization signed\n- Take a wide photo of each room\n- Add the claim number\n- Get the pack-out on the schedule sooner\n- Complete the file\n- Give the operator feedback"
+      }
+    },
+    {
+      "name": "walked, did not land",
+      "review": {
+        "walked": "yes",
+        "landed": false,
+        "not_landed_note": "Customer moved items themselves",
+        "work_auth_signed": true,
+        "photo_wide": true,
+        "has_carrier": true,
+        "has_claim": true,
+        "storage_kind": "offsite",
+        "packout_timely": true,
+        "info_sufficient": true,
+        "notes": null,
+        "operator_feedback_given": null,
+        "operator_feedback": "Great photos; book the pack-out before leaving the walk.",
+        "operator_response": "Will do",
+        "needs_follow_up": false,
+        "follow_up_reason": null,
+        "follow_up_note": null
+      },
+      "expected": {
+        "missing": {
+          "checklist": [],
+          "coaching": [
+            "Was feedback given?"
+          ],
+          "submit": []
+        },
+        "canSubmit": false,
+        "note": "WYH - Gus Abunada\nPackout: referred Sat 11/7 by A1 Dallas\n\nChecklist\n[✓] Walked (Mon 11/9)\n[ ] Landed (Customer moved items themselves)"
+      }
+    },
+    {
+      "name": "not walked, flagged",
+      "review": {
+        "walked": "no",
+        "landed": null,
+        "not_landed_note": null,
+        "work_auth_signed": null,
+        "photo_wide": null,
+        "has_carrier": null,
+        "has_claim": null,
+        "storage_kind": null,
+        "packout_timely": null,
+        "info_sufficient": null,
+        "notes": null,
+        "operator_feedback_given": null,
+        "operator_feedback": null,
+        "operator_response": null,
+        "needs_follow_up": true,
+        "follow_up_reason": "Waiting on someone",
+        "follow_up_note": "Adjuster has not approved"
+      },
+      "expected": {
+        "missing": {
+          "checklist": [],
+          "coaching": [],
+          "submit": []
+        },
+        "canSubmit": true,
+        "note": "WYH - Gus Abunada\nPackout: referred Sat 11/7 by A1 Dallas\n\nChecklist\n[ ] Walked\n\nAction Required\n- Walk the job with the customer\n\nNeeds a follow up: Waiting on someone — Adjuster has not approved"
+      }
+    },
+    {
+      "name": "half answered",
+      "review": {
+        "walked": "yes",
+        "landed": true,
+        "not_landed_note": null,
+        "work_auth_signed": null,
+        "photo_wide": null,
+        "has_carrier": true,
+        "has_claim": null,
+        "storage_kind": null,
+        "packout_timely": null,
+        "info_sufficient": null,
+        "notes": null,
+        "operator_feedback_given": null,
+        "operator_feedback": null,
+        "operator_response": null,
+        "needs_follow_up": false,
+        "follow_up_reason": null,
+        "follow_up_note": null
+      },
+      "expected": {
+        "missing": {
+          "checklist": [
+            "Work authorization signed?",
+            "Wide photos of each room?",
+            "Claim number listed?",
+            "Offsite storage or manipulation?",
+            "Pack-out scheduled in a timely manner?",
+            "Enough information in the file?"
+          ],
+          "coaching": [
+            "Was feedback given?"
+          ],
+          "submit": []
+        },
+        "canSubmit": false,
+        "note": "WYH - Gus Abunada\nPackout: referred Sat 11/7 by A1 Dallas\n\nChecklist\n[✓] Walked (Mon 11/9)\n[✓] Landed\n[ ] Work authorization signed\n[ ] Wide photos of each room\n[✓] Carrier listed (State Farm)\n[ ] Claim number listed\nSold: not recorded\n[ ] Pack-out scheduled in a timely manner (Walked 2 days after referral · Pack-out scheduled 3 days after the walk)\n[ ] Enough information in the file"
+      }
+    },
+    {
+      "name": "parked until the walk",
+      "review": {
+        "walked": "not_yet",
+        "landed": null,
+        "not_landed_note": null,
+        "work_auth_signed": null,
+        "photo_wide": null,
+        "has_carrier": null,
+        "has_claim": null,
+        "storage_kind": null,
+        "packout_timely": null,
+        "info_sufficient": null,
+        "notes": null,
+        "operator_feedback_given": null,
+        "operator_feedback": null,
+        "operator_response": null,
+        "needs_follow_up": false,
+        "follow_up_reason": null,
+        "follow_up_note": null
+      },
+      "expected": {
+        "missing": {
+          "checklist": [],
+          "coaching": [],
+          "submit": []
+        },
+        "canSubmit": false,
+        "note": "WYH - Gus Abunada\nPackout: referred Sat 11/7 by A1 Dallas\n\nChecklist\n[ ] Walked (not yet)"
+      }
+    }
+  ]
+}

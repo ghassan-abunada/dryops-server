@@ -4108,6 +4108,9 @@ function techRateOk(token) {
 const VISIT_TYPE_LABEL = {
   inspection: 'Inspection', monitor: 'Monitor', demo: 'Demo', closeout: 'Closeout', testing: 'Testing',
   adjuster_walk: 'Adjuster Walk', check_pickup: 'Check Pick-up', other: 'Other',
+  // Contents (packout) locations (DryOps supabase/add_contents_visits.sql).
+  initial_walk: 'Initial Walk', pack_out: 'Pack Out', pack_back: 'Pack Back',
+  content_manipulation: 'Content Manipulation', item_return: 'Item Return',
 };
 // "Log a … now" on the Scope tab only makes sense for the kinds that have a report.
 const ADHOC_KINDS = ['inspection', 'monitor', 'demo', 'closeout', 'testing'];
@@ -7447,6 +7450,25 @@ require('./estimates')(app, {
 require('./testingJobs')(app, {
   webhookTokenOk, unwrapRecord, sbGet,
   jnSendJson, jnGetJson, jnAddNote, jnFetchAccountUsers,
+});
+
+// Wash Your Hands for Contents jobs: the WYH note for a referred packout job
+// (no call behind it; see wyhContents.js).
+require('./wyhContents')(app, {
+  requireAuth, loadActor: intake.loadActor, sbGet, sbPatch, jnGetJson, jnAddNote, jnFetchAccountUsers,
+});
+
+// Contents visit reports (initial walk, pack-out, pack-back): submitting the
+// report completes the visit and writes the job (see contentsVisits.js).
+require('./contentsVisits')(app, {
+  requireAuth, appActor, techGuard, loadVisit, isAssigned,
+  sbGet, sbPatch, sbInsert, jnSendJson, jnAddNote, visitNoteContext, syncVisitJnTask,
+});
+
+// Work orders from a job (app → job at the partner location; see workOrders.js).
+require('./workOrders')(app, {
+  requireAuth, loadActor: intake.loadActor, createIntakeJob: intake.createIntakeJob,
+  jnAccountSettings: intake.jnAccountSettings, sbGet, sbInsert, jnAddNote,
 });
 
 // Homeowner portal API (dryops.app/h/<token>; see homeowner.js) — links,
