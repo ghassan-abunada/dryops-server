@@ -12,13 +12,15 @@
 //   { ids: [profile ids], status, date, start, end }
 // Each sync diffs the row against it, queues the pushes and writes the new
 // snapshot. The migration backfills it for existing visits so the first edit of
-// an old visit does not re-announce it. Until the column exists nothing is sent.
+// an old visit does not re-announce it. Until the column exists nothing is sent
+// (the server looks again every 10 minutes, no restart needed).
 //
 // A person's pushes are held for HOLD_MS and sent as one: publishing a monitor
 // run puts eight visits on a tech in a few seconds, and that is one push
 // ("8 visits assigned"), not eight.
 
 const HOLD_MS = 15000;
+const RETRY_MS = 10 * 60 * 1000;
 const LIVE = ['scheduled', 'in_progress'];
 
 function isoDay(d) { return d.toISOString().slice(0, 10); }
@@ -138,7 +140,7 @@ function composePush(items) {
 function createVisitPush({ push, sbGet, sbPatch, holdMs = HOLD_MS, log = console, now = () => new Date() } = {}) {
   const enc = encodeURIComponent;
   const held = new Map();   // profileId → { items: Map<visitId, item>, timer }
-  let columnMissing = false;
+  let retryAt = 0;          // push_state column missing: look again after this
 
   async function sendFor(profileId) {
     const slot = held.get(profileId);
@@ -182,13 +184,13 @@ function createVisitPush({ push, sbGet, sbPatch, holdMs = HOLD_MS, log = console
    * their own edit. Never throws.
    */
   async function onVisitSynced(v, { actorId = null } = {}) {
-    if (!v || !v.id || columnMissing) return { events: 0 };
+    if (!v || !v.id || now().getTime() < retryAt) return { events: 0 };
     try {
       let rows;
       try { rows = await sbGet(`inspections?id=eq.${enc(String(v.id))}&select=push_state`); }
       catch (e) {
-        columnMissing = true;
-        log.warn('[visit push] inspections.push_state is missing (run supabase/add_visit_push.sql); schedule pushes are off until restart.');
+        retryAt = now().getTime() + RETRY_MS;
+        log.warn('[visit push] inspections.push_state is missing (run supabase/add_visit_push.sql); schedule pushes are off, checking again in 10 minutes.');
         return { events: 0, disabled: true };
       }
       if (!rows || !rows[0]) return { events: 0 };
