@@ -986,6 +986,8 @@ function mapCallRow(call, { sparse = false } = {}) {
 // Call pushes (callAlerts.js): owners on a ringing new caller, expansion
 // managers once a call is ready to review. One Expo sender (push.js).
 const pushSender = require('./push')({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet });
+// Schedule pushes (assigned / taken off / cancelled), fed by syncVisitJnTask below.
+const visitPush = require('./visitPush')({ push: pushSender, sbGet, sbPatch: (...a) => sbPatch(...a) });
 const callAlerts = require('./callAlerts')({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push: pushSender, callrailApi, CALLRAIL_ACCOUNT_IDS });
 
 // Post-call webhook: CallRail POSTs each completed call here in real time.
@@ -4692,7 +4694,7 @@ async function joinVisit(visitId, profileId) {
     const m = /Already booked[^"\\]*/.exec(String(e.message || ''));
     return { status: 409, body: { error: m ? `${m[0].trim()} — ask dispatch to move that visit, then join.` : 'Could not join this visit.', code: m ? 'BOOKED' : undefined } };
   }
-  syncVisitJnTask(visitId).catch(() => {});
+  syncVisitJnTask(visitId, { actorId: profileId }).catch(() => {});
   return { status: 200, body: { ok: true } };
 }
 app.post('/tech/joinable', async (req, res) => {
@@ -5199,7 +5201,7 @@ const VISIT_TASK_SELECT = 'id,jn_id,job_id,scheduled_date,scheduled_time,slot_st
 
 const visitSyncLocks = new Set();
 // The one entry point for routes, completeVisit and the sweep.
-async function syncVisitJnTask(visitId, { force = false } = {}) {
+async function syncVisitJnTask(visitId, { force = false, actorId = null } = {}) {
   const id = String(visitId);
   if (visitSyncLocks.has(id)) return { ok: false, error: 'sync already in progress' };
   visitSyncLocks.add(id);
@@ -5209,6 +5211,9 @@ async function syncVisitJnTask(visitId, { force = false } = {}) {
     if (!v) return { ok: false, error: 'Visit not found' };
     await withTaskLabel(v);
     if (!v.jn_task_dirty && !force) return { ok: true, skipped: 'clean', id: v.jn_task_id };
+    // Tell the people put on / taken off / cancelled (visitPush.js). Before the
+    // JobNimbus work so a JN outage or the sync switch never holds a push back.
+    await visitPush.onVisitSynced(v, { actorId });
     const settings = await loadScheduleSettings();
     const clear = async (extra) => {
       // Only clear if the row is still what we pushed.
@@ -5325,8 +5330,9 @@ async function visitSyncGuard(req, res) {
 }
 app.post('/visits/:id/sync-jn-task', requireAuth, async (req, res) => {
   try {
-    if (!(await visitSyncGuard(req, res))) return;
-    const out = await syncVisitJnTask(String(req.params.id));
+    const actor = await visitSyncGuard(req, res);
+    if (!actor) return;
+    const out = await syncVisitJnTask(String(req.params.id), { actorId: actor.id });
     res.json({ ok: !!out.ok, jn: out });
   } catch (err) {
     res.status(502).json({ error: err.message });
