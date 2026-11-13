@@ -723,6 +723,10 @@ module.exports = function mountIntake(app, deps) {
     } else if (body.inspection && rep) {
       visitReq = { task_type: 'inspection', date: body.inspection.date, slot: body.inspection.slot || null, who: rep, test_types: null, service_min: null };
     }
+    // "Schedule anyway" on the New Job form: the dispatcher confirmed the
+    // double-booking, so the row carries allow_conflict and the guard trigger
+    // skips VS001 (dryops repo supabase/add_schedule_override.sql).
+    if (visitReq) visitReq.allowConflict = (body.visit || body.inspection || {}).allow_conflict === true;
     if (visitReq && jobId) {
       const slot = visitReq.slot;
       const label = windowLabel(slot);
@@ -734,6 +738,7 @@ module.exports = function mountIntake(app, deps) {
           assigned_to_ids: [visitReq.who.id], notes: null, location_id: loc.id, created_by: actor.id || null,
           block_kind: 'window', crew_size: null, jn_task_dirty: true,
           ...(visitReq.task_type === 'testing' ? { test_types: visitReq.test_types || [], service_min: visitReq.service_min } : {}),
+          ...(visitReq.allowConflict ? { allow_conflict: true } : {}),
         });
         if (!ins || !ins.id) {
           // PostgREST sometimes returns an empty representation even though the
