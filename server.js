@@ -7452,6 +7452,12 @@ require('./testingJobs')(app, {
   jnSendJson, jnGetJson, jnAddNote, jnFetchAccountUsers,
 });
 
+// Wash Your Hands for Contents jobs: the WYH note for a referred packout job
+// (no call behind it; see wyhContents.js).
+require('./wyhContents')(app, {
+  requireAuth, loadActor: intake.loadActor, sbGet, sbPatch, jnGetJson, jnAddNote, jnFetchAccountUsers,
+});
+
 // Contents visit reports (initial walk, pack-out, pack-back): submitting the
 // report completes the visit and writes the job (see contentsVisits.js).
 require('./contentsVisits')(app, {
