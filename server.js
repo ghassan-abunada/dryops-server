@@ -7449,6 +7449,12 @@ require('./testingJobs')(app, {
   jnSendJson, jnGetJson, jnAddNote, jnFetchAccountUsers,
 });
 
+// Work orders from a job (app → job at the partner location; see workOrders.js).
+require('./workOrders')(app, {
+  requireAuth, loadActor: intake.loadActor, createIntakeJob: intake.createIntakeJob,
+  jnAccountSettings: intake.jnAccountSettings, sbGet, sbInsert, jnAddNote,
+});
+
 // Homeowner portal API (dryops.app/h/<token>; see homeowner.js) — links,
 // window choice, prefs, claim info, photo uploads, requests → staff; stage
 // texts via hooks.jobStatusChanged. Then the window-offer flow (hoWindows.js):
