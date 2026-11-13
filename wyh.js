@@ -75,7 +75,7 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
     try {
       const actor = await loadActor(req);
       if (!actor) return res.status(403).json({ error: 'Profile not found' });
-      if (!['admin', 'owner', 'expansion_manager'].includes(actor.role)) return res.status(403).json({ error: 'Not allowed' });
+      if (!['admin', 'owner', 'executive', 'expansion_manager'].includes(actor.role)) return res.status(403).json({ error: 'Not allowed' });
       const call = ((await sbGet(`calls?id=eq.${enc(callId)}&select=id,location_id,start_time,customer_name,customer_phone_number,call_summary,job_id`)) || [])[0];
       if (!call) return res.status(404).json({ error: 'Call not found' });
       if (actor.role === 'expansion_manager' && !actor.locs.includes(String(call.location_id))) return res.status(403).json({ error: 'Not your location' });
@@ -170,7 +170,7 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
     try {
       const actor = await loadActor(req);
       if (!actor) return res.status(403).json({ error: 'Profile not found' });
-      if (!['admin', 'owner', 'expansion_manager'].includes(actor.role)) return res.status(403).json({ error: 'Not allowed' });
+      if (!['admin', 'owner', 'executive', 'expansion_manager'].includes(actor.role)) return res.status(403).json({ error: 'Not allowed' });
       const review = ((await sbGet(`wyh_reviews?id=eq.${enc(id)}&select=*`)) || [])[0];
       if (!review) return res.status(404).json({ error: 'Review not found' });
       if (actor.role === 'expansion_manager' && !actor.locs.includes(String(review.location_id))) return res.status(403).json({ error: 'Not your location' });

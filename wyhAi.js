@@ -600,7 +600,7 @@ function mountWyhAi(app, deps) {
     try {
       const actor = await loadActor(req);
       if (!actor) return res.status(403).json({ error: 'Profile not found' });
-      if (!['admin', 'owner', 'expansion_manager'].includes(actor.role)) return res.status(403).json({ error: 'Not allowed' });
+      if (!['admin', 'owner', 'executive', 'expansion_manager'].includes(actor.role)) return res.status(403).json({ error: 'Not allowed' });
       const [call] = await sbSelect('calls', `select=id,location_id&id=eq.${callId}`);
       if (!call) return res.status(404).json({ error: 'Call not found' });
       if (actor.role === 'expansion_manager' && !actor.locs.includes(String(call.location_id))) return res.status(403).json({ error: 'Not your location' });
