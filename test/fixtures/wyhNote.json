@@ -32,7 +32,7 @@
         "notes": "Great file."
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google · taken by Jane Doe\nCall recording reviewed\n\nGreat file.\n\nAction Required:\n- Add photos: wide room shots\n- Packout not sold — Content manipulation requested · 3 rooms affected · feedback given to sell a packout · real packout opportunity\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[ ] Photos: moisture readings, visible damage · missing: wide room shots\n[✓] Insurance: Yes — carrier: State Farm · claim #: CLM-123\n[✓] Tested: Yes\n[ ] Packout: Not sold — Content manipulation requested · 3 rooms affected · feedback given to sell a packout · real packout opportunity\n[✓] File info: date of loss, category and cause present"
+    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google · taken by Jane Doe\nCall recording reviewed\n\nGreat file.\n\nAction Required:\n- Add photos: wide room shots\n- Packout not sold — Content manipulation requested · 3 rooms affected · feedback given to sell a packout · real packout opportunity\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[ ] Photos: moisture readings, visible damage · missing: wide room shots\n[✓] Insurance: Yes — carrier: State Farm · claim #: CLM-123\n[✓] Tested: Yes\n[ ] Packout: Not sold — Content manipulation requested · 3 rooms affected · feedback given to sell a packout · real packout opportunity\n[✓] File info: sufficient"
   },
   {
     "name": "not landed (other), call not handled properly, no photos, file incomplete",
@@ -57,7 +57,7 @@
         "info_sufficient": false
       }
     },
-    "expected": "WYH - Jane Doe\nCall: Tue 10/20, 9:05 AM · (555) 000-1111 · Plumber\n\nAction Required:\n- Call handling: Never offered an inspection\n- Not landed — Other: Went with another company\n- Add photos: moisture readings, visible damage, wide room shots\n- Add date of loss, category and cause to the file\n\nChecklist:\n[ ] Call handled properly — Never offered an inspection\n[✓] Walked: Yes\n[ ] Landed: No — Other: Went with another company\n[ ] Photos: none\n[ ] File info: incomplete (date of loss, category, cause)"
+    "expected": "WYH - Jane Doe\nCall: Tue 10/20, 9:05 AM · (555) 000-1111 · Plumber\n\nAction Required:\n- Call handling: Never offered an inspection\n- Not landed — Other: Went with another company\n- Add photos: moisture readings, visible damage, wide room shots\n- Complete the JobNimbus file\n\nChecklist:\n[ ] Call handled properly — Never offered an inspection\n[✓] Walked: Yes\n[ ] Landed: No — Other: Went with another company\n[ ] Photos: none\n[ ] File info: not sufficient"
   },
   {
     "name": "parked: not yet walked, scheduled later with a window, no phone",
@@ -111,7 +111,7 @@
         "operator_feedback": "Pick up every call, even on a job"
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Fri 10/23, 7:17 PM · (555) 867-5309 · Google\n\nAction Required:\n- Not walked — Other: Out of service area\n\nChecklist:\n[ ] Walked: No — Other: Out of service area\n[✓] File info: date of loss, category and cause present\nMissed call: called back · reason: Tech was on a job\n\nCoaching: feedback given\n- Feedback: Pick up every call, even on a job\n- Response: Will forward to cell"
+    "expected": "WYH - Gus Abunada\nCall: Fri 10/23, 7:17 PM · (555) 867-5309 · Google\n\nAction Required:\n- Not walked — Other: Out of service area\n\nChecklist:\n[ ] Walked: No — Other: Out of service area\n[✓] File info: sufficient\nMissed call: called back · reason: Tech was on a job\n\nCoaching: feedback given\n- Feedback: Pick up every call, even on a job\n- Response: Will forward to cell"
   },
   {
     "name": "landed insurance, carrier missing, not tested (other), packout sold",
@@ -143,7 +143,7 @@
         "info_sufficient": true
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Fri 10/23, 7:17 PM · (555) 867-5309 · Google · taken by Colt Smith\n\nAction Required:\n- Add carrier to the file\n- Not tested — Other: Lab closed · year built 1998\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[ ] Insurance: Yes — carrier: missing · claim #: AB-1\n[ ] Tested: No — Other: Lab closed · year built 1998\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present"
+    "expected": "WYH - Gus Abunada\nCall: Fri 10/23, 7:17 PM · (555) 867-5309 · Google · taken by Colt Smith\n\nAction Required:\n- Add carrier to the file\n- Not tested — Other: Lab closed · year built 1998\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[ ] Insurance: Yes — carrier: missing · claim #: AB-1\n[ ] Tested: No — Other: Lab closed · year built 1998\n[✓] Packout: Sold\n[✓] File info: sufficient"
   },
   {
     "name": "everything in order (follow-up already resolved) → Action Required: none",
@@ -179,7 +179,7 @@
         "operator_responded": "yes"
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google\n\nClean.\n\nAction Required: none\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] Insurance: Yes — carrier: Allstate · claim #: C1\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Great call, keep offering the same-day inspection.\n- Response: responded well"
+    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google\n\nClean.\n\nAction Required: none\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] Insurance: Yes — carrier: Allstate · claim #: C1\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: sufficient\n\nCoaching: feedback given\n- Feedback: Great call, keep offering the same-day inspection.\n- Response: responded well"
   },
   {
     "name": "insurance pending with a note, needs a follow up (file incomplete) — submitted anyway",
@@ -208,7 +208,7 @@
         "follow_up_note": "No cause of loss yet"
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google\n\nAction Required:\n- Follow up needed — File incomplete: No cause of loss yet\n- Insurance pending — Adjuster hasn't confirmed coverage\n- Add date of loss, category and cause to the file\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[ ] Insurance: Pending — Adjuster hasn't confirmed coverage\n[ ] File info: incomplete (date of loss, category, cause)"
+    "expected": "WYH - Gus Abunada\nCall: Mon 10/26, 2:15 PM · (555) 123-4567 · Google\n\nAction Required:\n- Follow up needed — File incomplete: No cause of loss yet\n- Insurance pending — Adjuster hasn't confirmed coverage\n- Complete the JobNimbus file\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[ ] Insurance: Pending — Adjuster hasn't confirmed coverage\n[ ] File info: not sufficient"
   },
   {
     "name": "major concerns follow-up without a note, insurance pending without a note, no photos",
@@ -228,7 +228,7 @@
         "notes": "Partner argued about the quote."
       }
     },
-    "expected": "WYH - Jane Doe\nCall: Tue 10/20, 9:05 AM · (555) 000-1111 · Plumber\n\nPartner argued about the quote.\n\nAction Required:\n- Follow up needed — Major concerns\n- Add photos: moisture readings, visible damage, wide room shots\n- Insurance pending\n\nChecklist:\n[✓] Walked: Yes\n[✓] Landed: Yes\n[ ] Photos: none\n[ ] Insurance: Pending\n[✓] File info: date of loss, category and cause present"
+    "expected": "WYH - Jane Doe\nCall: Tue 10/20, 9:05 AM · (555) 000-1111 · Plumber\n\nPartner argued about the quote.\n\nAction Required:\n- Follow up needed — Major concerns\n- Add photos: moisture readings, visible damage, wide room shots\n- Insurance pending\n\nChecklist:\n[✓] Walked: Yes\n[✓] Landed: Yes\n[ ] Photos: none\n[ ] Insurance: Pending\n[✓] File info: sufficient"
   },
   {
     "name": "no coaching yet → action line; follow-up: not landed",
@@ -253,7 +253,7 @@
         "follow_up_note": "Call the HO back Thursday"
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Tue 10/27, 9:40 AM · (555) 987-6543 · Google\n\nAction Required:\n- Follow up needed — Not landed: Call the HO back Thursday\n- Not landed — Gave HO a quote\n- Give the operator feedback\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[ ] Landed: No — Gave HO a quote\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] File info: date of loss, category and cause present\n\nCoaching: no feedback given"
+    "expected": "WYH - Gus Abunada\nCall: Tue 10/27, 9:40 AM · (555) 987-6543 · Google\n\nAction Required:\n- Follow up needed — Not landed: Call the HO back Thursday\n- Not landed — Gave HO a quote\n- Give the operator feedback\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[ ] Landed: No — Gave HO a quote\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] File info: sufficient\n\nCoaching: no feedback given"
   },
   {
     "name": "waiting on someone; feedback given, no response yet",
@@ -275,7 +275,7 @@
         "follow_up_note": "Waiting on the operator's response to feedback"
       }
     },
-    "expected": "WYH - Jane Doe\nCall: Mon 10/26, 4:05 PM · Plumber\n\nAction Required:\n- Follow up needed — Waiting on someone: Waiting on the operator's response to feedback\n- Not walked — Customer cancelled\n\nChecklist:\n[ ] Walked: No — Customer cancelled\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Offer a window before the HO hangs up\n- Response: no response yet (follow up)"
+    "expected": "WYH - Jane Doe\nCall: Mon 10/26, 4:05 PM · Plumber\n\nAction Required:\n- Follow up needed — Waiting on someone: Waiting on the operator's response to feedback\n- Not walked — Customer cancelled\n\nChecklist:\n[ ] Walked: No — Customer cancelled\n[✓] File info: sufficient\n\nCoaching: feedback given\n- Feedback: Offer a window before the HO hangs up\n- Response: no response yet (follow up)"
   },
   {
     "name": "coached, did not respond well",
@@ -295,7 +295,7 @@
         "operator_responded": "no"
       }
     },
-    "expected": "WYH - Gus Abunada\nCall: Tue 10/27, 1:10 PM · (555) 111-2222 · Google\n\nAction Required:\n- Not walked — Customer cancelled\n\nChecklist:\n[✓] Call handled properly\n[ ] Walked: No — Customer cancelled\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Offer a same-day window\n- Response: did not respond well"
+    "expected": "WYH - Gus Abunada\nCall: Tue 10/27, 1:10 PM · (555) 111-2222 · Google\n\nAction Required:\n- Not walked — Customer cancelled\n\nChecklist:\n[✓] Call handled properly\n[ ] Walked: No — Customer cancelled\n[✓] File info: sufficient\n\nCoaching: feedback given\n- Feedback: Offer a same-day window\n- Response: did not respond well"
   },
   {
     "name": "message lead (Google LSA text): Text: head line with the reply time, no recording line",
@@ -329,7 +329,7 @@
         "operator_feedback_given": false
       }
     },
-    "expected": "WYH - Gus Abunada\nText: Tue 10/28, 1:10 PM · (469) 555-0123 · Google LSA · replied in 4 min by Ali Zayyad\n\nAction Required:\n- Give the operator feedback\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] Insurance: Yes — carrier: State Farm · claim #: CLM-9\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present\n\nCoaching: no feedback given"
+    "expected": "WYH - Gus Abunada\nText: Tue 10/28, 1:10 PM · (469) 555-0123 · Google LSA · replied in 4 min by Ali Zayyad\n\nAction Required:\n- Give the operator feedback\n\nChecklist:\n[✓] Call handled properly\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[✓] Insurance: Yes — carrier: State Farm · claim #: CLM-9\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: sufficient\n\nCoaching: no feedback given"
   },
   {
     "name": "message lead with no reply yet",
@@ -353,7 +353,7 @@
         "operator_responded": "yes"
       }
     },
-    "expected": "WYH - Gus Abunada\nText: Tue 10/28, 1:10 PM · (972) 555-0188 · Google LSA · no reply\n\nAction Required:\n- Call handling: Nobody answered the text\n- Not walked — Customer cancelled\n\nChecklist:\n[ ] Call handled properly — Nobody answered the text\n[ ] Walked: No — Customer cancelled\n[✓] File info: date of loss, category and cause present\n\nCoaching: feedback given\n- Feedback: Answer LSA texts within 5 minutes\n- Response: responded well"
+    "expected": "WYH - Gus Abunada\nText: Tue 10/28, 1:10 PM · (972) 555-0188 · Google LSA · no reply\n\nAction Required:\n- Call handling: Nobody answered the text\n- Not walked — Customer cancelled\n\nChecklist:\n[ ] Call handled properly — Nobody answered the text\n[ ] Walked: No — Customer cancelled\n[✓] File info: sufficient\n\nCoaching: feedback given\n- Feedback: Answer LSA texts within 5 minutes\n- Response: responded well"
   },
   {
     "name": "job lead (plumber referral typed into JobNimbus, no call or text): Job: head line, no call questions",
@@ -382,6 +382,6 @@
         "operator_feedback_given": false
       }
     },
-    "expected": "WYH - Gus Abunada\nJob: Tue 10/27, 9:05 AM · (555) 987-6543 · Plumber · created in JobNimbus\n\nAction Required:\n- Add claim number to the file\n- Give the operator feedback\n\nChecklist:\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[ ] Insurance: Yes — carrier: Allstate · claim #: missing\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: date of loss, category and cause present\n\nCoaching: no feedback given"
+    "expected": "WYH - Gus Abunada\nJob: Tue 10/27, 9:05 AM · (555) 987-6543 · Plumber · created in JobNimbus\n\nAction Required:\n- Add claim number to the file\n- Give the operator feedback\n\nChecklist:\n[✓] Walked: Yes\n[✓] Landed: Yes\n[✓] Photos: moisture readings, visible damage, wide room shots\n[ ] Insurance: Yes — carrier: Allstate · claim #: missing\n[✓] Tested: Yes\n[✓] Packout: Sold\n[✓] File info: sufficient\n\nCoaching: no feedback given"
   }
 ]
