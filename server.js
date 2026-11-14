@@ -2,6 +2,7 @@ const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
 const callAccess = require('./callAccess');
+const { createCallrailBudget, orderAccounts } = require('./callrailBudget');
 const { readCallrailCall, describeBody: describeCallrailBody } = require('./callrailPayload');
 const jnScope = require('./jnScope');
 const { descriptionCol } = require('./jobSync');
@@ -887,16 +888,62 @@ async function sbRpc(fn) {
     body: '{}',
   });
 }
+// Every request is counted per account (callrailBudget.js): CallRail allows
+// 1,000 an hour / 10,000 a day per account, and a spent day blocks playback
+// and the call strip for everyone. A 429 pauses reads on that account.
+const callrailBudget = createCallrailBudget({
+  hourlyLimit: Number(process.env.CALLRAIL_HOURLY_LIMIT) || 1000,
+  dailyLimit: Number(process.env.CALLRAIL_DAILY_LIMIT) || 10000,
+});
+const callrailCallAccount = new Map(); // callrail call id → the account that answered for it
 async function callrailApi(accountId, pathAndQuery) {
+  if (callrailBudget.blockedMs(accountId) > 0) return { ok: false, status: 429, json: null, paused: true };
+  callrailBudget.note(accountId);
   const r = await fetch(`https://api.callrail.com/v3/a/${accountId}/${pathAndQuery}`, {
     headers: callrailAuth(accountId),
   });
   const text = await r.text();
   let json = null; try { json = JSON.parse(text); } catch {}
+  if (r.status === 429) {
+    callrailBudget.block(accountId, r.headers.get('retry-after'));
+    const u = callrailBudget.usage(accountId);
+    console.warn(`[callrail] 429 on ${accountId} — reads paused ${Math.ceil(callrailBudget.blockedMs(accountId) / 60000)} min (counted here: ${u.hour}/h, ${u.day}/24h)`);
+  } else if (r.ok) {
+    const m = /^calls\/([^/.?]+)\.json/.exec(pathAndQuery);
+    if (m) {
+      if (callrailCallAccount.size > 5000) callrailCallAccount.clear();
+      callrailCallAccount.set(decodeURIComponent(m[1]), String(accountId));
+    }
+  }
   return { ok: r.ok, status: r.status, json };
 }
+// Which accounts to ask for one call, likeliest first: the account that
+// answered for it before, then the one that owns its tracking number, then
+// the rest. Asking every account in turn cost up to four requests a lookup
+// and charged the first account for calls that were never its own.
+let callrailNumberAccounts = { at: 0, byNorm: new Map() };
+async function callrailAccountsFor(callrailId) {
+  const id = String(callrailId || '');
+  const known = callrailCallAccount.get(id);
+  if (known) return orderAccounts(CALLRAIL_ACCOUNT_IDS, known);
+  if (!id || CALLRAIL_ACCOUNT_IDS.length < 2) return CALLRAIL_ACCOUNT_IDS.slice();
+  try {
+    if (Date.now() - callrailNumberAccounts.at > 10 * 60 * 1000) {
+      const rows = (await sbGet('location_tracking_numbers?select=phone_norm,callrail_account_id&callrail_account_id=not.is.null&limit=2000')) || [];
+      callrailNumberAccounts = { at: Date.now(), byNorm: new Map(rows.map((r) => [String(r.phone_norm), String(r.callrail_account_id)])) };
+    }
+    const call = ((await sbGet(`calls?callrail_id=eq.${encodeURIComponent(id)}&select=tracking_phone_number&limit=1`)) || [])[0];
+    const norm = call && call.tracking_phone_number ? normPhone(call.tracking_phone_number) : null;
+    return orderAccounts(CALLRAIL_ACCOUNT_IDS, norm ? callrailNumberAccounts.byNorm.get(String(norm)) : null);
+  } catch { return CALLRAIL_ACCOUNT_IDS.slice(); }
+}
+if (SUPABASE_SERVICE_KEY) setInterval(() => {
+  const rows = callrailBudget.snapshot().filter((u) => u.day);
+  if (rows.length) console.log('[callrail] requests', rows.map((u) => `${u.account.slice(-6)} ${u.hour}/h ${u.day}/24h${u.paused_seconds ? ' PAUSED' : ''}`).join(' · '));
+}, 60 * 60 * 1000).unref();
 // Writes (POST/PUT) against the same account-scoped API.
 async function callrailApiWrite(accountId, method, path, body) {
+  callrailBudget.note(accountId);
   const r = await fetch(`https://api.callrail.com/v3/a/${accountId}/${path}`, {
     method,
     headers: { ...callrailAuth(accountId), 'Content-Type': 'application/json' },
@@ -988,7 +1035,7 @@ function mapCallRow(call, { sparse = false } = {}) {
 const pushSender = require('./push')({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet });
 // Schedule pushes (assigned / taken off / cancelled), fed by syncVisitJnTask below.
 const visitPush = require('./visitPush')({ push: pushSender, sbGet, sbPatch: (...a) => sbPatch(...a) });
-const callAlerts = require('./callAlerts')({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push: pushSender, callrailApi, CALLRAIL_ACCOUNT_IDS });
+const callAlerts = require('./callAlerts')({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push: pushSender, callrailApi, callrailAccountsFor, CALLRAIL_ACCOUNT_IDS });
 
 // Post-call webhook: CallRail POSTs each completed call here in real time.
 // CallRail may post JSON or a form with the call as a JSON string; both parse.
@@ -1275,6 +1322,8 @@ app.get('/admin/callrail/accounts', (req, res, next) => CALLRAIL_ACCOUNT_IDS.len
       unreachable: CALLRAIL_ACCOUNT_IDS.filter(id => !seen.has(String(id))),
       // CALLRAIL_API_KEYS entries: pinned / resolved / pending (+ last error). Empty = env var not set on this deploy.
       extra_keys: Object.values(CALLRAIL_KEY_STATUS),
+      // Requests this server sent per account in the last hour / 24 hours (since its last restart).
+      usage: callrailBudget.snapshot(),
       default_key: CALLRAIL_API_KEY ? keyHint(CALLRAIL_API_KEY) : null,
     });
   } catch (err) {
@@ -1454,6 +1503,8 @@ async function reconcileCalls() {
     const fields = CALLRAIL_CALL_FIELDS;
     let upserted = 0;
     for (const acct of CALLRAIL_ACCOUNT_IDS) {
+      // Over the background share of the account's budget: skip this pass (the webhook still feeds calls).
+      if (!callrailBudget.allowBackground(acct)) { console.warn('[calls-reconcile] skipped', acct, '— CallRail request budget'); continue; }
       for (let page = 1; page <= 40; page++) {
         const r = await fetchCallsPage(acct, page, fields, dateQ);
         if (!r.ok) { console.error('[calls-reconcile] api', acct, r.status); break; }
@@ -7327,7 +7378,7 @@ const intake = require('./intake')(app, {
   sbGet, sbInsert, sbPatch, sbUpsert,
   jnSendJson, jnGetJson, jnAddNote, jnFetchAccountUsers,
   geocode, normPhone, toE164, UUID_RE, EMAIL_RE,
-  callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, mapCallRow,
+  callrailApi, callrailAccountsFor, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, mapCallRow,
   syncVisitJnTask, loadScheduleSettings, fmtMin,
 });
 
@@ -7341,7 +7392,7 @@ const salesRep = require('./salesRep')(app, {
 require('./wyh')(app, {
   requireAuth, sbGet, sbPatch, sbInsert, jnGetJson, jnAddNote, jnFetchAccountUsers, UUID_RE,
   loadActor: intake.loadActor,
-  callrailApi, callrailKeyFor, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
+  callrailApi, callrailAccountsFor, callrailKeyFor, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY,
   // Emails the call taker when feedback is saved or a note is posted (Resend).
   sendEmail, escapeHtml, WEB_APP_URL,
   // Signs the short-lived recording links the app's inline player streams from.
@@ -7356,13 +7407,13 @@ require('./sms')(app, {
   SUPABASE_URL, SUPABASE_SERVICE_KEY, PUBLIC_BASE_URL,
   requireAuth, requireCallAccess, callrailWebhookOk, loadActor: intake.loadActor,
   sbGet, sbPatch, sbUpsert, jnSendJson, UUID_RE,
-  callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, anthropic: wipAnthropic,
+  callrailApi, callrailApiWrite, callrailBudget, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, anthropic: wipAnthropic,
   push: pushSender,
 });
 
 // ── Owner call backs through CallRail (see callbacks.js) ────────────────────
 // POST /calls/:id/callback: CallRail rings the owner's phone, then the caller.
-require('./callbacks')(app, { requireAuth, sbGet, sbUpsert, callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS });
+require('./callbacks')(app, { requireAuth, sbGet, sbUpsert, callrailApi, callrailApiWrite, callrailAccountsFor, CALLRAIL_ACCOUNT_IDS });
 
 // ── @Mentions → DryOps notifications (see mentions.js) ──────────────────────
 // Reads every new JobNimbus activity once a minute, matches "@FirstLast" to
@@ -7427,7 +7478,7 @@ require('./wyhAi')(app, {
   jnGet: jnGetJson, jnFetchUpdatedSince, jnListJobImages, jnDownloadFile, refreshJobByJnId: jobSync.refreshJobByJnId,
   sbSelect, sbInsert, sbPatch,
   requireAuth, requireAdmin, loadActor: intake.loadActor, anthropic: wipAnthropic, denverNow,
-  callrailApi, CALLRAIL_ACCOUNT_IDS,
+  callrailApi, callrailAccountsFor, callrailBudget, CALLRAIL_ACCOUNT_IDS,
 });
 
 // Lead-source links (dryops.app/lead/<token>): an external referrer's one-screen

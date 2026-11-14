@@ -65,6 +65,22 @@ function previewOf(content, mediaUrls) {
 function isLsaRelayNotice(content) {
   return /^(?:\(\d+\/\d+\)\s*)?(?:Replies to this number will be sent to the customer\b|This customer requested only message replies\b)/i.test(String(content || '').trim());
 }
+/**
+ * Does CallRail hold something newer than we do for a thread? Compared as
+ * instants. (They were compared as strings: CallRail's "…:54.573Z" against
+ * PostgREST's "…:54.573+00:00" is ALWAYS greater, so every thread in the window
+ * was re-read on every 15-minute pass — that alone spent the account's 10,000
+ * requests a day on 2026-11-14.) `syncedAt` is the CallRail stamp we last read
+ * the thread at: a thread whose newest message never moves our own stamp
+ * (Google's relay notices) is still read only once.
+ */
+function threadNeedsSync(callrailLastAt, storedLastAt, syncedAt) {
+  const theirs = Date.parse(callrailLastAt || '');
+  const ours = Math.max(Date.parse(storedLastAt || '') || 0, Number(syncedAt) || 0);
+  if (!ours) return true;                 // never read
+  if (Number.isNaN(theirs)) return false; // CallRail gave no stamp and we hold the thread
+  return theirs > ours;
+}
 function toISO(v) {
   if (v === undefined || v === null || v === '') return null;
   const d = new Date(v); return isNaN(d.getTime()) ? null : d.toISOString();
@@ -155,7 +171,7 @@ module.exports = function mountSms(app, deps) {
     SUPABASE_URL, SUPABASE_SERVICE_KEY, PUBLIC_BASE_URL,
     requireAuth, requireCallAccess, callrailWebhookOk, loadActor,
     sbGet, sbPatch, sbUpsert, jnSendJson, UUID_RE,
-    callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, anthropic,
+    callrailApi, callrailApiWrite, callrailBudget, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, anthropic,
   } = deps;
   const summarizeForPush = deps.summarizeForPush || makeSummarizer({ anthropic });
   const enc = encodeURIComponent;
@@ -634,23 +650,27 @@ module.exports = function mountSms(app, deps) {
 
   // List CallRail conversations changed in the window and store them (+ their messages).
   let pullRunning = false;
+  const syncedAt = new Map(); // conversation id → CallRail last_message_at (ms) we last read the thread at
   let lastPull = null;   // { tag, days, startedAt, finishedAt, stats }
   async function pullConversations({ days = RECONCILE_LOOKBACK_DAYS, tag = 'reconcile' } = {}) {
     if (!CALLRAIL_API_KEY || !CALLRAIL_ACCOUNT_IDS.length) return { skipped: true };
     if (pullRunning) return { skipped: true, busy: true };
     pullRunning = true;
-    const stats = { conversations: 0, messages: 0, errors: 0 };
+    const stats = { conversations: 0, messages: 0, threads_read: 0, errors: 0 };
     try {
       await refreshTrackingLabels().catch((e) => warn('labels', e.message));
       const byNorm = await trackingNumbers(true);
       const end = new Date(Date.now() + 86400 * 1000).toISOString().slice(0, 10);
       const start = new Date(Date.now() - days * 86400 * 1000).toISOString().slice(0, 10);
       for (const acct of CALLRAIL_ACCOUNT_IDS) {
+        // Over the background share of the account's request budget: leave it for this pass (webhooks still deliver texts).
+        if (callrailBudget && !callrailBudget.allowBackground(acct)) { stats.errors++; warn(tag, 'skipped', acct, '— CallRail request budget'); continue; }
         for (let page = 1; page <= 40; page++) {
           let r = await callrailApi(acct, `text-messages.json?per_page=250&page=${page}&start_date=${start}&end_date=${end}&fields=source,lead_status`);
           if (!r.ok) r = await callrailApi(acct, `text-messages.json?per_page=250&page=${page}&start_date=${start}&end_date=${end}`);
           if (!r.ok) { stats.errors++; warn(tag, 'list', acct, r.status); break; }
           const list = (r.json && (r.json.conversations || r.json.text_messages || r.json.data)) || [];
+          let stopped = false;
           for (const c of list) {
             try {
               const tracking = c.current_tracking_number || c.initial_tracking_number;
@@ -680,14 +700,19 @@ module.exports = function mountSms(app, deps) {
                 if (Object.keys(p).length) conv = (await patchRow('sms_conversations', conv.id, p)) || { ...conv, ...p };
               }
               // Full thread when CallRail says there is something newer than we hold.
-              if (!conv.last_message_at || (toISO(c.last_message_at) || '') > conv.last_message_at) {
+              let read = false;
+              if (threadNeedsSync(c.last_message_at, conv.last_message_at, syncedAt.get(conv.id))) {
+                if (callrailBudget && !callrailBudget.allowBackground(acct)) { stats.errors++; warn(tag, 'stopped', acct, '— CallRail request budget'); stopped = true; break; }
                 const s = await syncConversation(conv);
+                read = true; stats.threads_read++;
                 stats.messages += s.synced || 0;
+                if (!s.error) syncedAt.set(conv.id, Date.parse(c.last_message_at || '') || Date.now());
               }
+              // Pace only what cost a CallRail request; an unchanged thread is one DB read.
+              if (read) await sleep(PACE_MS.conversation);
             } catch (e) { stats.errors++; warn(tag, 'conversation', e.message); }
-            await sleep(PACE_MS.conversation);
           }
-          if (list.length < 250) break;
+          if (stopped || list.length < 250) break;
           await sleep(PACE_MS.page);
         }
       }
@@ -787,6 +812,7 @@ module.exports = function mountSms(app, deps) {
 module.exports.webhookTargets = webhookTargets;
 module.exports.classifyTextDelivery = classifyTextDelivery;
 module.exports.toE164 = toE164;
+module.exports.threadNeedsSync = threadNeedsSync;
 module.exports.rankJobs = rankJobs;
 module.exports.previewOf = previewOf;
 module.exports.isLsaRelayNotice = isLsaRelayNotice;

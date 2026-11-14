@@ -180,3 +180,25 @@ test("ingestMessage: Google's LSA notices are stored but never become the previe
     global.fetch = realFetch;
   }
 });
+
+test('threadNeedsSync compares instants, not strings', () => {
+  const { threadNeedsSync } = require('../sms');
+  // CallRail's ISO stamp and PostgREST's rendering of the SAME instant: nothing new.
+  assert.strictEqual(threadNeedsSync('2026-11-14T05:06:54.573Z', '2026-11-14T05:06:54.573+00:00'), false);
+  assert.strictEqual(threadNeedsSync('2026-11-14T05:06:54Z', '2026-11-14T05:06:54+00:00'), false);
+  assert.strictEqual(threadNeedsSync('2026-11-13T23:06:54.573-06:00', '2026-11-14T05:06:54.573+00:00'), false);
+  // Newer at CallRail: read the thread.
+  assert.strictEqual(threadNeedsSync('2026-11-14T05:07:00.000Z', '2026-11-14T05:06:54.573+00:00'), true);
+  // Older at CallRail (we stored a later webhook): nothing to read.
+  assert.strictEqual(threadNeedsSync('2026-11-14T05:00:00.000Z', '2026-11-14T05:06:54.573+00:00'), false);
+  // Never read: read it, with or without a CallRail stamp.
+  assert.strictEqual(threadNeedsSync('2026-11-14T05:00:00.000Z', null), true);
+  assert.strictEqual(threadNeedsSync(null, null), true);
+  // Our stamp never moved (Google relay notice) but we already read it at this CallRail stamp: once is enough.
+  const at = Date.parse('2026-11-14T05:00:00.000Z');
+  assert.strictEqual(threadNeedsSync('2026-11-14T05:00:00.000Z', null, at), false);
+  assert.strictEqual(threadNeedsSync('2026-11-14T05:00:00.000Z', '2026-11-13T01:00:00+00:00', at), false);
+  assert.strictEqual(threadNeedsSync('2026-11-14T05:00:01.000Z', '2026-11-13T01:00:00+00:00', at), true);
+  // No stamp from CallRail on a thread we hold: leave it.
+  assert.strictEqual(threadNeedsSync(null, '2026-11-13T01:00:00+00:00'), false);
+});

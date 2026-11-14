@@ -37,7 +37,7 @@ module.exports = function mountIntake(app, deps) {
     sbGet, sbInsert, sbPatch, sbUpsert,
     jnSendJson, jnGetJson, jnAddNote, jnFetchAccountUsers,
     geocode, normPhone, toE164, UUID_RE, EMAIL_RE,
-    callrailApi, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, mapCallRow,
+    callrailApi, callrailAccountsFor, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, mapCallRow,
     syncVisitJnTask, loadScheduleSettings, fmtMin,
   } = deps;
 
@@ -927,7 +927,8 @@ module.exports = function mountIntake(app, deps) {
   const ACTIVITY_MIN_AGE_MS = 10 * 60 * 1000;
   async function callrailCall(callId) {
     if (!CALLRAIL_API_KEY) return { ok: false, error: 'CallRail not configured' };
-    for (const acct of CALLRAIL_ACCOUNT_IDS) {
+    const accounts = callrailAccountsFor ? await callrailAccountsFor(callId) : CALLRAIL_ACCOUNT_IDS;
+    for (const acct of accounts) {
       const r = await callrailApi(acct, `calls/${enc(callId)}.json?fields=call_summary,transcription,recording,recording_player,call_type,formatted_customer_name,customer_name,duration,start_time,answered,voicemail,customer_phone_number`);
       if (r.ok && r.json) return { ok: true, account: acct, call: r.json };
       if (r.status !== 404) return { ok: false, status: r.status, error: `CallRail ${r.status}` };
@@ -1043,7 +1044,7 @@ module.exports = function mountIntake(app, deps) {
     const now = Date.now();
     const prev = recentPulls.get(locationId);
     if (prev && now - prev.at < RECENT_PULL_MIN_MS) return { pulled: 0, upserted: 0, inProgress: prev.inProgress, cached: true };
-    const nums = (await sbGet(`location_tracking_numbers?location_id=eq.${enc(locationId)}&active=eq.true&select=phone_norm`)) || [];
+    const nums = (await sbGet(`location_tracking_numbers?location_id=eq.${enc(locationId)}&active=eq.true&select=phone_norm,callrail_account_id`)) || [];
     const set = new Set(nums.map((n) => n.phone_norm).filter(Boolean));
     const inProgress = new Set();
     const out = { pulled: 0, upserted: 0, inProgress, cached: false };
@@ -1052,7 +1053,10 @@ module.exports = function mountIntake(app, deps) {
     const dateQ = `&start_date=${day(now - 2 * 86400 * 1000)}&end_date=${day(now + 86400 * 1000)}`;
     const fields = 'call_type,source,medium,campaign,first_call,gclid,tags,lead_status,note,company_name,recording,recording_player,recording_duration';
     const rows = [];
-    for (const acct of CALLRAIL_ACCOUNT_IDS) {
+    // Only the accounts that own this location's numbers (all of them when a number has no account on file).
+    const owners = new Set(nums.map((n) => n.callrail_account_id).filter(Boolean).map(String));
+    const accounts = owners.size && nums.every((n) => n.callrail_account_id) ? CALLRAIL_ACCOUNT_IDS.filter((a) => owners.has(String(a))) : CALLRAIL_ACCOUNT_IDS;
+    for (const acct of accounts) {
       let r = await callrailApi(acct, `calls.json?per_page=100&direction=inbound&sort=start_time&order=desc&fields=${fields}${dateQ}`);
       if (!r.ok) r = await callrailApi(acct, `calls.json?per_page=100&direction=inbound&sort=start_time&order=desc${dateQ}`);
       if (!r.ok) { warn('calls/recent CallRail', acct, r.status); continue; }

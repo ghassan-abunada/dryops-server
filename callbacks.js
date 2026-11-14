@@ -58,12 +58,13 @@ function errorText(code, status) {
   })[code] || `CallRail couldn't place the call${status ? ` (${status})` : ''}. Try again.`;
 }
 
-module.exports = function mountCallbacks(app, { requireAuth, sbGet, sbUpsert, callrailApi, callrailApiWrite, CALLRAIL_ACCOUNT_IDS = [] }) {
+module.exports = function mountCallbacks(app, { requireAuth, sbGet, sbUpsert, callrailApi, callrailApiWrite, callrailAccountsFor, CALLRAIL_ACCOUNT_IDS = [] }) {
   const enc = encodeURIComponent;
   const fail = (res, http, code, status) => res.status(http).json({ ok: false, code, error: errorText(code, status) });
 
   async function accountFor(callrailId) {
-    for (const acct of CALLRAIL_ACCOUNT_IDS) {
+    const accounts = callrailAccountsFor ? await callrailAccountsFor(callrailId) : CALLRAIL_ACCOUNT_IDS;
+    for (const acct of accounts) {
       const r = await callrailApi(acct, `calls/${enc(callrailId)}.json?fields=id`).catch(() => null);
       if (r && r.ok) return acct;
     }

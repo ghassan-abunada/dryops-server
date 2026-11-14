@@ -212,7 +212,7 @@ function mountWyhAi(app, deps) {
   const {
     SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGet, jnFetchUpdatedSince, jnListJobImages, jnDownloadFile, refreshJobByJnId,
     sbSelect, sbInsert, sbPatch, requireAuth, requireAdmin, loadActor, anthropic, denverNow,
-    callrailApi, CALLRAIL_ACCOUNT_IDS,
+    callrailApi, callrailAccountsFor, callrailBudget, CALLRAIL_ACCOUNT_IDS,
   } = deps;
 
   const MODEL_SPEC = process.env.WYH_AI_MODEL || DEFAULT_SPEC;
@@ -426,7 +426,9 @@ function mountWyhAi(app, deps) {
   // ── Per-call inputs ────────────────────────────────────────────────────────
   async function callrailDetails(callrailId) {
     if (!callrailApi || !callrailId) return null;
-    for (const acct of CALLRAIL_ACCOUNT_IDS || []) {
+    // The owning account first (asking each in turn spent a request per account).
+    const accounts = callrailAccountsFor ? await callrailAccountsFor(callrailId) : (CALLRAIL_ACCOUNT_IDS || []);
+    for (const acct of accounts) {
       try {
         const r = await callrailApi(acct, `calls/${encodeURIComponent(callrailId)}.json?fields=call_summary,transcription`);
         if (r.ok && r.json) {
@@ -670,11 +672,19 @@ function mountWyhAi(app, deps) {
 
   // ── Schedulers ─────────────────────────────────────────────────────────────
   async function enabledNow() { const s = await loadSettings(); return !!s.enabled; }
+  // A scheduled run reads one CallRail call per lead. It waits while any account
+  // is over the background share of its request budget (callrailBudget.js): a
+  // run with the transcripts missing would re-judge every lead twice.
+  function callrailBusy() {
+    const busy = !!callrailBudget && (CALLRAIL_ACCOUNT_IDS || []).some(a => !callrailBudget.allowBackground(a));
+    if (busy) warn('scheduled run skipped: CallRail request budget');
+    return busy;
+  }
   async function fullCheckDue() {
     if (!SCHEDULERS || running) return;
     if (denverNow().h !== FULL_HOUR) return;
     try {
-      if (!(await enabledNow())) return;
+      if (!(await enabledNow()) || callrailBusy()) return;
       const prior = await sbSelect('wyh_ai_runs', `select=id&mode=eq.full&status=in.(done,aborted)&report->>denver_day=eq.${denverDay()}&limit=1`);
       if (prior.length) return;
       await runWyhAi({ mode: 'full', trigger: 'schedule' });
@@ -684,7 +694,7 @@ function mountWyhAi(app, deps) {
     if (!SCHEDULERS || running) return;
     const { h } = denverNow();
     if (h < INCREMENTAL_WINDOW[0] || h >= INCREMENTAL_WINDOW[1]) return;
-    try { if (await enabledNow()) await runWyhAi({ mode: 'incremental', trigger: 'schedule' }); }
+    try { if ((await enabledNow()) && !callrailBusy()) await runWyhAi({ mode: 'incremental', trigger: 'schedule' }); }
     catch (err) { console.error('[wyh-ai] scheduled incremental failed:', err.message); }
   }
   if (SCHEDULERS) {
