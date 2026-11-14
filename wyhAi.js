@@ -1,13 +1,18 @@
 'use strict';
 // ── WYH AI reviewer ──────────────────────────────────────────────────────────
-// Reads everything we hold about ONE call → job (JobNimbus notes + fields, the
+// Reads everything we hold about ONE lead → job (JobNimbus notes + fields, the
 // job's photos, the CallRail summary / transcript, earlier calls from the same
 // number) and suggests the Wash Your Hands checklist answers, each with a
 // confidence and a one-line "why". Suggestions land in public.wyh_ai_suggestions
 // (DryOps repo supabase/add_wyh_ai.sql) and the app shows them as chips the
 // manager accepts or overrides; nothing is written to JobNimbus.
 //
-// For an answered call with NO job it only does job matching: the model reads
+// A lead is a call, a Google LSA text thread (the thread replaces the transcript)
+// or a JobNimbus job with nothing behind it (a referral: no call questions),
+// owner 2026-11-14. Suggestions key on call_id / conversation_id / lead_job_id
+// (DryOps supabase/add_wyh_ai_leads.sql); until that SQL runs, only calls.
+//
+// For an answered call (or a replied text) with NO job it only does job matching: the model reads
 // the transcript / summary against the jobs created at that location around
 // the call and ranks the ones that look like the same customer (entered under
 // another name or number).
@@ -90,6 +95,8 @@ needs_follow_up: true when the file has major concerns (lost job that should hav
 job_match: ONLY for a call that has no JobNimbus job. From the transcript / summary, extract the caller's name and the property address, then compare against "candidate_jobs" (jobs created at the same location around the call). Return the candidates that are the same customer or property with score 0–1 and why; an empty array when none fit. For a call that already has a job return null.
 summary: max 200 characters, factual.
 
+The lead is one of three kinds ("lead.type"): "call", a phone call as above; "text", a Google LSA text thread the customer started: "call.text_thread" (oldest first; "us" lines name who replied) replaces the transcript, call_taken_by_name is whoever replied first, and call_handled judges the replies the same way (a prompt reply, name, number and address taken, an inspection offered, no price given); "job", a JobNimbus job with no call or text behind it (a referral; "call" is null): return null with confidence 0 for call_taken_by_name and call_handled, and judge the rest from the job, its notes and photos.
+
 Return JSON only, matching the schema exactly.`;
 
 // ── Prompt assembly: house rules + lessons from corrections ─────────────────
@@ -119,21 +126,28 @@ function accuracyFrom(feedback) {
 // ── Inputs ───────────────────────────────────────────────────────────────────
 const daysBetween = (a, b) => (new Date(a).getTime() - new Date(b).getTime()) / 86400000;
 
-function buildPayload({ call, job, notes, callrail, priorCalls, candidates, photosAttached, today }) {
+function buildPayload({ subject = 'call', call, job, notes, callrail, thread, priorCalls, candidates, photosAttached, today }) {
+  const prior = (priorCalls || []).map(p => ({ when: p.start_time, answered: p.answered, summary: clip(p.call_summary, 300) }));
   return {
     today,
-    call: {
+    lead: subject === 'job' ? { type: 'job', lead_type: job ? job.lead_type : null, created: job ? job.jn_created : null } : { type: subject },
+    call: subject === 'job' ? null : subject === 'text' ? {
+      when: call.start_time, replied: !!call.answered, replied_by: clip(call.replied_by, 60), reply_minutes: call.reply_minutes ?? null,
+      texter: clip(call.customer_name, 80), phone: call.customer_phone_number, tags: call.tags || [],
+      text_thread: thread || [],
+      prior_calls_same_number: prior,
+    } : {
       when: call.start_time, answered: call.answered, voicemail: call.voicemail, duration_sec: call.duration,
       caller: clip(call.customer_name, 80), phone: call.customer_phone_number, tags: call.tags || [],
       summary: clip((callrail && callrail.summary) || call.call_summary, 2000),
       transcript: clip(callrail && callrail.transcript, 6000),
-      prior_calls_same_number: (priorCalls || []).map(p => ({ when: p.start_time, answered: p.answered, summary: clip(p.call_summary, 300) })),
+      prior_calls_same_number: prior,
     },
     job: job ? {
       number: job.number, name: clip(job.name, 120), status: job.status, stage: job.stage,
       insurance_type: job.insurance_type, insurer: job.insurer, claim_number: job.claim_number, tested: job.tested,
       date_loss: job.date_loss, cat: job.cat, loss_type: job.loss_type, lead_type: job.lead_type, sales_rep: job.sales_rep,
-      created: job.jn_created, days_call_to_job: job.jn_created ? Math.round(daysBetween(job.jn_created, call.start_time) * 10) / 10 : null,
+      created: job.jn_created, days_call_to_job: job.jn_created && call && subject !== 'job' ? Math.round(daysBetween(job.jn_created, call.start_time) * 10) / 10 : null,
       inspection_state: job._inspection_state || 'none', inspection_date: job._inspection_date || null,
       photos_attached: photosAttached,
     } : null,
@@ -154,11 +168,13 @@ function sample(list, n) {
 }
 
 const pick = (s) => (s && typeof s === 'object' ? { value: s.value ?? null, confidence: Math.max(0, Math.min(1, Number(s.confidence) || 0)), why: clip(s.why, 160) } : { value: null, confidence: 0, why: null });
-function cleanSuggestions(llm, hasJob) {
+function cleanSuggestions(llm, hasJob, subject = 'call') {
   const out = {};
   for (const q of ['call_taken_by_name', 'call_handled', 'walked', 'landed', 'photo_moisture', 'photo_damage', 'photo_wide', 'insurance', 'has_carrier', 'has_claim', 'tested', 'packout_sold', 'info_sufficient', 'needs_follow_up']) out[q] = pick(llm[q]);
   if (!hasJob) for (const q of Object.keys(out)) out[q] = { value: null, confidence: 0, why: null };
-  out.call_missed_reason = clip(llm.call_missed_reason, 200);
+  // A job lead has no call to judge.
+  if (subject === 'job') for (const q of ['call_taken_by_name', 'call_handled']) out[q] = { value: null, confidence: 0, why: null };
+  out.call_missed_reason = subject === 'job' ? null : clip(llm.call_missed_reason, 200);
   out.walk_reason = llm.walk_reason || null;
   out.walk_scheduled_for = /^\d{4}-\d{2}-\d{2}$/.test(String(llm.walk_scheduled_for || '')) ? llm.walk_scheduled_for : null;
   out.not_landed_reason = llm.not_landed_reason || null; out.not_landed_note = clip(llm.not_landed_note, 200);
@@ -221,14 +237,32 @@ function mountWyhAi(app, deps) {
     }
     return out;
   }
-  // Upsert keyed on call_id (the shared sbBulkUpsert keys on jn_id).
+  // One row per lead, keyed on its own column (the shared sbBulkUpsert keys on jn_id).
+  const KEY_COLS = ['call_id', 'conversation_id', 'lead_job_id'];
+  const keyColOf = (row) => KEY_COLS.find(c => row[c]) || 'call_id';
   async function upsertSuggestions(rows) {
     if (!rows.length) return;
-    const uniq = [...new Map(rows.map(r => [r.call_id, r])).values()];
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/wyh_ai_suggestions?on_conflict=call_id`, {
-      method: 'POST', headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(uniq),
-    });
-    if (!r.ok) throw new Error(`wyh_ai_suggestions upsert ${r.status} ${(await r.text()).slice(0, 200)}`);
+    for (const col of KEY_COLS) {
+      const uniq = [...new Map(rows.filter(r => keyColOf(r) === col).map(r => [r[col], r])).values()];
+      if (!uniq.length) continue;
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/wyh_ai_suggestions?on_conflict=${col}`, {
+        method: 'POST', headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(uniq),
+      });
+      if (!r.ok) throw new Error(`wyh_ai_suggestions upsert ${r.status} ${(await r.text()).slice(0, 200)}`);
+    }
+  }
+  // Texts and job leads need the columns from add_wyh_ai_leads.sql; until then, calls only.
+  let leadsReadyAt = 0; let leadsReady = false;
+  async function leadsSupported() {
+    if (leadsReady || Date.now() - leadsReadyAt < 10 * 60 * 1000) return leadsReady;
+    leadsReadyAt = Date.now();
+    try {
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/wyh_ai_suggestions?select=conversation_id,lead_job_id&limit=1`, { headers: sbHeaders });
+      const f = await fetch(`${SUPABASE_URL}/rest/v1/wyh_ai_feedback?select=conversation_id,lead_job_id&limit=1`, { headers: sbHeaders });
+      leadsReady = r.ok && f.ok;
+    } catch { leadsReady = false; }
+    if (!leadsReady) warn('texts and job leads wait for add_wyh_ai_leads.sql');
+    return leadsReady;
   }
   async function inChunks(table, col, ids, select, extra = '') {
     const out = [];
@@ -262,17 +296,58 @@ function mountWyhAi(app, deps) {
   // No `cause` column on jobs (prod 2026-10-27): the cause of loss comes from
   // the notes; `loss_type` (water / fire…) is the closest mirrored field.
   const JOB_COLS = 'id,jn_id,number,name,client_name,status,stage,insurance_type,insurer,claim_number,tested,date_loss,cat,loss_type,lead_type,sales_rep,jn_created,location_id,address,client_phone_norm';
-  async function selectTargets({ location_id = null, call_id = null } = {}) {
+  // `call_id` / `conversation_id` / `lead_job_id` narrow it to one lead (the Re-run button).
+  async function selectTargets({ location_id = null, call_id = null, conversation_id = null, lead_job_id = null } = {}) {
     const since = new Date(Date.now() - CALL_DAYS * 86400000).toISOString();
-    const q = `select=${CALL_COLS}&direction=eq.inbound&location_id=not.is.null&start_time=gte.${since}`
-      + (location_id ? `&location_id=eq.${encodeURIComponent(location_id)}` : '') + (call_id ? `&id=eq.${encodeURIComponent(call_id)}` : '') + '&order=start_time.desc';
-    const calls = await sbPaged('calls', q);
+    const one = call_id || conversation_id || lead_job_id;
+    const leads = await leadsSupported();
     const locs = new Map((await sbPaged('locations', 'select=id,name,location_type,timezone')).map(l => [l.id, l]));
-    const mit = calls.filter(c => { const l = locs.get(c.location_id); return l && (l.location_type == null || l.location_type === 'Mitigation'); });
-    const jobIds = [...new Set(mit.map(c => c.job_id).filter(Boolean))];
+    const isMit = (locId) => { const l = locs.get(String(locId || '')); return !!l && (l.location_type == null || l.location_type === 'Mitigation'); };
+    const atLoc = (col) => (location_id ? `&${col}=eq.${encodeURIComponent(location_id)}` : '');
+
+    // Calls.
+    const calls = one && !call_id ? [] : await sbPaged('calls', `select=${CALL_COLS}&direction=eq.inbound&location_id=not.is.null&start_time=gte.${since}`
+      + atLoc('location_id') + (call_id ? `&id=eq.${encodeURIComponent(call_id)}` : '') + '&order=start_time.desc');
+    const mit = calls.filter(c => isMit(c.location_id));
+
+    // Google LSA text threads the customer started (same rule as the wyh_messages feed).
+    let texts = [];
+    if (leads && (!one || conversation_id)) {
+      const rows = await sbPaged('sms_conversations', `select=id,first_inbound_at,first_reply_at,first_reply_by_name,customer_name,customer_phone_number,customer_phone_norm,location_id,job_id`
+        + `&location_id=not.is.null&first_inbound_at=gte.${since}&source=ilike.${encodeURIComponent('Google Local Services*')}`
+        + atLoc('location_id') + (conversation_id ? `&id=eq.${encodeURIComponent(conversation_id)}` : '') + '&order=first_inbound_at.desc');
+      const ours = rows.filter(c => isMit(c.location_id));
+      const firstOut = new Map();
+      for (const m of await inChunks('sms_messages', 'conversation_id', ours.map(c => c.id), 'conversation_id,created_at', '&direction=eq.outbound&order=created_at.asc')) {
+        if (!firstOut.has(m.conversation_id)) firstOut.set(m.conversation_id, m.created_at);
+      }
+      texts = ours.filter(c => !(firstOut.get(c.id) && firstOut.get(c.id) < c.first_inbound_at));
+    }
+
+    // JobNimbus Mitigation jobs with no call or text behind them (same rule as the wyh_job_leads feed).
+    let leadJobs = [];
+    if (leads && (!one || lead_job_id)) {
+      const rows = await sbPaged('jobs', `select=${JOB_COLS},record_type&jn_created=gte.${since}&or=(record_type.is.null,record_type.eq.Mitigation,record_type.eq.)`
+        + atLoc('location_id') + (lead_job_id ? `&id=eq.${encodeURIComponent(lead_job_id)}` : '') + '&order=jn_created.desc');
+      const ours = rows.filter(j => isMit(j.location_id));
+      const ids = ours.map(j => j.id);
+      const behind = new Set([
+        ...(await inChunks('calls', 'job_id', ids, 'job_id')).map(r => r.job_id),
+        ...(await inChunks('sms_conversations', 'job_id', ids, 'job_id')).map(r => r.job_id),
+      ]);
+      const ownReview = new Set((await inChunks('wyh_reviews', 'lead_job_id', ids, 'lead_job_id')).map(r => r.lead_job_id));
+      leadJobs = ours.filter(j => ownReview.has(j.id) || !behind.has(j.id));
+    }
+
+    const jobIds = [...new Set([...mit.map(c => c.job_id), ...texts.map(c => c.job_id)].filter(Boolean))];
     const jobs = new Map((await inChunks('jobs', 'id', jobIds, JOB_COLS)).map(j => [j.id, j]));
-    const reviews = new Map((await inChunks('wyh_reviews', 'call_id', mit.map(c => c.id), 'call_id,status,kind,completed_manually')).map(r => [r.call_id, r]));
-    const insp = await inChunks('inspections', 'job_id', jobIds, 'job_id,status,scheduled_date', '&task_type=eq.inspection&status=neq.cancelled');
+    for (const j of leadJobs) jobs.set(j.id, j);
+    const allJobIds = [...jobs.keys()];
+    const REVIEW_COLS = 'call_id,conversation_id,lead_job_id,status,kind,completed_manually';
+    const reviews = new Map((await inChunks('wyh_reviews', 'call_id', mit.map(c => c.id), REVIEW_COLS)).map(r => [`call_id:${r.call_id}`, r]));
+    for (const r of await inChunks('wyh_reviews', 'conversation_id', texts.map(c => c.id), REVIEW_COLS)) reviews.set(`conversation_id:${r.conversation_id}`, r);
+    for (const r of await inChunks('wyh_reviews', 'lead_job_id', leadJobs.map(j => j.id), REVIEW_COLS)) reviews.set(`lead_job_id:${r.lead_job_id}`, r);
+    const insp = await inChunks('inspections', 'job_id', allJobIds, 'job_id,status,scheduled_date', '&task_type=eq.inspection&status=neq.cancelled');
     for (const i of insp) {
       const j = jobs.get(i.job_id); if (!j) continue;
       if (i.status === 'completed') { j._inspection_state = 'completed'; j._inspection_date = i.scheduled_date; }
@@ -280,8 +355,9 @@ function mountWyhAi(app, deps) {
     }
     const nojobSince = Date.now() - NOJOB_DAYS * 86400000;
     const targets = [];
+    const lead = (subject, col, id, call, job, kind) => ({ subject, col, id, ref: `${col}:${id}`, call, job, loc: locs.get(String(call.location_id)), kind });
     for (const c of mit) {
-      const r = reviews.get(c.id);
+      const r = reviews.get(`call_id:${c.id}`);
       if (r && r.kind === 'not_lead') continue;
       if (c.job_id) {
         const j = jobs.get(c.job_id);
@@ -291,15 +367,41 @@ function mountWyhAi(app, deps) {
         // not this call's job unless a manager linked it by hand (app add_wyh_landed_elsewhere.sql).
         if (j.location_id && j.location_id !== c.location_id && !c.job_linked_at) continue;
         if (j.jn_created && daysBetween(c.start_time, j.jn_created) > EXISTING_JOB_DAYS) continue; // repeat call on an old job
-        targets.push({ call: c, job: j, loc: locs.get(c.location_id), kind: 'wyh' });
+        targets.push(lead('call', 'call_id', c.id, c, j, 'wyh'));
       } else if (c.answered === true && !c.voicemail && new Date(c.start_time).getTime() >= nojobSince) {
-        targets.push({ call: c, job: null, loc: locs.get(c.location_id), kind: 'match' });
+        targets.push(lead('call', 'call_id', c.id, c, null, 'match'));
       }
+    }
+    for (const t of texts) {
+      const r = reviews.get(`conversation_id:${t.id}`);
+      if (r && (r.kind === 'not_lead' || r.status === 'complete')) continue;
+      const call = {
+        id: t.id, start_time: t.first_inbound_at, answered: !!t.first_reply_at, voicemail: false, duration: null,
+        customer_name: t.customer_name, customer_phone_number: t.customer_phone_number, customer_phone_norm: t.customer_phone_norm,
+        tags: ['LSA message'], call_summary: null, location_id: t.location_id, job_id: t.job_id,
+        replied_by: t.first_reply_by_name || null,
+        reply_minutes: t.first_reply_at ? Math.max(0, Math.round((new Date(t.first_reply_at) - new Date(t.first_inbound_at)) / 60000)) : null,
+      };
+      const j = t.job_id ? jobs.get(t.job_id) : null;
+      if (j && j.jn_id) targets.push(lead('text', 'conversation_id', t.id, call, j, 'wyh'));
+      else if (!t.job_id && t.first_reply_at && new Date(t.first_inbound_at).getTime() >= nojobSince) targets.push(lead('text', 'conversation_id', t.id, call, null, 'match'));
+    }
+    for (const j of leadJobs) {
+      const r = reviews.get(`lead_job_id:${j.id}`);
+      if (!j.jn_id || (r && (r.kind === 'not_lead' || r.status === 'complete'))) continue;
+      const call = { id: j.id, start_time: j.jn_created, location_id: j.location_id, customer_name: j.client_name, customer_phone_number: null, customer_phone_norm: j.client_phone_norm, tags: [j.lead_type || 'No lead type'] };
+      targets.push(lead('job', 'lead_job_id', j.id, call, jobs.get(j.id) || j, 'wyh'));
     }
     return targets;
   }
-  async function prevRows(callIds) {
-    return new Map((await inChunks('wyh_ai_suggestions', 'call_id', callIds, 'call_id,inputs_hash,error,reviewed_at')).map(r => [r.call_id, r]));
+  async function prevRows(targets) {
+    const out = new Map();
+    for (const col of KEY_COLS) {
+      const ids = targets.filter(t => t.col === col).map(t => t.id);
+      if (!ids.length) continue;
+      for (const r of await inChunks('wyh_ai_suggestions', col, ids, `${col},inputs_hash,error,reviewed_at`)) out.set(`${col}:${r[col]}`, r);
+    }
+    return out;
   }
 
   // ── Per-call inputs ────────────────────────────────────────────────────────
@@ -316,6 +418,11 @@ function mountWyhAi(app, deps) {
       } catch (e) { warn('callrail details', e.message); }
     }
     return null;
+  }
+  /** A text thread as the model reads it: oldest first, who said what. */
+  async function threadFor(conversationId) {
+    const rows = await sbSelect('sms_messages', `select=direction,content,created_at,sent_by_name&conversation_id=eq.${encodeURIComponent(conversationId)}&order=created_at.asc&limit=60`).catch(() => []);
+    return rows.map(m => ({ when: m.created_at, from: m.direction === 'inbound' ? 'customer' : `us${m.sent_by_name ? ` (${clip(m.sent_by_name, 40)})` : ''}`, text: clip(m.content, 600) }));
   }
   async function priorCallsFor(call) {
     if (!call.customer_phone_norm) return [];
@@ -371,27 +478,30 @@ function mountWyhAi(app, deps) {
       fp = notesHash(PROMPT_VERSION, acts);
       notes = acts.map(a => ({ when: isoDay(a.date_created), by: clip(a.created_by_name, 60), text: plainNote(a.note).slice(0, NOTE_CHARS) }));
     }
-    const callrail = await callrailDetails(t.call.callrail_id);
-    const prior = await priorCallsFor(t.call);
+    const subject = t.subject || 'call';
+    const callrail = subject === 'call' ? await callrailDetails(t.call.callrail_id) : null;
+    const thread = subject === 'text' ? await threadFor(t.call.id) : null;
+    const prior = subject === 'job' ? [] : await priorCallsFor(t.call);
     const candidates = t.kind === 'match' ? await candidateJobsFor(t.call) : null;
     const photos = t.job ? await photosFor(t.job, photosN) : { images: [], ids: [], total: 0 };
     const lessons = lessonsFor(feedback, t.call.location_id);
     const jobStamp = t.job ? [t.job.status, t.job.stage, t.job.insurer, t.job.claim_number, t.job.tested, t.job.date_loss, t.job.cat, t.job.loss_type, t.job._inspection_state, t.job._inspection_date].join('/') : '';
-    const hash = inputsHash([PROMPT_VERSION, fp, jobStamp, settings.updated_at, (callrail && callrail.transcript ? callrail.transcript.length : 0), (callrail && callrail.summary) || t.call.call_summary, photos.ids.join(','), lessons[0] ? lessons[0].id : '', (candidates || []).map(c => c.job_id).join(',')]);
-    const payload = buildPayload({ call: t.call, job: t.job, notes, callrail, priorCalls: prior, candidates, photosAttached: photos.images.length, today });
+    const threadStamp = thread && thread.length ? `${thread.length}/${thread[thread.length - 1].when}` : '';
+    const hash = inputsHash([PROMPT_VERSION, subject, fp, jobStamp, settings.updated_at, (callrail && callrail.transcript ? callrail.transcript.length : 0), (callrail && callrail.summary) || t.call.call_summary, threadStamp, photos.ids.join(','), lessons[0] ? lessons[0].id : '', (candidates || []).map(c => c.job_id).join(',')]);
+    const payload = buildPayload({ subject, call: t.call, job: t.job, notes, callrail, thread, priorCalls: prior, candidates, photosAttached: photos.images.length, today });
     const systemPrompt = buildSystemPrompt(BASE_PROMPT, settings, lessons, accuracyFrom(feedback.slice(0, 200)));
     return { t, notes, hash, payload, images: photos.images, photoIds: photos.ids, photosTotal: photos.total, systemPrompt, nowISO };
   }
 
   function rowFrom(inp, llm, usage) {
     const hasJob = !!inp.t.job;
-    const sugg = cleanSuggestions(llm, hasJob);
+    const sugg = cleanSuggestions(llm, hasJob, inp.t.subject);
     const match = !hasJob && llm.job_match ? {
       caller_name: clip(llm.job_match.caller_name, 80), address: clip(llm.job_match.address, 120),
       candidates: (llm.job_match.candidates || []).filter(c => uuidRe.test(String(c.job_id || ''))).slice(0, 5).map(c => ({ job_id: c.job_id, score: Math.max(0, Math.min(1, Number(c.score) || 0)), why: clip(c.why, 160) })),
     } : null;
     return {
-      call_id: inp.t.call.id, job_id: inp.t.job ? inp.t.job.id : null, location_id: inp.t.call.location_id,
+      [inp.t.col || 'call_id']: inp.t.id || inp.t.call.id, job_id: inp.t.job ? inp.t.job.id : null, location_id: inp.t.call.location_id,
       inputs_hash: inp.hash, suggestions: hasJob ? sugg : null, job_match: match, photos_used: inp.images.length, photos_total: inp.photosTotal,
       notes_used: inp.notes.length, model: provider.name, prompt_version: PROMPT_VERSION, reviewed_at: inp.nowISO,
       error: null, error_at: null, input_tokens: usage.input, output_tokens: usage.output + usage.thinking, est_cost_usd: Math.round(costOf(usage) * 10000) / 10000,
@@ -422,7 +532,7 @@ function mountWyhAi(app, deps) {
       const settings = await loadSettings();
       const feedback = await loadFeedback();
       let targets = await selectTargets({ location_id });
-      const prev = await prevRows(targets.map(t => t.call.id));
+      const prev = await prevRows(targets);
       if (mode === 'incremental') {
         const last = await sbSelect('wyh_ai_runs', 'select=started_at&status=eq.done&mode=in.(full,incremental)&order=started_at.desc&limit=1');
         if (last.length) {
@@ -433,7 +543,7 @@ function mountWyhAi(app, deps) {
           }
           const settingsChanged = settings.updated_at && settings.updated_at > last[0].started_at;
           const feedbackChanged = feedback[0] && feedback[0].created_at > last[0].started_at;
-          targets = targets.filter(t => !prev.has(t.call.id) || settingsChanged || feedbackChanged || (t.job && touched.has(t.job.jn_id)));
+          targets = targets.filter(t => !prev.has(t.ref) || settingsChanged || feedbackChanged || (t.job && touched.has(t.job.jn_id)));
         }
       }
       stats.jobs_in_scope = targets.length;
@@ -449,9 +559,10 @@ function mountWyhAi(app, deps) {
         try {
           const inp = await buildInput(t, ctx, stats);
           stats.jobs_fetched++;
-          const p = prev.get(t.call.id);
+          const p = prev.get(t.ref);
           if (!force && p && p.inputs_hash === inp.hash && !p.error) { stats.skipped_unchanged++; running.progress.done++; return; }
-          if (t.kind === 'wyh' && !inp.notes.length && !inp.images.length && !inp.payload.call.summary) { stats.no_activity++; running.progress.done++; return; }
+          const said = inp.payload.call ? (inp.payload.call.summary || (inp.payload.call.text_thread || []).length) : 0;
+          if (t.kind === 'wyh' && !inp.notes.length && !inp.images.length && !said) { stats.no_activity++; running.progress.done++; return; }
           stats.llm_calls++;
           const { parsed, usage } = await withRetry(() => provider.classify(userText(inp.payload), { images: inp.images, systemPrompt: inp.systemPrompt }));
           stats.input_tokens += usage.input; stats.output_tokens += usage.output; stats.thinking_tokens += usage.thinking;
@@ -461,8 +572,8 @@ function mountWyhAi(app, deps) {
           rows.push(row);
         } catch (err) {
           stats.errors++;
-          if (firstErrors.length < 20) firstErrors.push({ call_id: t.call.id, job_number: t.job ? t.job.number : null, error: String(err.message).slice(0, 200) });
-          errRows.push({ call_id: t.call.id, job_id: t.job ? t.job.id : null, location_id: t.call.location_id, error: String(err.message).slice(0, 300), error_at: nowISO });
+          if (firstErrors.length < 20) firstErrors.push({ lead: t.ref, job_number: t.job ? t.job.number : null, error: String(err.message).slice(0, 200) });
+          errRows.push({ [t.col]: t.id, job_id: t.job ? t.job.id : null, location_id: t.call.location_id, error: String(err.message).slice(0, 300), error_at: nowISO });
         }
         running.progress.done++;
         if (rows.length >= 50) { const chunk = rows.splice(0, rows.length); await upsertSuggestions(chunk).catch(e => console.error('[wyh-ai] flush failed:', e.message)); }
@@ -486,32 +597,34 @@ function mountWyhAi(app, deps) {
     const stats = { jn_requests: 0 };
     const settings = await loadSettings(); const feedback = await loadFeedback();
     const targets = await selectTargets({ location_id });
-    const prev = await prevRows(targets.map(t => t.call.id));
+    const prev = await prevRows(targets);
     const sampleT = targets.slice(0, Math.max(1, Math.min(Number(limit) || 5, 25)));
     const ctx = { settings, feedback, nowISO: new Date().toISOString(), today: denverDay() };
     const out = [];
     for (const t of sampleT) {
       const inp = await buildInput(t, ctx, stats);
-      const p = prev.get(t.call.id);
+      const p = prev.get(t.ref);
       const text = userText(inp.payload);
-      out.push({ call_id: t.call.id, kind: t.kind, caller: t.call.customer_name, job_number: t.job ? t.job.number : null, notes: inp.notes.length, photos: inp.images.length, transcript: !!inp.payload.call.transcript, text_chars: text.length, would_skip: p && p.inputs_hash === inp.hash && !p.error ? 'unchanged' : null, payload: inp.payload, system_prompt_chars: inp.systemPrompt.length });
+      out.push({ lead: t.ref, subject: t.subject, kind: t.kind, caller: t.call.customer_name, job_number: t.job ? t.job.number : null, notes: inp.notes.length, photos: inp.images.length, transcript: !!(inp.payload.call && (inp.payload.call.transcript || (inp.payload.call.text_thread || []).length)), text_chars: text.length, would_skip: p && p.inputs_hash === inp.hash && !p.error ? 'unchanged' : null, payload: inp.payload, system_prompt_chars: inp.systemPrompt.length });
     }
-    const pending = targets.filter(t => { const p = prev.get(t.call.id); return !p || p.error; }).length;
+    const pending = targets.filter(t => { const p = prev.get(t.ref); return !p || p.error; }).length;
     // ~4 chars per token for text, ~260 tokens per image, ~900 output tokens.
     const estTokens = out.length ? out.reduce((s, o) => s + o.text_chars / 4 + o.photos * 260 + 900, 0) / out.length : 0;
     return {
       model: provider ? provider.name : null, schedulers: SCHEDULERS, enabled: !!settings.enabled, photos_per_job: settings.photos_per_job ?? PHOTOS_DEFAULT,
       in_scope: targets.length, wyh_targets: targets.filter(t => t.kind === 'wyh').length, match_targets: targets.filter(t => t.kind === 'match').length, never_reviewed: pending,
+      by_subject: { call: targets.filter(t => t.subject === 'call').length, text: targets.filter(t => t.subject === 'text').length, job: targets.filter(t => t.subject === 'job').length },
       est_cost_per_call_usd: Math.round(estTokens * PRICE_IN / 1e6 * 10000) / 10000, est_cost_full_usd: Math.round(estTokens * PRICE_IN / 1e6 * targets.length * 100) / 100,
       jn_requests: stats.jn_requests, sample: out,
     };
   }
 
-  // One call on demand (the panel's Re-run / Suggest button).
-  async function suggestOne(callId) {
+  // One lead on demand (the panel's Re-run / Suggest button). `col` = call_id | conversation_id | lead_job_id.
+  async function suggestOne(col, id) {
     if (!provider) throw new Error(`WYH AI is disabled: no API key for ${MODEL_SPEC}`);
-    const [t] = await selectTargets({ call_id: callId });
-    if (!t) { const e = new Error('This call is not reviewable (no job, an old job, or the review is complete)'); e.status = 400; throw e; }
+    if (col !== 'call_id' && !(await leadsSupported())) { const e = new Error('AI for texts and job leads needs add_wyh_ai_leads.sql'); e.status = 503; throw e; }
+    const [t] = await selectTargets({ [col]: id });
+    if (!t) { const e = new Error('This lead is not reviewable (no job, an old job, or the review is complete)'); e.status = 400; throw e; }
     const settings = await loadSettings(); const feedback = await loadFeedback();
     const stats = { jn_requests: 0 };
     const inp = await buildInput(t, { settings, feedback, nowISO: new Date().toISOString(), today: denverDay() }, stats);
@@ -521,15 +634,15 @@ function mountWyhAi(app, deps) {
       usage = r.usage; row = rowFrom(inp, r.parsed, usage);
     } catch (err) {
       error = String(err.message).slice(0, 300);
-      row = { call_id: t.call.id, job_id: t.job ? t.job.id : null, location_id: t.call.location_id, error, error_at: inp.nowISO };
+      row = { [t.col]: t.id, job_id: t.job ? t.job.id : null, location_id: t.call.location_id, error, error_at: inp.nowISO };
     }
     await upsertSuggestions([row]);
     await sbInsert('wyh_ai_runs', {
       mode: 'refresh', trigger: 'app', model: provider.name, prompt_version: PROMPT_VERSION, status: error ? 'error' : 'done', finished_at: new Date().toISOString(),
       jobs_in_scope: 1, jobs_fetched: 1, llm_calls: 1, errors: error ? 1 : 0, jn_requests: stats.jn_requests,
-      input_tokens: usage.input, output_tokens: usage.output, thinking_tokens: usage.thinking, est_cost_usd: Math.round(costOf(usage) * 10000) / 10000, report: { call_id: callId, error },
+      input_tokens: usage.input, output_tokens: usage.output, thinking_tokens: usage.thinking, est_cost_usd: Math.round(costOf(usage) * 10000) / 10000, report: { lead: `${col}:${id}`, error },
     }).catch(err => console.error('[wyh-ai] refresh audit failed:', err.message));
-    const [fresh] = await sbSelect('wyh_ai_suggestions', `select=*&call_id=eq.${callId}`);
+    const [fresh] = await sbSelect('wyh_ai_suggestions', `select=*&${col}=eq.${encodeURIComponent(id)}`);
     return fresh || null;
   }
 
@@ -593,21 +706,24 @@ function mountWyhAi(app, deps) {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
-  // On-demand for one call (managers inside their locations).
-  app.post('/wyh/calls/:callId/suggest', requireAuth, async (req, res) => {
-    const callId = String(req.params.callId || '');
-    if (!uuidRe.test(callId)) return res.status(400).json({ error: 'Bad call id' });
+  // On demand for one lead (managers inside their locations): a call, a text thread or a job lead.
+  const suggestRoute = (path, table, col, noun) => app.post(path, requireAuth, async (req, res) => {
+    const id = String(req.params.id || '');
+    if (!uuidRe.test(id)) return res.status(400).json({ error: `Bad ${noun} id` });
     try {
       const actor = await loadActor(req);
       if (!actor) return res.status(403).json({ error: 'Profile not found' });
       if (!['admin', 'owner', 'executive', 'expansion_manager'].includes(actor.role)) return res.status(403).json({ error: 'Not allowed' });
-      const [call] = await sbSelect('calls', `select=id,location_id&id=eq.${callId}`);
-      if (!call) return res.status(404).json({ error: 'Call not found' });
-      if (actor.role === 'expansion_manager' && !actor.locs.includes(String(call.location_id))) return res.status(403).json({ error: 'Not your location' });
-      const row = await suggestOne(callId);
+      const [row0] = await sbSelect(table, `select=id,location_id&id=eq.${id}`);
+      if (!row0) return res.status(404).json({ error: `${noun[0].toUpperCase()}${noun.slice(1)} not found` });
+      if (actor.role === 'expansion_manager' && !actor.locs.includes(String(row0.location_id))) return res.status(403).json({ error: 'Not your location' });
+      const row = await suggestOne(col, id);
       res.json({ ok: !!row && !row.error, suggestion: row });
     } catch (err) { res.status(err.status || 502).json({ error: err.message }); }
   });
+  suggestRoute('/wyh/calls/:id/suggest', 'calls', 'call_id', 'call');
+  suggestRoute('/wyh/messages/:id/suggest', 'sms_conversations', 'conversation_id', 'text');
+  suggestRoute('/wyh/job-leads/:id/suggest', 'jobs', 'lead_job_id', 'job');
 }
 
 module.exports = mountWyhAi;
