@@ -1,7 +1,7 @@
 // WYH AI reviewer: the pure pieces (prompt assembly, accuracy, cleanup). Run: npm test
 const test = require('node:test');
 const assert = require('node:assert');
-const { buildSystemPrompt, accuracyFrom, cleanSuggestions, sample, BASE_PROMPT, WyhSuggestionSchema } = require('../wyhAi');
+const { buildSystemPrompt, accuracyFrom, cleanSuggestions, sample, BASE_PROMPT, WyhSuggestionSchema, buildPayload } = require('../wyhAi');
 
 test('house rules and lessons are folded into the system prompt', () => {
   const feedback = [
@@ -50,3 +50,37 @@ test('sample keeps the ends and spreads evenly', () => {
   assert.deepStrictEqual(sample([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 4), [1, 4, 7, 10]);
   assert.deepStrictEqual(sample([1, 2], 1), [1]);
 });
+
+test('a text lead: the thread replaces the transcript, replies stand in for answering', () => {
+  const call = { id: 'c', start_time: '2026-11-13T15:00:00Z', answered: true, replied_by: 'Ali', reply_minutes: 4, customer_name: 'Jane', customer_phone_number: '214', tags: ['LSA message'] };
+  const thread = [{ when: '2026-11-13T15:00:00Z', from: 'customer', text: 'water in my kitchen' }, { when: '2026-11-13T15:04:00Z', from: 'us (Ali)', text: 'we can be there at 2' }];
+  const p = buildPayload({ subject: 'text', call, job: { jn_created: '2026-11-13T16:00:00Z' }, notes: [], thread, today: '2026-11-13' });
+  assert.deepStrictEqual(p.lead, { type: 'text' });
+  assert.strictEqual(p.call.replied, true);
+  assert.strictEqual(p.call.replied_by, 'Ali');
+  assert.deepStrictEqual(p.call.text_thread, thread);
+  assert.strictEqual(p.call.transcript, undefined);
+  assert.strictEqual(p.job.days_call_to_job, 0);
+});
+
+test('a job lead: no call in the payload, and no call answers come back', () => {
+  const job = { lead_type: 'Plumber', jn_created: '2026-11-13T16:00:00Z', number: '1' };
+  const p = buildPayload({ subject: 'job', call: { start_time: job.jn_created }, job, notes: [], today: '2026-11-13' });
+  assert.strictEqual(p.call, null);
+  assert.deepStrictEqual(p.lead, { type: 'job', lead_type: 'Plumber', created: job.jn_created });
+  assert.strictEqual(p.job.days_call_to_job, null);
+  const llm = { call_taken_by_name: { value: 'Ali', confidence: 0.9, why: 'x' }, call_handled: { value: true, confidence: 0.9, why: 'x' }, call_missed_reason: 'y', landed: { value: true, confidence: 0.8, why: 'z' }, summary: 's' };
+  const out = cleanSuggestions(llm, true, 'job');
+  assert.deepStrictEqual(out.call_taken_by_name, { value: null, confidence: 0, why: null });
+  assert.deepStrictEqual(out.call_handled, { value: null, confidence: 0, why: null });
+  assert.strictEqual(out.call_missed_reason, null);
+  assert.strictEqual(out.landed.value, true);
+  // A call keeps its call answers.
+  assert.strictEqual(cleanSuggestions(llm, true).call_taken_by_name.value, 'Ali');
+});
+
+test('the prompt explains the three kinds of lead', () => {
+  assert.match(BASE_PROMPT, /"text", a Google LSA text thread/);
+  assert.match(BASE_PROMPT, /"job", a JobNimbus job with no call or text behind it/);
+});
+
