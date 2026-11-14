@@ -158,10 +158,10 @@ function buildWyhNote(i) {
     }
   }
   if (r.info_sufficient != null) {
-    if (r.info_sufficient) check.push(`${box(true)} File info: date of loss, category and cause present`);
+    if (r.info_sufficient) check.push(`${box(true)} File info: sufficient`);
     else {
-      check.push(`${box(false)} File info: incomplete (date of loss, category, cause)`);
-      actions.push('Add date of loss, category and cause to the file');
+      check.push(`${box(false)} File info: not sufficient`);
+      actions.push('Complete the JobNimbus file');
     }
   }
   if (r.called_back != null || r.missed_reason) {
