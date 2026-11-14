@@ -36,7 +36,9 @@ const {
   makeProvider, fetchActivities: fetchActs, groupActsByJob, notesHash,
 } = require('./noteReader');
 
-const PROMPT_VERSION = 'w1'; // bump to re-read every call on the next full run
+const PROMPT_VERSION = 'w1';
+// The app's own not-a-lead reasons (DryOps lib/wyh.ts NOT_LEAD_REASONS); a manager confirms the AI's pick.
+const NOT_LEAD_REASONS = ['Spam / robocall', 'Vendor or sales call', 'Existing customer', 'Wrong number', 'Other']; // bump to re-read every call on the next full run
 
 // Every answer the checklist asks, as { value, confidence, why }.
 const sug = (v) => z.object({ value: v.nullable(), confidence: z.number(), why: z.string().nullable() });
@@ -73,6 +75,12 @@ const WyhSuggestionSchema = z.object({
     address: z.string().nullable(),
     candidates: z.array(z.object({ job_id: z.string(), score: z.number(), why: z.string() })),
   }).nullable(),
+  lead_verdict: z.object({
+    value: z.enum(['lead', 'not_lead']).nullable(),
+    reason: z.enum(NOT_LEAD_REASONS).nullable(),
+    confidence: z.number(),
+    why: z.string().nullable(),
+  }).nullable(),
   summary: z.string(),
 });
 
@@ -93,6 +101,7 @@ info_sufficient: true when the job has a date of loss (field date_loss), a water
 general_notes: 1–3 sentences the manager would tell the partner — the one or two things that matter most on this file (max 400 characters); null when nothing stands out.
 needs_follow_up: true when the file has major concerns (lost job that should have landed, price given over the phone, customer complaint) or is too incomplete to review (follow_up_reason "major_concerns" / "file_incomplete" / "other", follow_up_note why); false otherwise.
 job_match: ONLY for a call that has no JobNimbus job. From the transcript / summary, extract the caller's name and the property address, then compare against "candidate_jobs" (jobs created at the same location around the call). Return the candidates that are the same customer or property with score 0–1 and why; an empty array when none fit. For a call that already has a job return null.
+lead_verdict: ONLY for a lead that has no JobNimbus job (null when it has one). "not_lead" when the call or texts show it is not a water-damage customer: a robocall or spam ("Spam / robocall"), a vendor, recruiter or sales pitch ("Vendor or sales call"), an existing customer about a job already under way ("Existing customer"), a wrong number ("Wrong number"), anything else ("Other"); "lead" when someone describes damage, a leak or asks for service. reason only with "not_lead". Null when the transcript, summary or thread does not say enough to tell. A manager confirms every "not_lead" before it counts, so a confident wrong answer costs them a correction: be strict.
 summary: max 200 characters, factual.
 
 The lead is one of three kinds ("lead.type"): "call", a phone call as above; "text", a Google LSA text thread the customer started: "call.text_thread" (oldest first; "us" lines name who replied) replaces the transcript, call_taken_by_name is whoever replied first, and call_handled judges the replies the same way (a prompt reply, name, number and address taken, an inspection offered, no price given); "job", a JobNimbus job with no call or text behind it (a referral; "call" is null): return null with confidence 0 for call_taken_by_name and call_handled, and judge the rest from the job, its notes and photos.
@@ -167,6 +176,16 @@ function sample(list, n) {
   return [...new Set(out)];
 }
 
+/** The model's lead / not-a-lead call, cleaned: a not-a-lead without a known reason is "Other". */
+function cleanVerdict(v) {
+  if (!v || typeof v !== 'object' || !['lead', 'not_lead'].includes(v.value)) return null;
+  return {
+    value: v.value,
+    reason: v.value === 'not_lead' ? (NOT_LEAD_REASONS.includes(v.reason) ? v.reason : 'Other') : null,
+    confidence: Math.max(0, Math.min(1, Number(v.confidence) || 0)),
+    why: clip(v.why, 160),
+  };
+}
 const pick = (s) => (s && typeof s === 'object' ? { value: s.value ?? null, confidence: Math.max(0, Math.min(1, Number(s.confidence) || 0)), why: clip(s.why, 160) } : { value: null, confidence: 0, why: null });
 function cleanSuggestions(llm, hasJob, subject = 'call') {
   const out = {};
@@ -496,9 +515,12 @@ function mountWyhAi(app, deps) {
   function rowFrom(inp, llm, usage) {
     const hasJob = !!inp.t.job;
     const sugg = cleanSuggestions(llm, hasJob, inp.t.subject);
-    const match = !hasJob && llm.job_match ? {
-      caller_name: clip(llm.job_match.caller_name, 80), address: clip(llm.job_match.address, 120),
-      candidates: (llm.job_match.candidates || []).filter(c => uuidRe.test(String(c.job_id || ''))).slice(0, 5).map(c => ({ job_id: c.job_id, score: Math.max(0, Math.min(1, Number(c.score) || 0)), why: clip(c.why, 160) })),
+    const verdict = !hasJob ? cleanVerdict(llm.lead_verdict) : null;
+    const match = !hasJob && (llm.job_match || verdict) ? {
+      caller_name: clip(llm.job_match && llm.job_match.caller_name, 80), address: clip(llm.job_match && llm.job_match.address, 120),
+      candidates: ((llm.job_match && llm.job_match.candidates) || []).filter(c => uuidRe.test(String(c.job_id || ''))).slice(0, 5).map(c => ({ job_id: c.job_id, score: Math.max(0, Math.min(1, Number(c.score) || 0)), why: clip(c.why, 160) })),
+      // A no-job lead's "is this even a lead?" rides on job_match (no SQL change); the ledger offers it for bulk confirm.
+      lead_verdict: verdict,
     } : null;
     return {
       [inp.t.col || 'call_id']: inp.t.id || inp.t.call.id, job_id: inp.t.job ? inp.t.job.id : null, location_id: inp.t.call.location_id,
@@ -735,3 +757,5 @@ module.exports.accuracyFrom = accuracyFrom;
 module.exports.buildPayload = buildPayload;
 module.exports.cleanSuggestions = cleanSuggestions;
 module.exports.sample = sample;
+module.exports.cleanVerdict = cleanVerdict;
+module.exports.NOT_LEAD_REASONS = NOT_LEAD_REASONS;

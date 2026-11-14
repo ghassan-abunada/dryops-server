@@ -1,7 +1,7 @@
 // WYH AI reviewer: the pure pieces (prompt assembly, accuracy, cleanup). Run: npm test
 const test = require('node:test');
 const assert = require('node:assert');
-const { buildSystemPrompt, accuracyFrom, cleanSuggestions, sample, BASE_PROMPT, WyhSuggestionSchema, buildPayload } = require('../wyhAi');
+const { buildSystemPrompt, accuracyFrom, cleanSuggestions, sample, BASE_PROMPT, WyhSuggestionSchema, buildPayload, cleanVerdict, NOT_LEAD_REASONS } = require('../wyhAi');
 
 test('house rules and lessons are folded into the system prompt', () => {
   const feedback = [
@@ -31,7 +31,7 @@ test('cleanSuggestions clamps, validates and blanks the checklist for a no-job c
     packout_sold: { value: false, confidence: 0.7, why: null }, no_packout_reason: 'small_area',
     info_sufficient: { value: false, confidence: 0.9, why: 'no cause' }, info_missing: 'cause', general_notes: 'g'.repeat(500),
     needs_follow_up: { value: true, confidence: 0.9, why: null }, follow_up_reason: 'major_concerns', follow_up_note: null,
-    job_match: null, summary: 's',
+    job_match: null, lead_verdict: null, summary: 's',
   });
   const out = cleanSuggestions(llm, true);
   assert.strictEqual(out.call_taken_by_name.confidence, 1);
@@ -82,5 +82,16 @@ test('a job lead: no call in the payload, and no call answers come back', () => 
 test('the prompt explains the three kinds of lead', () => {
   assert.match(BASE_PROMPT, /"text", a Google LSA text thread/);
   assert.match(BASE_PROMPT, /"job", a JobNimbus job with no call or text behind it/);
+});
+
+test('lead verdict: cleaned to the app\'s reasons, clamped, null when unclear', () => {
+  assert.deepStrictEqual(cleanVerdict({ value: 'not_lead', reason: 'Spam / robocall', confidence: 1.4, why: 'robot voice' }), { value: 'not_lead', reason: 'Spam / robocall', confidence: 1, why: 'robot voice' });
+  assert.strictEqual(cleanVerdict({ value: 'not_lead', reason: 'nonsense', confidence: 0.8, why: null }).reason, 'Other');
+  assert.strictEqual(cleanVerdict({ value: 'lead', reason: 'Wrong number', confidence: 0.9, why: 'x' }).reason, null);
+  assert.strictEqual(cleanVerdict({ value: null, confidence: 0 }), null);
+  assert.strictEqual(cleanVerdict(null), null);
+  assert.deepStrictEqual(NOT_LEAD_REASONS, ['Spam / robocall', 'Vendor or sales call', 'Existing customer', 'Wrong number', 'Other']);
+  assert.ok(WyhSuggestionSchema.safeParse({}).success === false);
+  assert.match(BASE_PROMPT, /lead_verdict: ONLY for a lead that has no JobNimbus job/);
 });
 
