@@ -155,7 +155,7 @@ function managerMessage(call, locationName, kind) {
 
 // ── Runtime ──────────────────────────────────────────────────────────────────
 
-function createCallAlerts({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push, callrailApi, CALLRAIL_ACCOUNT_IDS = [], fetchImpl, log = console }) {
+function createCallAlerts({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push, callrailApi, callrailAccountsFor, CALLRAIL_ACCOUNT_IDS = [], fetchImpl, log = console }) {
   const doFetch = fetchImpl || fetch;
   const enc = encodeURIComponent;
   const pending = new Set(); // callrail ids with a recording re-check scheduled
@@ -189,7 +189,9 @@ function createCallAlerts({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push, cal
   async function hasRecording(call) {
     if (call.recording_url) return true;
     if (!callrailApi) return false;
-    for (const acct of CALLRAIL_ACCOUNT_IDS) {
+    // The account that owns the call first (asking each in turn spent a request per account).
+    const accounts = callrailAccountsFor ? await callrailAccountsFor(call.callrail_id) : CALLRAIL_ACCOUNT_IDS;
+    for (const acct of accounts) {
       try {
         const r = await callrailApi(acct, `calls/${enc(call.callrail_id)}.json?fields=recording`);
         if (r && r.ok && r.json) return !!r.json.recording;

@@ -23,7 +23,7 @@ function recordingSig(secret, callrailId, exp) {
 module.exports = function mountWyh(app, deps) {
   const {
     requireAuth, sbGet, sbPatch, sbInsert, jnGetJson, jnAddNote, jnFetchAccountUsers, loadActor, UUID_RE,
-    callrailApi, callrailKeyFor, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, RECORDING_SECRET,
+    callrailApi, callrailAccountsFor, callrailKeyFor, CALLRAIL_ACCOUNT_IDS, CALLRAIL_API_KEY, RECORDING_SECRET,
     sendEmail, escapeHtml, WEB_APP_URL,
   } = deps;
   const enc = encodeURIComponent;
@@ -264,7 +264,8 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
 
   // Resolve the recording URL (+ AI summary) for a call across the configured CallRail accounts.
   async function findCallDetails(callrailId) {
-    for (const acct of CALLRAIL_ACCOUNT_IDS) {
+    const accounts = callrailAccountsFor ? await callrailAccountsFor(callrailId) : CALLRAIL_ACCOUNT_IDS;
+    for (const acct of accounts) {
       const r = await callrailApi(acct, `calls/${enc(callrailId)}.json?fields=recording,recording_duration,call_summary`);
       if (r.ok && r.json) return { account: acct, recording: r.json.recording || null, summary: r.json.call_summary || null };
     }
