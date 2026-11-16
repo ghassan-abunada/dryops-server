@@ -9,10 +9,14 @@
 // short-lived signed URL; GET /wyh/recording/:callrailId.mp3?exp&sig streams the
 // CallRail recording (API key stays server-side; the app's <audio> can't send a
 // bearer header, hence the signature).
+//
+// GET /wyh/calls/:callrailId/details (JWT, same access rule) returns the
+// CallRail summary and the transcript as speaker turns (callTranscript.js).
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const { buildWyhNote } = require('./wyhNote');
 const callAccess = require('./callAccess');
+const { normalizeTranscript, summaryText } = require('./callTranscript');
 
 const RECORDING_TTL_MS = 2 * 60 * 60 * 1000;
 
@@ -221,13 +225,9 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
     if (!CR_ID_RE.test(id)) return res.status(400).json({ error: 'Bad call id' });
     if (!RECORDING_SECRET || !CALLRAIL_API_KEY) return res.status(503).json({ error: 'Recording playback is not configured on the server' });
     try {
-      const actor = await loadActor(req);
-      if (!actor) return res.status(403).json({ error: 'Profile not found' });
-      const call = ((await sbGet(`calls?callrail_id=eq.${enc(id)}&select=id,location_id,tracking_phone_number,duration,recording_url,call_summary`)) || [])[0];
-      if (!call) return res.status(404).json({ error: 'Call not found' });
-      if (!SEES_ALL.includes(actor.role) && !actor.locs.includes(String(call.location_id)) && !(await managerSeesTrackingNumber(actor, call))) {
-        return res.status(403).json({ error: 'Not your location' });
-      }
+      const access = await callForActor(req, id);
+      if (access.error) return res.status(access.status).json({ error: access.error });
+      const call = access.call;
       // The AI call summary (CallRail Conversation Intelligence) is only mirrored
       // for job-linked calls by the intake sweep; fetch it on demand here and
       // remember it so the next open is instant.
@@ -250,6 +250,50 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
     } catch (err) { return res.status(502).json({ error: err.message }); }
   });
 
+  // ── Summary + transcript ──────────────────────────────────────────────────
+  // GET /wyh/calls/:callrailId/details → { summary, transcript: [{ speaker, text }] | null }.
+  // Same access rule as the recording link. Read from CallRail on demand and
+  // not stored, except a summary the calls row is missing. CallRail down, no
+  // account or no key → 200 with `unavailable: true` (the app says so; not a crash).
+  const DETAIL_FIELDS = 'call_summary,transcription';
+  app.get('/wyh/calls/:callrailId/details', requireAuth, async (req, res) => {
+    const id = String(req.params.callrailId || '');
+    if (!CR_ID_RE.test(id)) return res.status(400).json({ error: 'Bad call id' });
+    try {
+      const access = await callForActor(req, id);
+      if (access.error) return res.status(access.status).json({ error: access.error });
+      const call = access.call;
+      const saved = summaryText(call.call_summary);
+      let found = null;
+      if (CALLRAIL_API_KEY) {
+        try {
+          // conversational_transcript is CallRail's speaker-by-speaker array; ask
+          // for the plain fields alone if the account refuses it.
+          found = await findCallDetails(id, `${DETAIL_FIELDS},conversational_transcript`) || await findCallDetails(id, DETAIL_FIELDS);
+        } catch (e) { warn('details lookup failed', e.message); }
+      }
+      if (!found) return res.json({ summary: saved, transcript: null, unavailable: true });
+      const summary = saved || summaryText(found.json.call_summary);
+      if (!saved && summary) sbPatch('calls', `id=eq.${enc(call.id)}`, { call_summary: summary }).catch(() => {});
+      const transcript = normalizeTranscript(found.json.conversational_transcript) || normalizeTranscript(found.json.transcription);
+      return res.json({ summary, transcript });
+    } catch (err) { return res.status(502).json({ error: err.message }); }
+  });
+
+  // Who may open a call (recording link, details): admins, owners and
+  // executives any call; everyone else their own locations; an expansion
+  // manager also by tracking number (below). → { call } or { status, error }.
+  async function callForActor(req, callrailId) {
+    const actor = await loadActor(req);
+    if (!actor) return { status: 403, error: 'Profile not found' };
+    const call = ((await sbGet(`calls?callrail_id=eq.${enc(callrailId)}&select=id,location_id,tracking_phone_number,duration,recording_url,call_summary`)) || [])[0];
+    if (!call) return { status: 404, error: 'Call not found' };
+    if (!SEES_ALL.includes(actor.role) && !actor.locs.includes(String(call.location_id)) && !(await managerSeesTrackingNumber(actor, call))) {
+      return { status: 403, error: 'Not your location' };
+    }
+    return { call };
+  }
+
   // Settings → Call Tracking (owner decision 2026-10-29): an expansion manager
   // may also play a call whose tracking number is unassigned or assigned to one
   // of their locations (callAccess.js). Other roles keep the location rule.
@@ -263,11 +307,11 @@ ${jnUrl ? ` &nbsp; <a href="${esc(jnUrl)}" style="display:inline-block;color:#03
   }
 
   // Resolve the recording URL (+ AI summary) for a call across the configured CallRail accounts.
-  async function findCallDetails(callrailId) {
+  async function findCallDetails(callrailId, fields = 'recording,recording_duration,call_summary') {
     const accounts = callrailAccountsFor ? await callrailAccountsFor(callrailId) : CALLRAIL_ACCOUNT_IDS;
     for (const acct of accounts) {
-      const r = await callrailApi(acct, `calls/${enc(callrailId)}.json?fields=recording,recording_duration,call_summary`);
-      if (r.ok && r.json) return { account: acct, recording: r.json.recording || null, summary: r.json.call_summary || null };
+      const r = await callrailApi(acct, `calls/${enc(callrailId)}.json?fields=${fields}`);
+      if (r.ok && r.json) return { account: acct, recording: r.json.recording || null, summary: r.json.call_summary || null, json: r.json };
     }
     return null;
   }
