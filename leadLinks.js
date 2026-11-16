@@ -23,7 +23,15 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{22}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const UPLOAD_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/heic': 'heic', 'image/webp': 'webp' };
 const MAX_PHOTOS = 10;
-const INSURANCE_TYPES = ['Insurance', 'Non-Insurance'];
+// JobNimbus's Insurance field only takes "Insurance" / "Not Insurance". Older
+// lead pages sent "Non-Insurance"; accept it and store JobNimbus's spelling.
+function normInsurance(v) {
+  const t = String(v || '').trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+  if (!t) return null;
+  if (t === 'insurance') return 'Insurance';
+  if (t === 'not insurance' || t === 'non insurance' || t === 'noninsurance' || t === 'oop') return 'Not Insurance';
+  return undefined;
+}
 
 const clean = (v, max = 300) => (v === undefined || v === null ? '' : String(v)).replace(/\s+/g, ' ').trim().slice(0, max);
 const digits = (v) => String(v || '').replace(/\D/g, '');
@@ -47,8 +55,8 @@ function validateLeadSubmission(body) {
   const testTypes = normalizeTestTypes(body.test_types);
   if (!testTypes.length) return bad('test_types', 'Pick at least one type of testing');
   const ins = body.insurance || {};
-  const insType = clean(ins.type, 40) || null;
-  if (insType && !INSURANCE_TYPES.includes(insType)) return bad('insurance.type', 'insurance.type must be Insurance or Non-Insurance');
+  const insType = normInsurance(clean(ins.type, 40));
+  if (insType === undefined) return bad('insurance.type', 'insurance.type must be Insurance or Not Insurance');
   const photos = Array.isArray(body.photo_paths) ? body.photo_paths.map((p) => clean(p, 300)).filter(Boolean) : [];
   if (photos.length > MAX_PHOTOS) return bad('photo_paths', `At most ${MAX_PHOTOS} photos`);
   if (photos.some((p) => !/^lead-photos\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(jpg|png|heic|webp)$/i.test(p))) return bad('photo_paths', 'Unexpected photo path');

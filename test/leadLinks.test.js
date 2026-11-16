@@ -48,6 +48,9 @@ test('validateLeadSubmission rejects what the form must have', () => {
   // Out-of-pocket drops the claim fields even when sent
   const oop = validateLeadSubmission({ ...GOOD, insurance: { type: 'Non-Insurance', claim_number: 'X' } });
   assert.strictEqual(oop.value.insurance.claim_number, null);
+  // Older lead pages send "Non-Insurance"; JobNimbus only takes "Not Insurance".
+  assert.strictEqual(oop.value.insurance.type, 'Not Insurance');
+  assert.strictEqual(validateLeadSubmission({ ...GOOD, insurance: { type: 'Not Insurance' } }).value.insurance.type, 'Not Insurance');
   // a missing client_request_id is fine (the server mints one)
   assert.strictEqual(validateLeadSubmission({ ...GOOD, client_request_id: undefined }).value.client_request_id, null);
 });
