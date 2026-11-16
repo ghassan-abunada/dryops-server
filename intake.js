@@ -129,6 +129,23 @@ module.exports = function mountIntake(app, deps) {
   // ── Small helpers ─────────────────────────────────────────────────────────
   const clean = (v, max = 200) => (v === undefined || v === null ? '' : String(v)).trim().slice(0, max);
   const titleCase = (s) => clean(s).replace(/\s+/g, ' ');
+  // JobNimbus's Insurance field (cf_string_7) only takes "Insurance" or "Not
+  // Insurance" (or empty). Older app builds and lead links sent "Non-Insurance";
+  // accept the variants and always store / send JobNimbus's own spelling.
+  // Returns undefined for a value that is neither.
+  function normInsurance(v) {
+    const t = clean(v, 40).toLowerCase().replace(/[\s_-]+/g, ' ');
+    if (!t) return null;
+    if (t === 'insurance') return 'Insurance';
+    if (t === 'not insurance' || t === 'non insurance' || t === 'noninsurance' || t === 'oop' || t === 'out of pocket') return 'Not Insurance';
+    return undefined;
+  }
+  /** '2026-11-15' → 'Nov 15, 2026' (calendar date, no timezone shift). */
+  function fmtDateOnly(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+    if (!m) return clean(iso);
+    return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], 12)).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  }
   function zoned(dateMs, tz, opts) {
     try { return new Intl.DateTimeFormat('en-US', { timeZone: tz || 'America/Chicago', ...opts }).format(new Date(dateMs)); }
     catch { return new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', ...opts }).format(new Date(dateMs)); }
@@ -338,18 +355,30 @@ module.exports = function mountIntake(app, deps) {
     lines.push(`Entered by ${ctx.actorName}`);
     return lines.join('\n');
   }
-  function contactDescription(body, tz) {
+  // The description on the JobNimbus job (and on a newly created contact): an
+  // at-a-glance summary of the intake. One labelled line per answered field,
+  // then the notes typed in the form. Built once per intake so the contact and
+  // the job carry the same text and the same "Date Contacted" stamp.
+  function jobDescription(body, ctx) {
     const d = body.details || {};
+    const c = body.contact || {};
     const lines = [];
-    if (d.type_of_loss) lines.push(`CAT: ${clean(d.type_of_loss)}`);
+    lines.push(`Date Contacted: ${zoned(ctx.at || Date.now(), ctx.tz, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}`);
+    if (d.date_loss) lines.push(`Date of Loss: ${fmtDateOnly(d.date_loss)}`);
     if (d.cause_of_damage) lines.push(`Cause of Loss: ${clean(d.cause_of_damage, 500)}`);
-    if (d.date_loss) lines.push(`Date of Loss: ${clean(d.date_loss)}`);
-    lines.push(`Date Contacted: ${zonedStamp(Date.now(), tz)}`);
-    if (isTestingRecordType(body.record_type) && formatTestTypes(d.test_types)) lines.push(`Testing: ${formatTestTypes(d.test_types)}`);
+    if (d.type_of_loss) lines.push(`Type of Loss: ${clean(d.type_of_loss)}`);
     if (d.rooms_affected) lines.push(`Rooms Affected: ${clean(d.rooms_affected)}`);
-    if (typeof d.standing_water === 'boolean') lines.push(`Needs Extraction: ${d.standing_water ? 'Yes' : 'No'}`);
-    if (body.property_type === 'commercial') lines.push(`Caller: ${clean(body.contact.first_name)} ${clean(body.contact.last_name)}${body.contact.role ? ` (${clean(body.contact.role)})` : ''}`);
-    if (body.caller) lines.push(`Caller: ${clean(body.caller.first_name)} ${clean(body.caller.last_name)} (${clean(body.caller.relationship) || 'caller'}) ${clean(body.caller.phone)}`.trim());
+    if (typeof d.standing_water === 'boolean') lines.push(`Extraction Needed: ${d.standing_water ? 'Yes' : 'No'}`);
+    if (d.insurance_type) lines.push(`Insurance: ${[clean(d.insurance_type), clean(d.insurer), d.claim_number ? `claim ${clean(d.claim_number)}` : ''].filter(Boolean).join(' · ')}`);
+    if (d.adjuster_name) lines.push(`Adjuster: ${[clean(d.adjuster_name), clean(d.adjuster_phone), clean(d.adjuster_email)].filter(Boolean).join(' · ')}`);
+    if (ctx.leadLabel) lines.push(`Lead Source: ${clean(ctx.leadLabel)}`);
+    if (body.property_type === 'commercial') lines.push(`Caller: ${clean(c.first_name)} ${clean(c.last_name)}${c.role ? ` (${clean(c.role)})` : ''}`.trim());
+    if (body.caller) lines.push(`Caller: ${clean(body.caller.first_name)} ${clean(body.caller.last_name)} (${clean(body.caller.relationship) || 'not the homeowner'}) ${clean(body.caller.phone)}`.trim());
+    if (Array.isArray(d.services) && d.services.length) lines.push(`Services: ${d.services.map((x) => clean(x)).join(', ')}`);
+    if (d.scope_summary) lines.push(`Scope: ${clean(d.scope_summary, 1000)}`);
+    if (d.areas_affected) lines.push(`Areas Affected: ${clean(d.areas_affected, 500)}`);
+    if (isTestingRecordType(body.record_type) && formatTestTypes(d.test_types)) lines.push(`Testing: ${formatTestTypes(d.test_types)}`);
+    if (d.notes) lines.push('', `Notes: ${clean(d.notes, 2000)}`);
     return lines.join('\n');
   }
 
@@ -390,7 +419,11 @@ module.exports = function mountIntake(app, deps) {
     }
     if (body.record_type === 'Rebuild' && !clean(d.scope_summary)) return bad('details.scope_summary', 'Scope summary is required');
     if (body.record_type === 'Testing' && !normalizeTestTypes(d.test_types).length) return bad('details.test_types', 'Pick at least one type of testing');
-    if (d.insurance_type && !['Insurance', 'Non-Insurance'].includes(clean(d.insurance_type))) return bad('details.insurance_type', 'insurance_type must be Insurance or Non-Insurance');
+    if (d.insurance_type) {
+      const ins = normInsurance(d.insurance_type);
+      if (ins === undefined) return bad('details.insurance_type', 'insurance_type must be Insurance or Not Insurance');
+      d.insurance_type = ins; // every later use (JobNimbus, jobs row, team alert) gets JobNimbus's spelling
+    }
     if (body.visit) {
       const vs = body.visit;
       if (!VISIT_KINDS.includes(vs.task_type)) return bad('visit.task_type', 'visit.task_type must be inspection or testing');
@@ -434,6 +467,10 @@ module.exports = function mountIntake(app, deps) {
     }
 
     const tz = loc.timezone || 'America/Chicago';
+    // One description for the contact and the job (same "Date Contacted" stamp).
+    const intakeAt = Date.now();
+    let descText = null;
+    const describeJob = () => (descText === null ? (descText = jobDescription(body, { tz, leadLabel, at: intakeAt })) : descText);
     const jnLocId = REDIRECT_LOCATION || Number(loc.jn_location_id);
     const settings = await jnAccountSettings();
 
@@ -492,6 +529,7 @@ module.exports = function mountIntake(app, deps) {
         for (const [k, v] of Object.entries({ insurance_type: referringJob.insurance_type, claim_number: referringJob.claim_number, insurer: referringJob.insurer, adjuster_name: referringJob.adjuster_name, adjuster_phone: referringJob.adjuster_phone, adjuster_email: referringJob.adjuster_email, type_of_loss: referringJob.cat, date_loss: referringJob.date_loss })) {
           if (!clean(d0[k]) && clean(v)) d0[k] = v;
         }
+        if (d0.insurance_type) d0.insurance_type = normInsurance(d0.insurance_type) || undefined;
       }
     }
 
@@ -559,7 +597,7 @@ module.exports = function mountIntake(app, deps) {
           source: jnSourceId || undefined,
           owners: owners.length ? owners : undefined,
           sales_rep: rep && rep.jn_user_id ? rep.jn_user_id : undefined,
-          description: contactDescription(body, tz),
+          description: describeJob(),
         };
         step('contact-create', { name, attempt });
         const r = await jnWrite('POST', 'contacts', payload);
@@ -606,6 +644,7 @@ module.exports = function mountIntake(app, deps) {
         ...jnAddress, geo,
         cf_string_6: leadType,
         cf_string_7: clean(d.insurance_type) || undefined,
+        description: describeJob(),
         cf_string_18: clean(d.type_of_loss) || undefined,
         cf_date_1: dateLossUnix,
         cf_string_2: clean(d.claim_number) || undefined,
@@ -890,6 +929,33 @@ module.exports = function mountIntake(app, deps) {
   async function notifyJobCreated(ctx) {
     await notifyChannels({ sbGet, events: ['job_created'], locationId: ctx.loc.id, msg: buildJobMessage(ctx), log: (...a) => warn('notify', ...a) });
   }
+  // One-off repair: jobs the intake saved with "Non-Insurance" before the
+  // value was fixed. Dry run unless { apply: true }: lists how many there are;
+  // applying sets JobNimbus's cf_string_7 to "Not Insurance" and the local row.
+  app.post('/admin/jobs/fix-insurance-type', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const actor = await loadActor(req);
+      if (!actor || actor.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+      const apply = !!(req.body && req.body.apply);
+      const rows = (await sbGet(`jobs?insurance_type=in.(${enc('"Non-Insurance"')},${enc('"Non Insurance"')})&select=id,jn_id,name,record_type,insurance_type&order=jn_created.desc&limit=1000`)) || [];
+      const out = { apply, count: rows.length, sample: rows.slice(0, 10).map((r) => r.name), updated: 0, failed: [] };
+      if (!apply) return res.json(out);
+      for (const r of rows) {
+        try {
+          if (r.jn_id) {
+            const jr = await jnWrite('PUT', `jobs/${enc(r.jn_id)}`, { record_type_name: r.record_type || 'Mitigation', cf_string_7: 'Not Insurance' });
+            if (!jr.ok) { out.failed.push({ name: r.name, error: String(jnErr(jr)).slice(0, 160) }); continue; }
+          }
+          await sbPatch('jobs', `id=eq.${enc(r.id)}`, { insurance_type: 'Not Insurance' });
+          out.updated += 1;
+        } catch (e) { out.failed.push({ name: r.name, error: e.message }); }
+        await new Promise((ok) => setTimeout(ok, 150));
+      }
+      log('fix-insurance-type', JSON.stringify({ count: out.count, updated: out.updated, failed: out.failed.length }));
+      res.json(out);
+    } catch (err) { res.status(502).json({ error: err.message }); }
+  });
+
   app.post('/admin/notifications/channels/:id/test', requireAuth, requireAdmin, async (req, res) => {
     try {
       const actor = await loadActor(req);
