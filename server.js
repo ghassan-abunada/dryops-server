@@ -5320,7 +5320,11 @@ async function syncVisitJnTask(visitId, { force = false, actorId = null } = {}) 
     let r, taskId = existing;
     if (existing) {
       r = await jnSendJson('PUT', `tasks/${encodeURIComponent(existing)}`, body);
-      if (r.status === 404) { r = await jnSendJson('POST', 'tasks', body); taskId = null; } // task deleted in JN → recreate
+      if (r.status === 404) { // task deleted in JN
+        // A cancelled visit needs no task: forget the dead id and stop.
+        if (v.status === 'cancelled') { await clear({ jn_task_id: null }); return { ok: true, skipped: 'cancelled-task-gone' }; }
+        r = await jnSendJson('POST', 'tasks', body); taskId = null; // recreate
+      }
     } else {
       r = await jnSendJson('POST', 'tasks', body);
     }
@@ -5337,7 +5341,11 @@ async function syncVisitJnTask(visitId, { force = false, actorId = null } = {}) 
         return { ok: false, error: 'no task id in JobNimbus response' };
       }
       // Claim the id; if another push won the race, deactivate our extra task.
-      const claimed = await sbPatch('inspections', `id=eq.${encodeURIComponent(id)}&jn_task_id=is.null`, { jn_task_id: taskId });
+      // A recreated task replaces the dead id it was read with. Claiming only
+      // on `is.null` there never matched, so the visit stayed dirty and the
+      // sweep made (and deactivated) a new JobNimbus task every minute.
+      const was = existing ? `eq.${encodeURIComponent(existing)}` : 'is.null';
+      const claimed = await sbPatch('inspections', `id=eq.${encodeURIComponent(id)}&jn_task_id=${was}`, { jn_task_id: taskId });
       if (!Array.isArray(claimed) || !claimed.length) {
         await jnSendJson('PUT', `tasks/${encodeURIComponent(taskId)}`, { is_active: false }).catch(() => {});
         return { ok: true, id: null, note: 'duplicate push discarded' };
