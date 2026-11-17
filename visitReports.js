@@ -390,7 +390,7 @@ function isInspectionReportComplete(r) {
   if (!r || Number(r.v) !== 1 || r.kind !== 'inspection') return false;
   if (!TIME_RE.test(r.arrival_time || '')) return false;
   if (!r.loss_type || !r.source) return false;
-  if (needsWaterClass(r) && (r.category == null || r.class == null)) return false;
+  if (needsWaterClass(r) && r.category == null) return false; // water class is optional (owner 2026-11-17); app twin lib/inspectionReport.ts
   const fire = isFire(r);
   if (!fire && !readingOk(r.outside)) return false;
   if (r.docusketch == null) return false;
