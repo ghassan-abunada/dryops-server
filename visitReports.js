@@ -317,7 +317,7 @@ function validateInspectionReport(raw) {
       room_id: id(r.room_id), name, profile: ['kitchen', 'bathroom', 'laundry', 'other'].includes(r.profile) ? r.profile : 'other', dims, affected,
       flooring: { type: text(r.flooring && r.flooring.type, `${label} flooring`, 40), on_slab: boolOrNull(r.flooring && r.flooring.on_slab) },
       materials: (Array.isArray(r.materials) ? r.materials : []).slice(0, 40).map((m, k) => (m && typeof m === 'object' && typeof m.type === 'string' && m.type.trim()
-        ? { type: m.type.trim().slice(0, 40), mc: numIn(m.mc, `${label} ${m.type} MC`, 0, 100) } : (errors.push(`${label} material ${k + 1} is invalid`), null))).filter(Boolean),
+        ? { type: m.type.trim().slice(0, 40), mc: numIn(m.mc, `${label} ${m.type} MC`, 0, 100), ...(m.plan === 'dry' || m.plan === 'demo' ? { plan: m.plan } : {}) } : (errors.push(`${label} material ${k + 1} is invalid`), null))).filter(Boolean),
       doors: intIn(r.doors, `${label} doors`, 0, 50),
       exterior_walls: oneOf(r.exterior_walls, EXTERIOR_WALLS),
       exterior_wall_lf: numIn(r.exterior_wall_lf, `${label} exterior wall LF`, 0, 10000),
@@ -390,7 +390,7 @@ function isInspectionReportComplete(r) {
   if (!r || Number(r.v) !== 1 || r.kind !== 'inspection') return false;
   if (!TIME_RE.test(r.arrival_time || '')) return false;
   if (!r.loss_type || !r.source) return false;
-  if (needsWaterClass(r) && (r.category == null || r.class == null)) return false;
+  if (needsWaterClass(r) && r.category == null) return false; // water class is optional (owner 2026-11-17); app twin lib/inspectionReport.ts
   const fire = isFire(r);
   if (!fire && !readingOk(r.outside)) return false;
   if (r.docusketch == null) return false;
