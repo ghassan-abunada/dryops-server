@@ -19,6 +19,11 @@
 // (lsa_api_accounts remembers which those are). Schema: supabase_lsa_api_sync.sql; the
 // sync still loads leads when that file has not been run, it only skips the two extras.
 //
+// After the leads, the same run reads what each campaign cost per day (costPass):
+//   5. per account with leads or recent spend: campaign + segments.date + metrics → lsa_campaign_daily
+// One request per account, on the same request counter. Schema: supabase_lsa_api_cost.sql;
+// without it the cost pass is skipped and the leads still load.
+//
 // Pure mapping / diffing / selection is exported for tests; routes are mounted from server.js.
 
 const crypto = require('crypto');
@@ -50,6 +55,16 @@ const CONVERSATION_QUERY = 'SELECT local_services_lead_conversation.id, local_se
 // Level 0 is the account itself (tells us whether it is a manager), level 1 its direct clients.
 const CLIENT_QUERY = 'SELECT customer_client.id, customer_client.descriptive_name, customer_client.manager, customer_client.level, '
   + 'customer_client.status, customer_client.time_zone FROM customer_client WHERE customer_client.level <= 1';
+
+// One row per campaign per day that had activity. Every channel is kept: an account moved
+// to pay-per-lead has its old LOCAL_SERVICES campaign and a new PERFORMANCE_MAX one.
+const COST_QUERY = 'SELECT campaign.id, campaign.name, campaign.advertising_channel_type, campaign.status, '
+  + 'customer.id, customer.currency_code, segments.date, metrics.cost_micros, metrics.impressions, metrics.clicks, '
+  + 'metrics.conversions, metrics.top_impression_percentage, metrics.absolute_top_impression_percentage FROM campaign';
+// Channels a Local Services lead can come from: their campaigns are added to lsa_campaigns
+// by the cost pass. Any other campaign only gets its name refreshed when it is already there.
+const LEAD_CHANNELS = ['LOCAL_SERVICES', 'PERFORMANCE_MAX'];
+const COST_RECENT_DAYS = 60;
 
 const chunk = (arr, n) => Array.from({ length: Math.ceil(arr.length / n) }, (_, i) => arr.slice(i * n, i * n + n));
 const digits = (v) => String(v ?? '').replace(/\D/g, '');
@@ -111,6 +126,60 @@ function apiLeadRow(result, { managerId } = {}) {
   row.raw = { source: 'google-ads-api', lead, customer: { id: account, descriptiveName: customer.descriptiveName ?? null } };
   row.manager_ids = managerId ? [String(managerId)] : [];
   return row;
+}
+
+/**
+ * One campaign search result ({ campaign, segments, metrics, customer }) → an
+ * lsa_campaign_daily row, or null without a campaign id, a day or an account. Google
+ * sends 64-bit numbers as strings and leaves a zero metric out; the two impression
+ * shares stay fractions (0..1), null when Google gave none.
+ */
+function apiCostRow(result, accountId) {
+  const campaign = (result && result.campaign) || {};
+  const metrics = (result && result.metrics) || {};
+  const customer = (result && result.customer) || {};
+  const fromName = /^customers\/(\d+)\//.exec(String(campaign.resourceName || ''));
+  const account = digits(accountId) || digits(customer.id) || (fromName && fromName[1]) || '';
+  const id = digits(campaign.id);
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(String((result && result.segments && result.segments.date) || '')) ? result.segments.date : null;
+  if (!id || !day || !account) return null;
+  const whole = (v) => { const n = Math.round(Number(v)); return Number.isFinite(n) ? n : 0; };
+  const number = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+  const share = (v) => { const n = Number(v); return v === null || v === undefined || v === '' || !Number.isFinite(n) ? null : n; };
+  return {
+    account_id: account,
+    campaign_id: id,
+    day,
+    campaign_name: text(campaign.name),
+    channel_type: text(campaign.advertisingChannelType),
+    campaign_status: text(campaign.status),
+    cost_micros: whole(metrics.costMicros),
+    impressions: whole(metrics.impressions),
+    clicks: whole(metrics.clicks),
+    conversions: number(metrics.conversions),
+    top_impression_pct: share(metrics.topImpressionPercentage),
+    abs_top_impression_pct: share(metrics.absoluteTopImpressionPercentage),
+    currency_code: text(customer.currencyCode),
+  };
+}
+
+/**
+ * Which client accounts the cost pass asks about, in order. Pure.
+ *   clients     [{ id, status, managers }]
+ *   leadCounts  Map(customer id → leads in its last window), or null when nothing is known
+ *               (no lsa_api_accounts and no lead pass in this run): then every account
+ *   recent      Set of account ids with lsa_campaign_daily rows in the last 60 days
+ *   lastCostAt  Map(customer id → ISO time of its last cost refresh)
+ *   only        Set of customer / manager ids; an account named itself is always taken
+ * Enabled accounts with leads or recent spend, the one refreshed longest ago first (never
+ * refreshed before all), so a pass cut short by the budget picks up the rest next time.
+ */
+function chooseCostAccounts({ clients, leadCounts = null, recent = new Set(), lastCostAt = new Map(), only = null }) {
+  let pool = (clients || []).filter((c) => c.status === 'ENABLED');
+  if (only && only.size) pool = pool.filter((c) => only.has(c.id) || (c.managers || []).some((m) => only.has(m)));
+  const wanted = (c) => !leadCounts || Number(leadCounts.get(c.id)) > 0 || recent.has(c.id) || !!(only && only.has(c.id));
+  const at = (c) => { const t = Date.parse(lastCostAt.get(c.id) || ''); return Number.isFinite(t) ? t : 0; };
+  return pool.filter(wanted).sort((a, b) => at(a) - at(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
 /**
@@ -384,20 +453,31 @@ function createLsaApiSync({
   }
 
   // Whether supabase_lsa_api_sync.sql has been run. A yes is remembered; a no is asked again next run.
-  const has = { memory: false, conversations: false };
-  async function probe() {
+  const has = { memory: false, conversations: false, cost: false, costAt: false };
+  let costWarned = false; // the missing cost table is reported once, not on every run
+  async function probe({ cost = false } = {}) {
     if (!has.memory) {
       try { await db.select('lsa_api_accounts', 'select=customer_id&limit=1'); has.memory = true; } catch { log.warn('[lsa-api] lsa_api_accounts is missing (run supabase_lsa_api_sync.sql): every enabled account is queried each run'); }
     }
     if (!has.conversations) {
       try { await db.select('lsa_leads', 'select=conversations&limit=1'); has.conversations = true; } catch { log.warn('[lsa-api] lsa_leads.conversations is missing (run supabase_lsa_api_sync.sql): conversations are skipped'); }
     }
+    if (!cost) return;
+    if (!has.cost) {
+      try { await db.select('lsa_campaign_daily', 'select=account_id&limit=1'); has.cost = true; } catch {
+        if (!costWarned) log.warn('[lsa-api] lsa_campaign_daily is missing (run supabase_lsa_api_cost.sql): campaign cost is skipped');
+        costWarned = true;
+      }
+    }
+    if (has.cost && has.memory && !has.costAt) {
+      try { await db.select('lsa_api_accounts', 'select=last_cost_at&limit=1'); has.costAt = true; } catch { /* cost still loads; the order of accounts is just not remembered */ }
+    }
   }
 
   async function loadMemory() {
     const map = new Map();
     for (let offset = 0; ; offset += 1000) { // PostgREST caps a reply at 1000 rows
-      const rows = await db.select('lsa_api_accounts', `select=customer_id,manager_id,lead_count,last_lead_local,last_checked_at,last_error&order=customer_id&limit=1000&offset=${offset}`);
+      const rows = await db.select('lsa_api_accounts', `select=customer_id,manager_id,lead_count,last_lead_local,last_checked_at,last_error${has.costAt ? ',last_cost_at' : ''}&order=customer_id&limit=1000&offset=${offset}`);
       for (const r of rows) map.set(r.customer_id, r);
       if (rows.length < 1000) break;
     }
@@ -503,18 +583,143 @@ function createLsaApiSync({
     for (const part of chunk(rows, 250)) await db.upsert('lsa_leads', part, 'google_lead_id');
   }
 
+  /** Account ids that have a campaign day on or after `since` (YYYY-MM-DD). */
+  async function recentCostAccounts(since) {
+    const ids = new Set();
+    for (let offset = 0; offset < 200000; offset += 1000) { // PostgREST caps a reply at 1000 rows
+      const rows = await db.select('lsa_campaign_daily', `select=account_id&day=gte.${since}&order=account_id,campaign_id,day&limit=1000&offset=${offset}`);
+      for (const r of rows) ids.add(r.account_id);
+      if (rows.length < 1000) break;
+    }
+    return ids;
+  }
+
+  /**
+   * Step 5: what each campaign cost per day over the last `costDays`, one request per
+   * account, upserted on (account, campaign, day) so a later run overwrites Google's
+   * adjustments. A failing account is recorded and the pass goes on.
+   */
+  async function costPass(run, { clients, memory, memoryRows, only, costDays, leadsRan }) {
+    const s = run.summary;
+    const nowMs = now().getTime();
+    const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+    const from = day(nowMs - costDays * 86400000); const to = day(nowMs);
+    s.cost_from = from; s.cost_to = to;
+    const query = `${COST_QUERY} WHERE segments.date BETWEEN '${from}' AND '${to}'`;
+
+    let leadCounts = null;
+    const lastCostAt = new Map();
+    if (memory || leadsRan) {
+      leadCounts = new Map();
+      for (const [id, m] of memory || []) { leadCounts.set(id, Number(m.lead_count) || 0); if (m.last_cost_at) lastCostAt.set(id, m.last_cost_at); }
+      for (const [id, m] of memoryRows) leadCounts.set(id, Number(m.lead_count) || 0);
+    }
+    const recent = await recentCostAccounts(day(nowMs - COST_RECENT_DAYS * 86400000));
+    const queue = chooseCostAccounts({ clients, leadCounts, recent, lastCostAt, only });
+    s.cost_candidates = queue.length;
+
+    const done = []; const campaigns = new Map();
+    let failed = 0; let stopped = false;
+    let turn = Promise.resolve(); // store writes one account at a time
+    const inTurn = (fn) => { const p = turn.then(fn, fn); turn = p.catch(() => {}); return p; };
+
+    await inPool(queue, concurrency, async (client) => {
+      if (stopped) return;
+      if (run.ops >= run.cap) { s.cost_skipped_budget++; return; }
+      // The manager the lead pass got in with first, then the others.
+      const known = (memoryRows.get(client.id) || (memory && memory.get(client.id)) || {}).manager_id;
+      const logins = [...new Set([known, ...client.managers].filter((m) => m && client.managers.includes(m)))];
+      let results = null; let login = null; let failure = null;
+      for (const manager of logins) {
+        try { results = await search(run, client.id, manager, query); login = manager; break; } catch (err) {
+          if (err instanceof BudgetStop) { s.cost_skipped_budget++; return; }
+          failure = err;
+          if (!(err.status === 403 || err.status === 401)) break; // only a permission problem is worth another manager
+        }
+      }
+      if (!results) {
+        run.fail(`account ${client.id} cost`, failure);
+        // Five accounts failed and none was read: it is the query or the access, not the accounts.
+        if (++failed >= 5 && !done.length && !stopped) {
+          stopped = true;
+          s.cost_error = `stopped after ${failed} failed accounts and none read: ${String((failure && failure.message) || 'failed').slice(0, 200)}`;
+        }
+        return;
+      }
+      const rows = new Map();
+      for (const r of results) {
+        const row = apiCostRow(r, client.id);
+        if (row) rows.set(`${row.campaign_id} ${row.day}`, { ...row, updated_at: run.nowIso });
+      }
+      try {
+        if (!run.dryRun && rows.size) {
+          await inTurn(async () => { for (const part of chunk([...rows.values()], 500)) await db.upsert('lsa_campaign_daily', part, 'account_id,campaign_id,day'); });
+        }
+      } catch (err) {
+        run.fail(`account ${client.id} cost store`, err);
+        return; // not stored: not counted, and asked first next time
+      }
+      done.push(client.id);
+      s.cost_accounts++;
+      if (rows.size) s.cost_accounts_with_rows++;
+      for (const row of rows.values()) {
+        s.cost_rows++;
+        s.cost_total_micros += row.cost_micros;
+        const key = row.channel_type || 'UNKNOWN';
+        const tally = s.cost_by_channel[key] || (s.cost_by_channel[key] = { rows: 0, cost_micros: 0 });
+        tally.rows++; tally.cost_micros += row.cost_micros;
+        if (row.campaign_name) {
+          campaigns.set(row.campaign_id, { campaign_id: row.campaign_id, campaign_name: row.campaign_name, account_id: row.account_id, manager_id: login, updated_at: run.nowIso, channel: row.channel_type });
+        }
+      }
+    });
+    await turn;
+    if (run.dryRun) return;
+
+    // Real names for the campaigns: every one already in lsa_campaigns, and new rows for the lead channels.
+    try {
+      const all = [...campaigns.values()];
+      const there = new Set();
+      for (const part of chunk(all.map((c) => c.campaign_id), 150)) {
+        for (const r of await db.select('lsa_campaigns', `select=campaign_id&campaign_id=in.(${part.join(',')})`)) there.add(r.campaign_id);
+      }
+      const named = all.filter((c) => there.has(c.campaign_id) || LEAD_CHANNELS.includes(c.channel)).map(({ channel, ...row }) => row);
+      for (const part of chunk(named, 500)) await db.upsert('lsa_campaigns', part, 'campaign_id');
+      s.cost_campaigns_named = named.length;
+    } catch (err) { run.fail('campaign names', err); }
+
+    if (has.costAt && done.length) {
+      try {
+        for (const part of chunk(done.map((id) => ({ customer_id: id, last_cost_at: run.nowIso })), 500)) await db.upsert('lsa_api_accounts', part, 'customer_id');
+      } catch (err) { run.fail('cost memory', err); }
+    }
+  }
+
   let running = null; // the run in progress
   let last = null;    // summary of the last finished run
   let seq = 0;
 
-  async function execute(run, { sinceDays, full, only, label }) {
+  async function execute(run, { sinceDays, full, only, label, costDays, costOnly }) {
     const s = run.summary;
-    const nowMs = now().getTime();
-    await probe();
-    s.sql_applied = { accounts: has.memory, conversations: has.conversations };
+    await probe({ cost: costDays > 0 });
+    s.sql_applied = { accounts: has.memory, conversations: has.conversations, cost: has.cost };
     const clients = await discover(run, only);
     s.clients = clients.length;
     const memory = has.memory ? await loadMemory() : null;
+    const memoryRows = new Map(); // what the lead pass learned about each account it asked
+    if (!costOnly) await leadPasses(run, { clients, memory, memoryRows, sinceDays, full, only, label });
+    if (!(costDays > 0) || !has.cost) return;
+    // Cost is an extra: whatever goes wrong here, the leads above are already stored.
+    try { await costPass(run, { clients, memory, memoryRows, only, costDays, leadsRan: !costOnly }); } catch (err) {
+      s.cost_error = String((err && err.message) || err).slice(0, 300);
+      run.fail('cost pass', err);
+    }
+  }
+
+  /** Steps 3 and 4: leads, then conversations, then the account memory. */
+  async function leadPasses(run, { clients, memory, memoryRows, sinceDays, full, only, label }) {
+    const s = run.summary;
+    const nowMs = now().getTime();
     const { queue, counts } = chooseAccounts({
       clients, memory, nowMs, full, only, emptyPerRun, budget: run.cap - run.ops - 5, conversations: has.conversations,
     });
@@ -536,7 +741,6 @@ function createLsaApiSync({
       run.importId = (imp && imp.id) || null;
     }
 
-    const memoryRows = new Map();
     const withLeads = [];
     let turn = Promise.resolve(); // store writes one account at a time
     const inTurn = (fn) => { const p = turn.then(fn, fn); turn = p.catch(() => {}); return p; };
@@ -614,11 +818,16 @@ function createLsaApiSync({
    *   full       every enabled account, no date filter (history backfill)
    *   only       comma-separated customer or manager ids
    *   dryRun     read Google and the store, diff, write nothing
+   *   costDays   campaign cost per day for the last N days (default 14, 0 = no cost pass, at most 400)
+   *   costOnly   skip the leads and conversations (cost history backfill)
    */
-  async function syncLeads({ sinceDays = 14, full = false, only = null, dryRun = false, label = null } = {}) {
+  async function syncLeads({ sinceDays = 14, full = false, only = null, dryRun = false, label = null, costDays = 14, costOnly = false } = {}) {
     if (!configured) return { error: 'GOOGLE_ADS_SA_JSON is not set or not a service account key' };
     if (running) return { error: 'a sync is already running', run_id: running.summary.run_id };
     const days = Math.min(400, Math.max(1, Math.floor(Number(sinceDays)) || 14));
+    const costN = Number(costDays);
+    const cost = Number.isFinite(costN) ? Math.min(400, Math.max(0, Math.floor(costN))) : 14;
+    if (costOnly && cost === 0) return { error: 'cost_only with cost_days=0: nothing to do' };
     const onlySet = new Set(String(only || '').split(',').map(digits).filter(Boolean));
     const started = now();
     const summary = {
@@ -627,6 +836,8 @@ function createLsaApiSync({
       ops_used: 0, ops_cap: 0, managers: 0, clients: 0, clients_queried: 0, clients_with_leads: 0, skipped_budget: 0,
       leads_seen: 0, leads_new: 0, leads_changed: 0, leads_same: 0, moved_from_placeholder: 0, changed_fields: {}, changed_by_source: {}, charge_changes: {},
       conversations_seen: 0, conversation_leads_updated: 0, call_seconds_filled: 0, conversation_leads_unknown: 0, conversations_skipped_budget: 0,
+      cost_only: !!costOnly, cost_days: cost, cost_from: null, cost_to: null, cost_candidates: 0, cost_accounts: 0, cost_accounts_with_rows: 0,
+      cost_rows: 0, cost_total_micros: 0, cost_by_channel: {}, cost_skipped_budget: 0, cost_campaigns_named: 0, cost_error: null,
       error_count: 0, errors: [], error: null,
     };
     const run = {
@@ -639,7 +850,10 @@ function createLsaApiSync({
     try {
       if (run.cap < 20) throw new Error(`Google Ads request budget is spent (${ops24h()} in the last 24 hours)`);
       const what = full ? 'full' : `${days}d`;
-      await execute(run, { sinceDays: days, full: !!full, only: onlySet, label: label || `google-ads-api ${what}${onlySet.size ? ` only=${[...onlySet].join(',')}`.slice(0, 120) : ''}` });
+      await execute(run, {
+        sinceDays: days, full: !!full, only: onlySet, costDays: cost, costOnly: !!costOnly,
+        label: label || `google-ads-api ${what}${onlySet.size ? ` only=${[...onlySet].join(',')}`.slice(0, 120) : ''}`,
+      });
     } catch (err) {
       summary.error = err instanceof BudgetStop ? 'stopped: request budget reached' : String((err && err.message) || err).slice(0, 300);
       log.error('[lsa-api] sync failed:', summary.error);
@@ -655,7 +869,7 @@ function createLsaApiSync({
       }
       last = summary;
       running = null;
-      log.log(`[lsa-api] ${summary.dry_run ? 'dry run' : 'run'} ${summary.run_id}: ${summary.ops_used} requests, ${summary.clients_queried} accounts, ${summary.leads_seen} leads (${summary.leads_new} new, ${summary.leads_changed} changed, ${summary.leads_same} same), ${summary.error_count} errors`);
+      log.log(`[lsa-api] ${summary.dry_run ? 'dry run' : 'run'} ${summary.run_id}: ${summary.ops_used} requests, ${summary.clients_queried} accounts, ${summary.leads_seen} leads (${summary.leads_new} new, ${summary.leads_changed} changed, ${summary.leads_same} same), cost ${summary.cost_accounts} accounts / ${summary.cost_rows} rows, ${summary.error_count} errors`);
     }
     return summary;
   }
@@ -676,11 +890,13 @@ function createLsaApiSync({
 }
 
 /**
- * POST /lsa/api-sync?days=14&full=0&only=<ids>&dry=1     Authorization: Bearer <LSA_IMPORT_KEY>
+ * POST /lsa/api-sync?days=14&full=0&only=<ids>&dry=1&cost_days=14&cost_only=0     Authorization: Bearer <LSA_IMPORT_KEY>
  *   Starts a run and replies 202 { run_id } at once. With dry=1 AND only= it runs inline
  *   and replies with the summary (a whole-fleet run would outlast the request).
+ *   cost_days = days of campaign cost to (re)load, 0 for none, at most 400; full=1 does not
+ *   lengthen it. cost_only=1 skips the leads, for loading cost history.
  * GET /lsa/api-sync/status → the running and the last finished run.
- * Daily at 05:30 America/Denver (14 days) when GOOGLE_ADS_SA_JSON is set.
+ * Daily at 05:30 America/Denver (14 days of leads and of cost) when GOOGLE_ADS_SA_JSON is set.
  */
 function mountLsaApiSync(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, LSA_IMPORT_KEY, GOOGLE_ADS_SA_JSON, db, fetchImpl, schedule = true }) {
   const store = db || restDb({ SUPABASE_URL, SUPABASE_SERVICE_KEY });
@@ -699,7 +915,13 @@ function mountLsaApiSync(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, LSA_IMPORT_K
   app.post('/lsa/api-sync', async (req, res) => {
     try {
       if (!gate(req, res)) return;
-      const opts = { sinceDays: Number(req.query.days) || 14, full: yes(req.query.full), only: String(req.query.only || '') || null, dryRun: yes(req.query.dry) };
+      const costDays = req.query.cost_days === undefined || req.query.cost_days === '' ? 14 : Number(req.query.cost_days);
+      if (!Number.isFinite(costDays) || costDays < 0) return res.status(400).json({ error: 'cost_days must be a number from 0 to 400' });
+      const opts = {
+        sinceDays: Number(req.query.days) || 14, full: yes(req.query.full), only: String(req.query.only || '') || null, dryRun: yes(req.query.dry),
+        costDays, costOnly: yes(req.query.cost_only),
+      };
+      if (opts.costOnly && Math.floor(costDays) === 0) return res.status(400).json({ error: 'cost_only=1 with cost_days=0: nothing to do' });
       if (sync.status().running) return res.status(409).json({ error: 'a sync is already running', run_id: sync.status().running.run_id });
       if (opts.dryRun && opts.only) return res.json(await sync.syncLeads(opts));
       const started = sync.syncLeads(opts); // sets the running summary before its first await
@@ -728,7 +950,7 @@ function mountLsaApiSync(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, LSA_IMPORT_K
         if (!due) return;
         lastDay = dayKey;
         if (await sync.ranRecently()) return; // a restart forgot today's run; the import log did not
-        await sync.syncLeads({ sinceDays: 14, label: 'google-ads-api 14d (daily)' });
+        await sync.syncLeads({ sinceDays: 14, costDays: 14, label: 'google-ads-api 14d (daily)' });
       } catch (err) {
         console.error('[lsa-api] daily tick failed:', err && err.message);
       }
@@ -741,7 +963,7 @@ function mountLsaApiSync(app, { SUPABASE_URL, SUPABASE_SERVICE_KEY, LSA_IMPORT_K
 
 module.exports = mountLsaApiSync;
 Object.assign(module.exports, {
-  API_OWNED, API_LOGGED, LEAD_QUERY, CONVERSATION_QUERY, CLIENT_QUERY,
-  apiCharge, apiHashOf, apiLeadRow, diffApiLeads, mergedRow, summarizeConversations, chooseAccounts,
+  API_OWNED, API_LOGGED, LEAD_QUERY, CONVERSATION_QUERY, CLIENT_QUERY, COST_QUERY, LEAD_CHANNELS,
+  apiCharge, apiHashOf, apiLeadRow, apiCostRow, chooseCostAccounts, diffApiLeads, mergedRow, summarizeConversations, chooseAccounts,
   denverClock, dailyDue, adsError, canon, createLsaApiSync,
 });

@@ -184,8 +184,10 @@ test('dailyDue: from 05:30 Denver, once a day, and never throws on a bad clock',
 
 // ── a whole run against an in-memory store and a mocked Google ─────────────
 
-function memoryDb({ missing = [] } = {}) {
+function memoryDb({ missing = [], cost = false } = {}) {
   const tables = { lsa_leads: new Map(), lsa_campaigns: new Map(), lsa_api_accounts: new Map(), lsa_imports: [], lsa_lead_changes: [] };
+  // supabase_lsa_api_cost.sql: without `cost` the table is not there, as before that file is run.
+  if (cost) tables.lsa_campaign_daily = new Map();
   const writes = [];
   const rowsOf = (t) => (Array.isArray(tables[t]) ? tables[t] : [...tables[t].values()]);
   return {
@@ -196,11 +198,13 @@ function memoryDb({ missing = [] } = {}) {
       const q = new URLSearchParams(query);
       const cols = (q.get('select') || '*').split(',');
       if (table === 'lsa_leads' && cols.includes('conversations') && missing.includes('conversations')) throw new Error('lsa_leads select 400');
+      if (table === 'lsa_api_accounts' && cols.includes('last_cost_at') && (!cost || missing.includes('last_cost_at'))) throw new Error('lsa_api_accounts select 400');
       let rows = rowsOf(table);
       for (const [k, v] of q) {
         if (['select', 'order', 'limit', 'offset'].includes(k)) continue;
         if (v.startsWith('in.(')) { const ids = v.slice(4, -1).split(','); rows = rows.filter((r) => ids.includes(r[k])); }
         else if (v.startsWith('eq.')) rows = rows.filter((r) => String(r[k]) === v.slice(3));
+        else if (v.startsWith('gte.')) rows = rows.filter((r) => String(r[k]) >= v.slice(4));
         else if (v.startsWith('like.')) rows = rows.filter((r) => String(r[k] || '').includes(v.slice(5).replace(/\*/g, '')));
         else throw new Error(`memoryDb: unexpected filter ${k}=${v}`);
       }
@@ -212,7 +216,9 @@ function memoryDb({ missing = [] } = {}) {
       const keys = JSON.stringify(Object.keys(rows[0]).sort());
       for (const r of rows) assert.strictEqual(JSON.stringify(Object.keys(r).sort()), keys, 'one upsert, one set of keys');
       writes.push({ op: 'upsert', table, rows });
-      for (const r of rows) tables[table].set(r[conflictCol], { ...tables[table].get(r[conflictCol]), ...r });
+      if (missing.includes(`${table} upsert`)) throw new Error(`${table} upsert 500`);
+      const keyOf = (r) => conflictCol.split(',').map((c) => r[c]).join('|');
+      for (const r of rows) tables[table].set(keyOf(r), { ...tables[table].get(keyOf(r)), ...r });
     },
     async update(table, query, patch) {
       writes.push({ op: 'update', table, query, patch });
@@ -234,7 +240,7 @@ const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048, 
 const SA = JSON.stringify({ client_email: 'sync@example.iam.gserviceaccount.com', private_key: privateKey });
 
 /** A pretend Google: managers → clients → leads / conversations. `fail` = { '<customer id>': [status, ...] } per lead request. */
-function google({ managers, leads = {}, conversations = {}, fail = {} }) {
+function google({ managers, leads = {}, conversations = {}, fail = {}, cost = {}, costFail = {} }) {
   const calls = [];
   const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
   const fetchImpl = async (url, init = {}) => {
@@ -255,6 +261,12 @@ function google({ managers, leads = {}, conversations = {}, fail = {} }) {
     if (query.includes('FROM local_services_lead_conversation')) {
       calls.push({ kind: 'conversations', cid, login, query });
       return reply(200, { results: conversations[cid] || [] });
+    }
+    if (query.includes(' FROM campaign ')) {
+      calls.push({ kind: 'cost', cid, login, query });
+      const status = (costFail[cid] || []).shift();
+      if (status) return reply(status, { error: { code: status, status: 'INVALID_ARGUMENT', message: 'no', details: [{ errors: [{ errorCode: { queryError: 'PROHIBITED_METRIC_IN_SELECT_OR_WHERE_CLAUSE' }, message: 'bad metric' }] }] } });
+      return reply(200, { results: cost[cid] || [] });
     }
     calls.push({ kind: 'leads', cid, login, query, pageToken });
     const queue = fail[cid] || [];
@@ -437,9 +449,9 @@ test('syncLeads: works before supabase_lsa_api_sync.sql is run (no memory, no co
   const sync = make(db, g, { log: { ...quiet, warn: (m) => warned.push(m) } });
   const s = await sync.syncLeads({});
   assert.deepStrictEqual([s.error, s.leads_new, s.clients_queried], [null, 1, 2]);
-  assert.deepStrictEqual(s.sql_applied, { accounts: false, conversations: false });
-  assert.strictEqual(warned.length, 2);
-  assert.ok(!g.calls.some((c) => c.kind === 'conversations'));
+  assert.deepStrictEqual(s.sql_applied, { accounts: false, conversations: false, cost: false });
+  assert.strictEqual(warned.length, 3);
+  assert.ok(!g.calls.some((c) => c.kind === 'conversations' || c.kind === 'cost'));
   assert.ok(!db.writes.some((w) => w.table === 'lsa_api_accounts'));
 });
 
@@ -481,4 +493,265 @@ test('routes: bearer key, 202 with a run id, inline dry run with only=, status',
   const status = await call('GET /lsa/api-sync/status');
   assert.deepStrictEqual([status.body.running, status.body.last.run_id, status.body.last.leads_new], [null, started.body.run_id, 1]);
   assert.strictEqual(db.tables.lsa_leads.size, 1);
+});
+
+// ── campaign cost per day (supabase_lsa_api_cost.sql) ──────────────────────
+
+const costResult = (cid, campaignId, day, metrics = {}, campaign = {}) => ({
+  campaign: { resourceName: `customers/${cid}/campaigns/${campaignId}`, id: campaignId, name: `Campaign ${campaignId}`, advertisingChannelType: 'LOCAL_SERVICES', status: 'ENABLED', ...campaign },
+  customer: { resourceName: `customers/${cid}`, id: cid, currencyCode: 'USD' },
+  segments: { date: day },
+  metrics,
+});
+
+test('apiCostRow: strings to numbers, an absent metric is zero, impression shares stay fractions or null', () => {
+  const row = api.apiCostRow(costResult('11', '511', '2026-11-02', {
+    costMicros: '1933480000', impressions: '1274', clicks: '152', conversions: 12, topImpressionPercentage: 0.9758, absoluteTopImpressionPercentage: 0.4795,
+  }, { name: 'Pay-per-lead-PMax-Example', advertisingChannelType: 'PERFORMANCE_MAX', status: 'PAUSED' }), '11');
+  assert.deepStrictEqual(row, {
+    account_id: '11', campaign_id: '511', day: '2026-11-02', campaign_name: 'Pay-per-lead-PMax-Example', channel_type: 'PERFORMANCE_MAX', campaign_status: 'PAUSED',
+    cost_micros: 1933480000, impressions: 1274, clicks: 152, conversions: 12, top_impression_pct: 0.9758, abs_top_impression_pct: 0.4795, currency_code: 'USD',
+  });
+  // Google leaves a zero cost out, and sends no share when there were no eligible impressions.
+  const zero = api.apiCostRow(costResult('11', '511', '2026-11-03', { impressions: '3' }), '11');
+  assert.deepStrictEqual([zero.cost_micros, zero.impressions, zero.clicks, zero.conversions, zero.top_impression_pct, zero.abs_top_impression_pct], [0, 3, 0, 0, null, null]);
+  assert.strictEqual(api.apiCostRow(costResult('11', '511', '2026-11-03', { conversions: 2.5, topImpressionPercentage: 0 }), '11').conversions, 2.5);
+  assert.strictEqual(api.apiCostRow(costResult('11', '511', '2026-11-03', { topImpressionPercentage: 0 }), '11').top_impression_pct, 0);
+  assert.strictEqual(api.apiCostRow(costResult('11', '511', '2026-11-03', { costMicros: 'x' }), '11').cost_micros, 0);
+  // The account: the one asked, else the customer block, else the campaign's resource name.
+  assert.strictEqual(api.apiCostRow(costResult('11', '511', '2026-11-03'), '11-000').account_id, '11000');
+  assert.strictEqual(api.apiCostRow(costResult('11', '511', '2026-11-03')).account_id, '11');
+  assert.strictEqual(api.apiCostRow({ campaign: { resourceName: 'customers/12/campaigns/9', id: '9' }, segments: { date: '2026-11-03' } }).account_id, '12');
+  const bare = api.apiCostRow({ campaign: { id: '9' }, segments: { date: '2026-11-03' } }, '12');
+  assert.deepStrictEqual([bare.campaign_name, bare.channel_type, bare.campaign_status, bare.currency_code, bare.cost_micros], [null, null, null, null, 0]);
+  assert.strictEqual(api.apiCostRow(costResult('11', '', '2026-11-03'), '11'), null);
+  assert.strictEqual(api.apiCostRow(costResult('11', '511', undefined), '11'), null);
+  assert.strictEqual(api.apiCostRow({ campaign: { id: '9' }, segments: { date: '2026-11-03' } }), null);
+  assert.strictEqual(api.apiCostRow(null, '11'), null);
+});
+
+test('chooseCostAccounts: accounts with leads or recent spend, the one refreshed longest ago first', () => {
+  const clients = [client('1'), client('2'), client('3'), client('4'), client('5'), client('6', { status: 'CANCELED' }), client('7', { managers: ['901'] })];
+  const leadCounts = new Map([['1', 4], ['2', 0], ['3', 9], ['4', 0], ['5', 1], ['6', 3], ['7', 2]]);
+  const pick = (o) => api.chooseCostAccounts({ clients, leadCounts, ...o }).map((c) => c.id);
+  assert.deepStrictEqual(pick({}), ['1', '3', '5', '7']);
+  assert.deepStrictEqual(pick({ recent: new Set(['4', '6']) }), ['1', '3', '4', '5', '7'], 'spend in the last 60 days counts; a cancelled account never does');
+  // Never refreshed first, then oldest refresh; the id only breaks ties.
+  const lastCostAt = new Map([['1', daysAgo(1)], ['3', daysAgo(5)], ['7', daysAgo(2)]]);
+  assert.deepStrictEqual(pick({ lastCostAt, recent: new Set(['4']) }), ['4', '5', '3', '7', '1']);
+  // only: a manager keeps the rule inside its accounts; an account named itself is always taken.
+  assert.deepStrictEqual(pick({ only: new Set(['901']) }), ['7']);
+  assert.deepStrictEqual(pick({ only: new Set(['900']) }), ['1', '3', '5']);
+  assert.deepStrictEqual(pick({ only: new Set(['2']) }), ['2']);
+  // Nothing known about leads (no memory table, no lead pass): every enabled account.
+  assert.deepStrictEqual(api.chooseCostAccounts({ clients }).map((c) => c.id), ['1', '2', '3', '4', '5', '7']);
+});
+
+const week = (cid) => [
+  costResult(cid, `5${cid}`, '2026-11-14', { costMicros: '120000000', impressions: '40', clicks: '6', conversions: 2, topImpressionPercentage: 0.9, absoluteTopImpressionPercentage: 0.5 }, { status: 'PAUSED' }),
+  costResult(cid, `7${cid}`, '2026-11-14', { costMicros: '80500000', impressions: '25', clicks: '3', conversions: 1 }, { name: 'Pay-per-lead-PMax-Example', advertisingChannelType: 'PERFORMANCE_MAX' }),
+  costResult(cid, `7${cid}`, '2026-11-15', { impressions: '9' }, { name: 'Pay-per-lead-PMax-Example', advertisingChannelType: 'PERFORMANCE_MAX' }),
+  costResult(cid, `9${cid}`, '2026-11-15', { costMicros: '10000000', impressions: '90', clicks: '1' }, { name: 'Brand search', advertisingChannelType: 'SEARCH' }),
+];
+
+test('cost pass: after the leads, one request per account with leads or recent spend; rows, campaign names and the refresh time are stored', async () => {
+  const db = memoryDb({ cost: true });
+  db.tables.lsa_campaigns.set('912', { campaign_id: '912', campaign_name: null, account_id: 'C912', manager_id: '900' });
+  db.tables.lsa_campaign_daily.set('13|713|2026-10-30', { account_id: '13', campaign_id: '713', day: '2026-10-30', cost_micros: 5 });
+  db.tables.lsa_campaign_daily.set('14|714|2026-08-01', { account_id: '14', campaign_id: '714', day: '2026-08-01', cost_micros: 5 }); // too long ago
+  const g = google({
+    managers: { 900: [{ id: '11' }, { id: '12' }, { id: '13' }, { id: '14' }] },
+    leads: { 11: [lead('1001', '11', { leadCharged: true })] },
+    cost: { 11: week('11'), 12: week('12'), 13: [costResult('13', '713', '2026-11-10', { costMicros: '2000000' })] },
+  });
+  const sync = make(db, g);
+  const s = await sync.syncLeads({});
+  assert.strictEqual(s.error, null);
+  // The lead passes are what they were: 1 list + 1 manager + 4 accounts + conversations for 11.
+  assert.deepStrictEqual(g.ads().slice(0, 7).map((c) => c.kind).sort(), ['clients', 'conversations', 'leads', 'leads', 'leads', 'leads', 'list']);
+  assert.deepStrictEqual([s.leads_new, s.clients_queried, s.clients_with_leads], [1, 4, 1]);
+  assert.strictEqual(db.tables.lsa_imports[0].filename, 'google-ads-api 14d');
+  // Cost: 11 has a lead, 13 spent two weeks ago; 12 (no leads) and 14 (old spend only) are not asked.
+  const costCalls = g.ads().slice(7);
+  assert.deepStrictEqual(costCalls.map((c) => [c.kind, c.cid, c.login]).sort(), [['cost', '11', '900'], ['cost', '13', '900']]);
+  assert.ok(costCalls.every((c) => c.query === `${api.COST_QUERY} WHERE segments.date BETWEEN '2026-11-02' AND '2026-11-16'`));
+  assert.strictEqual(s.ops_used, 9);
+  assert.deepStrictEqual(
+    [s.cost_days, s.cost_from, s.cost_to, s.cost_candidates, s.cost_accounts, s.cost_rows, s.cost_total_micros, s.cost_skipped_budget, s.cost_error],
+    [14, '2026-11-02', '2026-11-16', 2, 2, 5, 212500000, 0, null],
+  );
+  assert.deepStrictEqual(s.cost_by_channel, {
+    LOCAL_SERVICES: { rows: 2, cost_micros: 122000000 }, PERFORMANCE_MAX: { rows: 2, cost_micros: 80500000 }, SEARCH: { rows: 1, cost_micros: 10000000 },
+  });
+  assert.deepStrictEqual(s.sql_applied, { accounts: true, conversations: true, cost: true });
+  assert.deepStrictEqual({ ...db.tables.lsa_campaign_daily.get('11|511|2026-11-14'), updated_at: 0 }, {
+    account_id: '11', campaign_id: '511', day: '2026-11-14', campaign_name: 'Campaign 511', channel_type: 'LOCAL_SERVICES', campaign_status: 'PAUSED',
+    cost_micros: 120000000, impressions: 40, clicks: 6, conversions: 2, top_impression_pct: 0.9, abs_top_impression_pct: 0.5, currency_code: 'USD', updated_at: 0,
+  });
+  assert.strictEqual(db.tables.lsa_campaign_daily.get('11|711|2026-11-15').cost_micros, 0);
+  assert.strictEqual(db.tables.lsa_campaign_daily.size, 2 + 4 + 1);
+  // Names: the lead's campaign and the pay-per-lead one get theirs and stay on the real account; a search campaign is not added.
+  assert.deepStrictEqual([db.tables.lsa_campaigns.get('511').campaign_name, db.tables.lsa_campaigns.get('511').account_id], ['Campaign 511', '11']);
+  assert.deepStrictEqual([db.tables.lsa_campaigns.get('711').campaign_name, db.tables.lsa_campaigns.get('711').account_id], ['Pay-per-lead-PMax-Example', '11']);
+  assert.ok(!db.tables.lsa_campaigns.has('911'));
+  assert.strictEqual(s.cost_campaigns_named, 3);
+  // The memory: the lead pass's own columns are untouched by the refresh time.
+  const m11 = db.tables.lsa_api_accounts.get('11');
+  assert.deepStrictEqual([m11.lead_count, m11.last_checked_at, m11.last_cost_at], [1, new Date(NOW).toISOString(), new Date(NOW).toISOString()]);
+  assert.ok(!('last_cost_at' in db.tables.lsa_api_accounts.get('12')));
+
+  // A re-run overwrites the same days (a late adjustment), it does not add rows.
+  g.calls.length = 0;
+  const again = await sync.syncLeads({ costDays: 3 });
+  assert.deepStrictEqual([again.cost_days, again.cost_from, again.cost_rows], [3, '2026-11-13', 5]);
+  assert.strictEqual(db.tables.lsa_campaign_daily.size, 7);
+});
+
+test('cost pass: a search campaign already in lsa_campaigns gets its name; cost_only skips the leads and writes no import row; a dry run writes nothing', async () => {
+  const db = memoryDb({ cost: true });
+  db.tables.lsa_campaigns.set('911', { campaign_id: '911', campaign_name: null, account_id: 'C911', manager_id: '900' });
+  db.tables.lsa_api_accounts.set('11', { customer_id: '11', manager_id: '900', lead_count: 2, last_checked_at: daysAgo(1) });
+  db.tables.lsa_api_accounts.set('12', { customer_id: '12', manager_id: '900', lead_count: 0, last_checked_at: daysAgo(1) });
+  const g = google({ managers: { 900: [{ id: '11' }, { id: '12' }] }, leads: { 11: [lead('1001', '11')] }, cost: { 11: week('11') } });
+  const sync = make(db, g);
+  const dry = await sync.syncLeads({ costOnly: true, costDays: 60, dryRun: true });
+  assert.deepStrictEqual([dry.cost_accounts, dry.cost_rows, dry.cost_total_micros, dry.cost_from], [1, 4, 210500000, '2026-09-17']);
+  assert.deepStrictEqual(db.writes, []);
+  const s = await sync.syncLeads({ costOnly: true, costDays: 60 });
+  assert.deepStrictEqual([s.error, s.cost_only, s.cost_accounts, s.cost_rows, s.leads_seen, s.clients_queried], [null, true, 1, 4, 0, 0]);
+  assert.deepStrictEqual(g.ads().map((c) => c.kind), ['list', 'clients', 'cost', 'list', 'clients', 'cost']);
+  assert.strictEqual(db.tables.lsa_imports.length, 0);
+  assert.strictEqual(db.tables.lsa_leads.size, 0);
+  assert.deepStrictEqual([db.tables.lsa_campaigns.get('911').campaign_name, db.tables.lsa_campaigns.get('911').account_id], ['Brand search', '11']);
+  assert.deepStrictEqual([db.tables.lsa_api_accounts.get('11').lead_count, db.tables.lsa_api_accounts.get('11').last_cost_at], [2, new Date(NOW).toISOString()]);
+  assert.match((await sync.syncLeads({ costOnly: true, costDays: 0 })).error, /nothing to do/);
+  // costDays: 0 is a lead sync with no cost request; the window is capped at 400 days.
+  const none = await sync.syncLeads({ costDays: 0 });
+  assert.deepStrictEqual([none.cost_days, none.cost_accounts, none.leads_new], [0, 0, 1]);
+  assert.ok(!g.ads().slice(6).some((c) => c.kind === 'cost'));
+  assert.strictEqual((await sync.syncLeads({ costOnly: true, costDays: 9999, dryRun: true })).cost_days, 400);
+});
+
+test('cost pass: stops at the request budget, counts what it skipped, and starts with those accounts next time', async () => {
+  const ids = Array.from({ length: 30 }, (_, i) => String(101 + i));
+  const db = memoryDb({ cost: true });
+  for (const id of ids) db.tables.lsa_api_accounts.set(id, { customer_id: id, manager_id: '900', lead_count: 1, last_checked_at: daysAgo(1) });
+  const g = google({ managers: { 900: ids.map((id) => ({ id })) }, cost: Object.fromEntries(ids.map((id) => [id, [costResult(id, `5${id}`, '2026-11-15', { costMicros: '1000000' })]])) });
+  const costCids = () => g.calls.filter((c) => c.kind === 'cost').map((c) => c.cid);
+  // 1 list + 1 manager + 20 accounts = the 22 the first run may spend.
+  const first = await make(db, g, { maxOps: 22, maxOpsPerDay: 1000, concurrency: 1 }).syncLeads({ costOnly: true });
+  assert.strictEqual(first.error, null);
+  assert.deepStrictEqual([first.ops_used, first.cost_candidates, first.cost_accounts, first.cost_skipped_budget, first.cost_rows], [22, 30, 20, 10, 20]);
+  assert.deepStrictEqual(costCids(), ids.slice(0, 20));
+  g.calls.length = 0;
+  const second = await make(db, g, { maxOps: 22, maxOpsPerDay: 1000, concurrency: 1, now: () => new Date(NOW + 3600000) }).syncLeads({ costOnly: true });
+  assert.deepStrictEqual(costCids(), [...ids.slice(20), ...ids.slice(0, 10)], 'the accounts never refreshed come first, then the oldest refresh');
+  assert.deepStrictEqual([second.cost_accounts, second.cost_skipped_budget], [20, 10]);
+  // Several at a time: still never past the cap, and every account is either read or counted as skipped.
+  g.calls.length = 0;
+  const third = await make(db, g, { maxOps: 22, maxOpsPerDay: 1000, now: () => new Date(NOW + 7200000) }).syncLeads({ costOnly: true });
+  assert.deepStrictEqual([third.ops_used, third.cost_accounts + third.cost_skipped_budget, g.ads().length], [22, 30, 22]);
+  // With the leads in the same run, cost spends what they leave, on the same counter.
+  g.calls.length = 0;
+  const both = await make(db, g, { maxOps: 67, maxOpsPerDay: 1000, now: () => new Date(NOW + 10800000) }).syncLeads({});
+  assert.deepStrictEqual([both.error, both.clients_queried, both.skipped_budget, both.cost_accounts, both.cost_skipped_budget, both.ops_used], [null, 30, 0, 30, 0, 62]);
+  assert.deepStrictEqual(g.ads().slice(32).map((c) => c.kind).filter((k) => k !== 'cost'), [], 'cost comes after every lead request');
+});
+
+test('cost pass: without supabase_lsa_api_cost.sql it is skipped with one warning, and the leads load as before', async () => {
+  const db = memoryDb(); // no lsa_campaign_daily
+  const g = google({ managers: { 900: [{ id: '11' }] }, leads: { 11: [lead('1001', '11')] }, cost: { 11: week('11') } });
+  const warned = [];
+  const sync = make(db, g, { log: { ...quiet, warn: (m) => warned.push(m) } });
+  const s = await sync.syncLeads({});
+  const t = await sync.syncLeads({});
+  assert.deepStrictEqual([s.error, s.leads_new, t.leads_same, s.cost_accounts, s.cost_rows, s.error_count], [null, 1, 1, 0, 0, 0]);
+  assert.deepStrictEqual(s.sql_applied, { accounts: true, conversations: true, cost: false });
+  assert.deepStrictEqual(warned.filter((m) => /lsa_campaign_daily/.test(m)).length, 1, 'said once, not on every run');
+  assert.match(warned[0], /supabase_lsa_api_cost\.sql/);
+  assert.ok(!g.calls.some((c) => c.kind === 'cost'));
+  assert.match((await sync.syncLeads({ costOnly: true })).error || 'no error', /no error/);
+
+  // The table without the last_cost_at column: cost still loads, the memory is left alone.
+  const db2 = memoryDb({ cost: true, missing: ['last_cost_at'] });
+  const s2 = await make(db2, g).syncLeads({});
+  assert.deepStrictEqual([s2.cost_accounts, s2.cost_rows, s2.error_count], [1, 4, 0]);
+  assert.ok(!('last_cost_at' in db2.tables.lsa_api_accounts.get('11')));
+});
+
+test('cost pass: a failing account is recorded and the rest go on; a failing pass never fails the lead sync', async () => {
+  const db = memoryDb({ cost: true });
+  const g = google({
+    managers: { 900: [{ id: '11' }, { id: '12' }] },
+    leads: { 11: [lead('1001', '11')], 12: [lead('2001', '12')] },
+    cost: { 11: week('11'), 12: week('12') }, costFail: { 11: [400] },
+  });
+  const s = await make(db, g).syncLeads({});
+  assert.deepStrictEqual([s.error, s.leads_new, s.cost_accounts, s.cost_rows, s.error_count], [null, 2, 1, 4, 1]);
+  assert.match(s.errors[0], /^account 11 cost: 400 PROHIBITED_METRIC_IN_SELECT_OR_WHERE_CLAUSE/);
+  assert.strictEqual(db.tables.lsa_api_accounts.get('11').last_cost_at, undefined, 'not refreshed: first in line next time');
+  assert.strictEqual(db.tables.lsa_api_accounts.get('11').last_error, null, 'the lead pass has no complaint about it');
+
+  // The store refuses the cost rows: the account is reported, the leads are in.
+  const db2 = memoryDb({ cost: true, missing: ['lsa_campaign_daily upsert'] });
+  const g2 = google({ managers: { 900: [{ id: '11' }] }, leads: { 11: [lead('1001', '11')] }, cost: { 11: week('11') } });
+  const s2 = await make(db2, g2).syncLeads({});
+  assert.deepStrictEqual([s2.error, s2.leads_new, s2.cost_accounts, s2.cost_rows, s2.error_count], [null, 1, 0, 0, 1]);
+  assert.match(s2.errors[0], /^account 11 cost store: lsa_campaign_daily upsert 500/);
+  assert.strictEqual(db2.tables.lsa_leads.size, 1);
+  assert.strictEqual(db2.tables.lsa_imports[0].new_count, 1);
+
+  // The whole pass throws (the store cannot list recent spend): one error, the lead sync is whole.
+  const db3 = memoryDb({ cost: true });
+  const select = db3.select;
+  let probed = false;
+  db3.select = async (table, query) => {
+    if (table === 'lsa_campaign_daily') { if (probed) throw new Error('lsa_campaign_daily select 500'); probed = true; }
+    return select(table, query);
+  };
+  const s3 = await make(db3, g2).syncLeads({});
+  assert.deepStrictEqual([s3.error, s3.leads_new, s3.cost_accounts, s3.error_count], [null, 1, 0, 1]);
+  assert.match(s3.cost_error, /lsa_campaign_daily select 500/);
+
+  // Google refuses the query for everyone: the pass gives up after five accounts instead of spending the budget.
+  const ids = Array.from({ length: 9 }, (_, i) => String(201 + i));
+  const db4 = memoryDb({ cost: true });
+  for (const id of ids) db4.tables.lsa_api_accounts.set(id, { customer_id: id, manager_id: '900', lead_count: 1, last_checked_at: daysAgo(1) });
+  const g4 = google({ managers: { 900: ids.map((id) => ({ id })) }, costFail: Object.fromEntries(ids.map((id) => [id, [400]])) });
+  const s4 = await make(db4, g4, { concurrency: 1 }).syncLeads({ costOnly: true });
+  assert.strictEqual(g4.calls.filter((c) => c.kind === 'cost').length, 5);
+  assert.match(s4.cost_error, /stopped after 5 failed accounts/);
+  assert.strictEqual(s4.error, null);
+});
+
+test('routes: cost_days and cost_only', async () => {
+  const routes = {};
+  const app = { post: (p, h) => { routes[`POST ${p}`] = h; }, get: (p, h) => { routes[`GET ${p}`] = h; } };
+  const db = memoryDb({ cost: true });
+  db.tables.lsa_api_accounts.set('11', { customer_id: '11', manager_id: '900', lead_count: 2, last_checked_at: daysAgo(1) });
+  const g = google({ managers: { 900: [{ id: '11' }] }, leads: { 11: [lead('1001', '11')] }, cost: { 11: week('11') } });
+  const sync = api(app, { LSA_IMPORT_KEY: 'k', GOOGLE_ADS_SA_JSON: SA, db, fetchImpl: g.fetchImpl, schedule: false });
+  const call = async (name, query = {}) => {
+    const res = { code: 200, body: null, headersSent: false, status(c) { this.code = c; return this; }, json(b) { this.body = b; this.headersSent = true; return this; } };
+    await routes[name]({ headers: { authorization: 'Bearer k' }, query }, res);
+    return res;
+  };
+  // Default: 14 days of cost with the leads. full=1 does not lengthen the cost window.
+  let r = await call('POST /lsa/api-sync', { dry: '1', only: '900' });
+  assert.deepStrictEqual([r.code, r.body.cost_days, r.body.cost_only, r.body.cost_rows, r.body.leads_new, r.body.sql_applied.cost], [200, 14, false, 4, 1, true]);
+  r = await call('POST /lsa/api-sync', { dry: '1', only: '900', full: '1' });
+  assert.deepStrictEqual([r.body.full, r.body.since_days, r.body.cost_days], [true, null, 14]);
+  r = await call('POST /lsa/api-sync', { dry: '1', only: '900', cost_days: '0' });
+  assert.deepStrictEqual([r.body.cost_days, r.body.cost_rows, r.body.leads_new], [0, 0, 1]);
+  r = await call('POST /lsa/api-sync', { dry: '1', only: '900', cost_days: '1000', cost_only: '1' });
+  assert.deepStrictEqual([r.body.cost_days, r.body.cost_only, r.body.cost_accounts, r.body.cost_total_micros, r.body.cost_skipped_budget, r.body.leads_seen], [400, true, 1, 210500000, 0, 0]);
+  assert.strictEqual((await call('POST /lsa/api-sync', { cost_days: '0', cost_only: '1' })).code, 400);
+  assert.strictEqual((await call('POST /lsa/api-sync', { cost_days: 'lots' })).code, 400);
+  assert.deepStrictEqual(db.writes, []);
+  const started = await call('POST /lsa/api-sync', { cost_only: '1', cost_days: '30' });
+  assert.strictEqual(started.code, 202);
+  while (sync.status().running) await new Promise((res) => setTimeout(res, 5));
+  const last = (await call('GET /lsa/api-sync/status')).body.last;
+  assert.deepStrictEqual([last.cost_accounts, last.cost_rows, last.cost_total_micros, last.cost_skipped_budget, last.sql_applied.cost], [1, 4, 210500000, 0, true]);
+  assert.strictEqual(db.tables.lsa_campaign_daily.size, 4);
 });
