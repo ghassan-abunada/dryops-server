@@ -58,6 +58,40 @@ Hourly on a Mac or Linux box (cron):
 The window is visible by default; add `--headless` only after a visible run
 works on that machine. On Linux without a display, run it under `xvfb-run`.
 
+## The second bot: pay-per-lead leads (`pplBot.js`)
+
+Google is moving Local Services accounts out of the old LSA dashboard and into
+Google Ads. A migrated account's leads leave the Detailed Lead Report and show
+up under Google Ads → Goals → Leads → **Pay-per-lead leads**, one list per
+manager account. `pplBot.js` downloads that list as `.csv` for every manager.
+Run both bots until every account has moved.
+
+```bash
+node pplBot.js run                       # every manager account
+node pplBot.js run --only "Five Star"    # managers whose name contains this
+node pplBot.js run --submit              # also POST each file to DryOps
+```
+
+It uses the same Chrome profile, sign-in (`node lsaBot.js login`), output folder
+and `DRYOPS_IMPORT_URL` / `DRYOPS_IMPORT_KEY` as `lsaBot.js`. Files land in
+`out/ppl-<run time>/PPL_leads_<manager id>.csv`; with `--submit` each one goes
+to the same endpoint with `?account=<manager id>&format=ppl`. There is no date
+range to pick: the file is the manager's whole list ("All time").
+
+What the file is: two title lines (`Pay-per-lead leads report`, the range),
+then one row per lead with the phone, a **date without a time** (`2026Nov3`),
+`Charge status` (Charged / Not charged / In review / Credited), `Lead type`,
+`Lead ID` (the same number the old report calls `Google Ads Lead Id`),
+`Campaign name` and `Campaign ID`. It has **no account ID**, business name,
+geo, zip, email or call length. The importer therefore:
+
+- ties a campaign to the account its leads already sit under in the Detailed
+  Lead Report (the same lead is in both exports while an account is mid-move),
+  and stores a campaign nobody has tied yet under a pseudo-account `C<campaign id>`;
+- never overwrites a lead the Detailed Lead Report already stored: such a lead
+  only gains its campaign and charge status;
+- stores a lead seen only here at `00:00:00` with `time_known = false`.
+
 ## What was learned about Google's pages (Nov 2026)
 
 - The manager **Reports** page (`/localservices/mccreports`) has a download icon
