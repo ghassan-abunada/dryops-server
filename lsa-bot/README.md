@@ -1,5 +1,15 @@
 # LSA export bot
 
+> **Superseded by the Google Ads API sync when `GOOGLE_ADS_SA_JSON` is set on the
+> server.** `lsaApiSync.js` (in the Railway service) reads the same leads, for accounts
+> on the old dashboard and on the new one, straight from the Google Ads API once a day
+> (05:30 Denver) and writes them to the same `lsa_leads` rows; `POST /lsa/api-sync`
+> runs it by hand and `GET /lsa/api-sync/status` shows the last run. The two bots here
+> stay as a fallback: their files still import, the API fills in the real account id
+> and time on leads the pay-per-lead file stored, and a later file does not undo that.
+> The reports still carry a few things the API does not (geo, zip code, dispute
+> status, campaign name).
+
 Downloads Google Local Services Ads' **Detailed Lead Report** for every manager
 account the bot's Google login can see, one calendar month per file, and
 (optionally) posts each file to DryOps.

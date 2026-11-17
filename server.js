@@ -7562,6 +7562,13 @@ require('./lsaImport')(app, {
   express, SUPABASE_URL, SUPABASE_SERVICE_KEY,
   LSA_IMPORT_KEY: (process.env.LSA_IMPORT_KEY || '').trim(),
 });
+// The same leads straight from the Google Ads API (lsaApiSync.js): daily at 05:30 Denver
+// when GOOGLE_ADS_SA_JSON is set; `POST /lsa/api-sync` runs one by hand.
+require('./lsaApiSync')(app, {
+  SUPABASE_URL, SUPABASE_SERVICE_KEY,
+  LSA_IMPORT_KEY: (process.env.LSA_IMPORT_KEY || '').trim(),
+  GOOGLE_ADS_SA_JSON: (process.env.GOOGLE_ADS_SA_JSON || '').trim(),
+});
 
 app.listen(PORT, () => {
   console.log(`\n✓ A1 Drying Log running at http://localhost:${PORT}\n`);
