@@ -317,7 +317,7 @@ function validateInspectionReport(raw) {
       room_id: id(r.room_id), name, profile: ['kitchen', 'bathroom', 'laundry', 'other'].includes(r.profile) ? r.profile : 'other', dims, affected,
       flooring: { type: text(r.flooring && r.flooring.type, `${label} flooring`, 40), on_slab: boolOrNull(r.flooring && r.flooring.on_slab) },
       materials: (Array.isArray(r.materials) ? r.materials : []).slice(0, 40).map((m, k) => (m && typeof m === 'object' && typeof m.type === 'string' && m.type.trim()
-        ? { type: m.type.trim().slice(0, 40), mc: numIn(m.mc, `${label} ${m.type} MC`, 0, 100) } : (errors.push(`${label} material ${k + 1} is invalid`), null))).filter(Boolean),
+        ? { type: m.type.trim().slice(0, 40), mc: numIn(m.mc, `${label} ${m.type} MC`, 0, 100), ...(m.plan === 'dry' || m.plan === 'demo' ? { plan: m.plan } : {}) } : (errors.push(`${label} material ${k + 1} is invalid`), null))).filter(Boolean),
       doors: intIn(r.doors, `${label} doors`, 0, 50),
       exterior_walls: oneOf(r.exterior_walls, EXTERIOR_WALLS),
       exterior_wall_lf: numIn(r.exterior_wall_lf, `${label} exterior wall LF`, 0, 10000),
