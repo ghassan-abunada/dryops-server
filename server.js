@@ -4075,7 +4075,7 @@ async function sbInsert(table, row) {
   try { rows = text ? JSON.parse(text) : null; } catch { rows = null; }
   const first = Array.isArray(rows) ? rows[0] : rows;
   if (!first || typeof first !== 'object') {
-    // Seen in prod: insert succeeds but the representation comes back empty.
+    // Insert succeeded but no row came back; callers must cope with null.
     console.warn('[sbInsert] no row in response', table, r.status, JSON.stringify(text.slice(0, 200)));
     return null;
   }
@@ -4853,7 +4853,16 @@ app.post('/jobs/:id/visits/adhoc', requireAuth, async (req, res) => {
       jn_task_dirty: true,
     };
     if (kind === 'demo') { row.slot_start_min = 480; row.slot_end_min = 720; }
-    const made = await sbInsert('inspections', row);
+    const visitSelect = '*,jobs(id,name,client_name,address,status,lat,lng,location_id)';
+    // A second tap (or a retry after a dropped response) reopens the visit this
+    // person already logged today instead of adding another visit + JN task.
+    const mine = `inspections?job_id=eq.${encodeURIComponent(job.id)}&task_type=eq.${kind}&scheduled_date=eq.${today}`
+      + `&status=eq.in_progress&created_by=eq.${encodeURIComponent(actor.id)}&notes=eq.${encodeURIComponent(row.notes)}`
+      + `&order=created_at.asc&limit=1&select=${visitSelect}`;
+    const open = await sbGet(mine).catch(() => null);
+    if (open && open[0]) return res.json({ ok: true, visit: open[0], reused: true });
+    let made = await sbInsert('inspections', row);
+    if (!made) { const again = await sbGet(mine).catch(() => null); made = (again && again[0]) || null; }
     const id = made && made.id;
     if (!id) return res.status(502).json({ error: 'Could not create the visit' });
     const full = await sbGet(`inspections?id=eq.${encodeURIComponent(id)}&select=*,jobs(id,name,client_name,address,status,lat,lng,location_id)`);
@@ -6810,15 +6819,10 @@ function suppInvoicePayload(job, fullJob, monthKey, monthLabel, monthStartSecs) 
   return payload;
 }
 
-async function sbInsert(table, row) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-    method: 'POST',
-    headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-      'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify(row),
-  });
-  if (!r.ok) { const t = await r.text(); throw new Error(`${r.status} ${t.slice(0, 300)}`); }
-}
+// Inserts here go through the one sbInsert above (returns the inserted row).
+// A second `function sbInsert` used to live here with Prefer: return=minimal;
+// being later in the file it replaced the first, so every caller got
+// undefined back and "Log an inspection now" failed after creating the visit.
 
 // After a live run, email each sales rep the list of their jobs that just got
 // supplemental drafts (via the existing DryOps outbound email — sendEmail /
