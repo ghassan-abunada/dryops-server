@@ -280,6 +280,12 @@ const PPL_NAME_PREFIX = 'Pay-per-lead-PMax-';
 
 /** A stored row whose hash was written by the pay-per-lead import (the detailed import overwrites it). */
 function isPplHash(h) { return String(h || '').startsWith('ppl:'); }
+/**
+ * A stored row last written by the Google Ads API sync (lsaApiSync.js). It has the real
+ * account id and the real time, so the pay-per-lead import treats it as it treats a
+ * detailed-report row: campaign and charge fields only, never the account or the time.
+ */
+function isApiHash(h) { return String(h || '').startsWith('api:'); }
 
 /** " --" and "" → null, else the trimmed text. */
 const pplBlank = (v) => {
@@ -493,7 +499,8 @@ function diffPplLeads(rows, existing, managerId, nowIso) {
     if (!old) {
       counts.new++;
       writes.push({ ...row, manager_ids, changed_at: null });
-    } else if (!isPplHash(old.row_hash)) {
+    } else if (isApiHash(old.row_hash) || !isPplHash(old.row_hash)) {
+      // Stored by the detailed report or by the API sync: both know the account and the time.
       counts.matched++;
       const patch = {};
       for (const f of ['campaign_id', 'campaign_name', 'charge_status']) if ((old[f] ?? null) !== (row[f] ?? null)) patch[f] = row[f] ?? null;
@@ -688,5 +695,5 @@ Object.assign(module.exports, {
   COLUMNS, TRACKED, ImportError, parseCsv, parseReport, normalizeRow, localTimestamp, splitPhone, diffLeads,
   summaryLine, importReport, keyOk, restDb,
   PPL_COLUMNS, PPL_TRACKED, looksLikePpl, pplDate, pplPhone, normalizePplRow, parsePplReport, pplBusinessName,
-  decidePplAccounts, pplLeadRow, diffPplLeads, pplSummaryLine, importPplReport, isPplHash,
+  decidePplAccounts, pplLeadRow, diffPplLeads, pplSummaryLine, importPplReport, isPplHash, isApiHash,
 });
