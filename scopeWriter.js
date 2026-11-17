@@ -200,9 +200,11 @@ module.exports = function createScopeWriter(deps) {
           const patch = {};
           if (m.mc != null) patch.initial_mc = m.mc;
           if (dry != null) patch.dry_standard_mc = dry;
+          // Dry or demo, picked on site (app InspectionMaterial.plan; supabase/add_material_plan.sql).
+          if (m.plan) patch.plan = m.plan;
           if (Object.keys(patch).length) await sbPatch('materials', `id=eq.${enc(row.id)}`, patch);
         } else {
-          row = await insertAndFind('materials', { room_id: roomId, type: m.type, initial_mc: m.mc, dry_standard_mc: dry, demoed: false }, `room_id=eq.${enc(roomId)}&type=eq.${enc(m.type)}&select=id`);
+          row = await insertAndFind('materials', { room_id: roomId, type: m.type, initial_mc: m.mc, dry_standard_mc: dry, demoed: false, ...(m.plan ? { plan: m.plan } : {}) }, `room_id=eq.${enc(roomId)}&type=eq.${enc(m.type)}&select=id`);
           if (row && row.id) mats.push({ id: row.id, type: m.type, demoed: false });
         }
         out.materials += 1;
