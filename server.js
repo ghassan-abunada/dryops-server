@@ -1034,6 +1034,7 @@ function mapCallRow(call, { sparse = false } = {}) {
 // managers once a call is ready to review. One Expo sender (push.js).
 const pushSender = require('./push')({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet });
 // Schedule pushes (assigned / taken off / cancelled), fed by syncVisitJnTask below.
+const { createPhotoSync, registerPhotoSyncRoutes } = require('./photoSync');
 const visitPush = require('./visitPush')({ push: pushSender, sbGet, sbPatch: (...a) => sbPatch(...a) });
 const callAlerts = require('./callAlerts')({ SUPABASE_URL, SUPABASE_SERVICE_KEY, sbGet, push: pushSender, callrailApi, callrailAccountsFor, CALLRAIL_ACCOUNT_IDS });
 
@@ -6521,6 +6522,14 @@ async function encodePhotosAtRung(masters, { px, quality, chroma = '4:2:0' }) {
 // Full pipeline for one job. dryrun writes PDFs to os.tmpdir() instead of
 // uploading (hit the webhook with ?dryrun=1&force=1 to preview a job).
 async function generatePhotoReport(jobJnId, { dryrun = false } = {}) {
+  // DryOps photos not in JobNimbus yet go up first, so the report has them (photoSync.js).
+  // Never blocks the report: a failure here is logged and the report is built from what is there.
+  if (PHOTO_JN_SYNC && !dryrun) {
+    try {
+      const sent = await photoSync.flushJobByJnId(jobJnId);
+      if (sent && (sent.uploaded || sent.failed)) console.log('[photo-report]', jobJnId, `sent ${sent.uploaded} DryOps photos to JobNimbus first${sent.failed ? `, ${sent.failed} failed` : ''}`);
+    } catch (e) { console.warn('[photo-report]', jobJnId, 'DryOps photo flush failed:', e.message); }
+  }
   const job = await jnGetJobFull(jobJnId);
   const contact = job && job.primary && job.primary.id ? await jnGetContactFull(job.primary.id) : null;
   const name = [contact && contact.first_name, contact && contact.last_name].filter(Boolean).join(' ')
@@ -7465,6 +7474,27 @@ require('./storage')(app, {
   jnInvoicesUrl: (jnid) => `v2/invoices?size=100&related=${encodeURIComponent(jnid)}`,
   jobInvoicesPageUrl: SUPP_JOB_INVOICES_URL,
 });
+
+// DryOps photos → JobNimbus (photoSync.js): each photo taken in DryOps is
+// uploaded to its job's JobNimbus files once, so JobNimbus and the Work
+// Complete photo report have it. Off unless PHOTO_JN_SYNC=1;
+// PHOTO_JN_SYNC_DRYRUN=1 logs what would be sent and uploads nothing.
+const PHOTO_JN_SYNC = process.env.PHOTO_JN_SYNC === '1';
+const PHOTO_JN_SYNC_DRYRUN = process.env.PHOTO_JN_SYNC_DRYRUN === '1';
+const PHOTO_JN_SYNC_MS = 2 * 60 * 1000;
+const photoSync = createPhotoSync({
+  sbGet, sbPatch: (...a) => sbPatch(...a), jnUploadFile: (...a) => jnUploadFile(...a), sharp, dryrun: PHOTO_JN_SYNC_DRYRUN,
+});
+registerPhotoSyncRoutes(app, {
+  photoSync, requireAuth, requireAdmin, enabled: PHOTO_JN_SYNC, dryrun: PHOTO_JN_SYNC_DRYRUN,
+  sbCount: async (pathAndQuery) => {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}&select=id&limit=1`, { method: 'HEAD', headers: { ...sbHeaders, Prefer: 'count=exact' } });
+    return Number((r.headers.get('content-range') || '').split('/')[1] || 0);
+  },
+});
+if (SUPABASE_SERVICE_KEY && PHOTO_JN_SYNC) {
+  setTimeout(() => { photoSync.tick(); setInterval(() => photoSync.tick(), PHOTO_JN_SYNC_MS); }, 60 * 1000);
+}
 
 // Job files: every JobNimbus file on a job with signed download links
 // (GET /jobs/:id/files, GET /jnfile/:jnid; jobFiles.js). /jnphoto stays as is.
