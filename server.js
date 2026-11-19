@@ -7515,6 +7515,13 @@ jobPdf(app, {
   FILE_LINK_SECRET: (process.env.FILE_LINK_SECRET || JN_WEBHOOK_TOKEN || '').trim(),
 });
 
+// Work authorizations signed in DryOps (workAuth.js): the location's agreement filled in with the job,
+// signed on the phone, filed as a PDF in DryOps and JobNimbus.
+require('./workAuth')(app, {
+  requireAuth, loadActor: intake.loadActor, sbGet, sbInsert, sbPatch, jnUploadFile, PDFDocument,
+  SUPABASE_URL, SUPABASE_SERVICE_KEY,
+});
+
 require('./wyhAi')(app, {
   SUPABASE_URL, SUPABASE_SERVICE_KEY,
   jnGet: jnGetJson, jnFetchUpdatedSince, jnListJobImages, jnDownloadFile, refreshJobByJnId: jobSync.refreshJobByJnId,
