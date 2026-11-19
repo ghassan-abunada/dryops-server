@@ -171,3 +171,34 @@ test('GET /jnfile/:jnid streams the JN file with type, disposition and private c
     assert.deepStrictEqual([...body], [1, 2, 3]);
   } finally { global.fetch = origFetch; }
 });
+
+test('attachSignatures: a signable document carries its status; other files are untouched', () => {
+  const { attachSignatures } = mount;
+  const files = [{ jnid: 'f1', filename: 'Work Authorization.pdf' }, { jnid: 'f2', filename: 'Estimate.pdf' }, { jnid: 'f3', filename: 'Contract.pdf' }];
+  const out = attachSignatures(files, [
+    { jnid: 'p1', attachment_id: 'f1', signature_status: 'Requested', date_sign_requested: 1_795_000_000, date_signed: 0 },
+    { jnid: 'p3', attachment_id: 'f3', signature_status: 'Fully Signed', date_sign_requested: 1_795_000_000, date_signed: 1_795_000_120 },
+  ]);
+  assert.deepStrictEqual(out[0].signature, { status: 'Requested', signed_at: null, requested_at: new Date(1_795_000_000 * 1000).toISOString() });
+  assert.strictEqual(out[1].signature, undefined);
+  assert.strictEqual(out[1], files[1]);
+  assert.strictEqual(out[2].signature.status, 'Fully Signed');
+  assert.strictEqual(out[2].signature.signed_at, new Date(1_795_000_120 * 1000).toISOString());
+});
+
+test('attachSignatures: best status wins, inactive and unknown statuses are ignored, empty input is safe', () => {
+  const { attachSignatures } = mount;
+  const files = [{ jnid: 'f1' }, { jnid: 'f2' }];
+  const out = attachSignatures(files, [
+    { attachment_id: 'f1', signature_status: 'Requested' },
+    { attachment_id: 'f1', signature_status: 'Fully Signed', date_signed: 1_795_000_120 },
+    { attachment_id: 'f1', signature_status: 'Partially Signed' },
+    { attachment_id: 'f2', signature_status: 'Fully Signed', is_active: false },
+    { attachment_id: 'f2', signature_status: 'Something Else' },
+    { signature_status: 'Requested' },
+  ]);
+  assert.strictEqual(out[0].signature.status, 'Fully Signed');
+  assert.strictEqual(out[1].signature, undefined);
+  assert.deepStrictEqual(attachSignatures(files, null), files);
+  assert.deepStrictEqual(attachSignatures(null, []), []);
+});

@@ -72,6 +72,26 @@ function publicFile(f, secret, nowSecs) {
     url: fileUrl(secret, jnid, filename, nowSecs),
   };
 }
+// Signature status for the documents that were sent for signing (owner 2026-11-19, On Site › Documents).
+// JobNimbus keeps a signable document as a `proposal` whose `attachment_id` is the jnid of its PDF among
+// the job's files (true for every status, checked live on 300 proposals). The best status wins when a
+// file is somehow named by two proposals. Files that were never sent for signing get no `signature`.
+const SIGNATURE_RANK = { 'Not Requested': 1, Requested: 2, 'Partially Signed': 3, 'Fully Signed': 4 };
+const secsToIso = (v) => (typeof v === 'number' && v > 0 ? new Date(v * 1000).toISOString() : null);
+function attachSignatures(files, proposals) {
+  const byFile = new Map();
+  for (const p of proposals || []) {
+    if (!p || !p.attachment_id || p.is_active === false || !SIGNATURE_RANK[p.signature_status]) continue;
+    const key = String(p.attachment_id);
+    const have = byFile.get(key);
+    if (!have || SIGNATURE_RANK[p.signature_status] > SIGNATURE_RANK[have.signature_status]) byFile.set(key, p);
+  }
+  return (files || []).map((f) => {
+    const p = byFile.get(String(f.jnid));
+    return p ? { ...f, signature: { status: p.signature_status, signed_at: secsToIso(p.date_signed), requested_at: secsToIso(p.date_sign_requested) } } : f;
+  });
+}
+
 // Content-Disposition with a safe ASCII fallback and the UTF-8 real name.
 function contentDisposition(name, attachment) {
   const raw = String(name || 'file').replace(/[\r\n"\\]/g, '_').slice(0, 200);
@@ -110,6 +130,15 @@ module.exports = function mountJobFiles(app, deps) {
       let files = all.map((f) => publicFile(f, secret, now));
       if (kind === 'docs') files = files.filter((f) => f.kind !== 'image');
       else if (kind === 'images') files = files.filter((f) => f.kind === 'image');
+      // ?signatures=1 adds each signable document's status. A failure here never fails the listing.
+      if (req.query.signatures === '1' && kind !== 'images') {
+        try {
+          const fields = 'jnid,attachment_id,signature_status,date_signed,date_sign_requested,is_active';
+          const r = await fetch(`${JN_BASE}/proposals?size=100&related=${enc(job.jn_id)}&fields=${fields}`, { headers: { Authorization: `bearer ${JN_TOKEN}`, Accept: 'application/json' } });
+          if (r.ok) files = attachSignatures(files, ((await r.json()) || {}).results || []);
+          else console.warn('[job-files] proposals', job.jn_id, r.status);
+        } catch (e) { console.warn('[job-files] proposals', job.jn_id, e.message); }
+      }
       res.json({ files });
     } catch (err) { res.status(err.status || 502).json({ error: err.message }); }
   });
@@ -147,6 +176,7 @@ module.exports = function mountJobFiles(app, deps) {
 module.exports.signFileLink = signFileLink;
 module.exports.verifyFileLink = verifyFileLink;
 module.exports.fileKind = fileKind;
+module.exports.attachSignatures = attachSignatures;
 module.exports.fileUrl = fileUrl;
 module.exports.publicFile = publicFile;
 module.exports.contentDisposition = contentDisposition;
