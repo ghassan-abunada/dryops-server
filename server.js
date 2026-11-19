@@ -7519,7 +7519,9 @@ jobPdf(app, {
 // signed on the phone, filed as a PDF in DryOps and JobNimbus.
 require('./workAuth')(app, {
   requireAuth, loadActor: intake.loadActor, sbGet, sbInsert, sbPatch, jnUploadFile, PDFDocument,
-  SUPABASE_URL, SUPABASE_SERVICE_KEY,
+  SUPABASE_URL, SUPABASE_SERVICE_KEY, RESEND_API_KEY, EMAIL_FROM,
+  FILE_LINK_SECRET: (process.env.FILE_LINK_SECRET || JN_WEBHOOK_TOKEN || '').trim(),
+  jnGetContact: (id) => jnGetJson(`contacts/${encodeURIComponent(id)}`),
 });
 
 require('./wyhAi')(app, {

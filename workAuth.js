@@ -6,9 +6,14 @@
 // the phone, and this module makes the signed PDF and files it on the job in
 // DryOps (documents) and in JobNimbus (the job's files).
 //
-//   GET  /jobs/:id/work-authorization       → { available, agreement, signer_name, signed[] }
-//   POST /jobs/:id/work-authorization/sign  { signer_name, signature: { width, height, strokes } }
-//                                           → { ok, id, name, storage_url, jn_filed }
+//   GET  /jobs/:id/work-authorization       → { available, agreement, preview_url, signer_name, signer_email, signed[] }
+//   GET  /work-authorization/preview/:id.pdf?exp=&sig=   the UNSIGNED agreement as a PDF, for the app's viewer
+//                                           (no login: the signed link is the key, like /jnfile)
+//   POST /jobs/:id/work-authorization/sign  { signer_name, signer_email?, signature: { width, height, strokes } }
+//                                           → { ok, id, name, storage_url, jn_filed, emailed, email_error }
+//
+// Flow (owner 2026-11-19): the agreement PDF is read in the app, Sign now asks who is signing and their
+// email, the signature is drawn full screen in landscape, and the signed copy is emailed to that address.
 //
 // Tables (dryops repo supabase/add_work_authorizations.sql): work_auth_templates
 // (one agreement per location) and work_authorizations (every signed copy, with
@@ -19,13 +24,37 @@
 // Pure parts (mergeAgreement, cleanSignature, renderWorkAuthPdf) are covered by
 // test/workAuth.test.js.
 
+const crypto = require('crypto');
 const { uuidRe } = require('./noteReader');
+
+const PREVIEW_TTL_SECS = 2 * 60 * 60;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 const MAX_STROKES = 400;
 const MAX_POINTS = 6000;
 const MIN_INK = 12; // points: a dot or a stray tap is not a signature
 
 const squash = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+
+/** HMAC for the preview link: "<job id>|<exp>" → 32 hex chars; null without a secret. */
+function signPreview(secret, jobId, exp) {
+  if (!secret) return null;
+  return crypto.createHmac('sha256', secret).update(`wa-preview|${jobId}|${exp}`).digest('hex').slice(0, 32);
+}
+function verifyPreview(secret, jobId, exp, sig, nowSecs = Math.floor(Date.now() / 1000)) {
+  const e = Number(exp);
+  if (!secret || !Number.isFinite(e) || e < nowSecs) return false;
+  const want = signPreview(secret, jobId, e);
+  const got = String(sig || '');
+  return !!want && got.length === want.length && crypto.timingSafeEqual(Buffer.from(want), Buffer.from(got));
+}
+
+/** A typed email → trimmed lower-case, '' when left empty, or null when it is not an address. */
+function cleanEmail(v) {
+  const e = squash(v).toLowerCase();
+  if (!e) return '';
+  return e.length <= 200 && EMAIL_RE.test(e) ? e : null;
+}
 
 /** "Nov 19, 2026" / "Nov 19, 2026 3:42 PM CT" in Central time. */
 function centralDate(d, withTime) {
@@ -102,6 +131,7 @@ function cleanSignature(sig) {
 /**
  * The signed agreement as a PDF (Letter). `PDFDocument` is pdfkit.
  *   agreement = mergeAgreement(...); signed = { signerName, signature, signedAt: Date, via, collectedBy, recordId }
+ *   signed = null renders the UNSIGNED agreement (the preview read before signing): a blank signature line.
  */
 function renderWorkAuthPdf(PDFDocument, agreement, signed) {
   return new Promise((resolve, reject) => {
@@ -135,6 +165,23 @@ function renderWorkAuthPdf(PDFDocument, agreement, signed) {
     const boxH = 64;
     const x0 = 54;
     const y0 = doc.y;
+    if (!signed) {
+      const y = y0 + boxH + 4;
+      doc.moveTo(x0, y).lineTo(x0 + boxW, y).lineWidth(0.6).strokeColor('#666').stroke();
+      doc.fillColor('#444').font('Helvetica').fontSize(9).text('Customer signature', x0, y + 5, { width: boxW });
+      doc.moveDown(2);
+      doc.fillColor('#000').font('Times-Roman').fontSize(10).text('Company Representative: ______________________________', x0, doc.y, { width: W });
+      const r0 = doc.bufferedPageRange();
+      for (let i = 0; i < r0.count; i += 1) {
+        doc.switchToPage(r0.start + i);
+        doc.page.margins.bottom = 0;
+        doc.font('Helvetica').fontSize(8).fillColor('#777');
+        doc.text('Not signed yet', 54, doc.page.height - 40, { width: W - 80, lineBreak: false });
+        doc.text(`Page ${i + 1} of ${r0.count}`, 54, doc.page.height - 40, { width: W, align: 'right', lineBreak: false });
+      }
+      doc.end();
+      return;
+    }
     const sig = signed.signature;
     const scale = Math.min(boxW / sig.width, boxH / sig.height);
     const ox = x0 + (boxW - sig.width * scale) / 2;
@@ -177,8 +224,10 @@ const safeFile = (s) => squash(s).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g,
 module.exports = function mountWorkAuth(app, deps) {
   const {
     requireAuth, loadActor, sbGet, sbInsert, sbPatch, jnUploadFile, PDFDocument,
-    SUPABASE_URL, SUPABASE_SERVICE_KEY, fetchFn = (...a) => fetch(...a), now = () => new Date(), newId = () => require('crypto').randomUUID(),
+    SUPABASE_URL, SUPABASE_SERVICE_KEY, fetchFn = (...a) => fetch(...a), now = () => new Date(), newId = () => crypto.randomUUID(),
+    FILE_LINK_SECRET = '', RESEND_API_KEY = '', EMAIL_FROM = '', jnGetContact = null,
   } = deps;
+  const secret = String(FILE_LINK_SECRET || '').trim();
   const enc = encodeURIComponent;
   const log = (...a) => console.log('[work-auth]', ...a);
   const sbHeaders = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
@@ -192,7 +241,7 @@ module.exports = function mountWorkAuth(app, deps) {
     const actor = await loadActor(req);
     if (!actor) { res.status(403).json({ error: 'Profile not found' }); return null; }
     if (['lead_source', 'executive'].includes(actor.role)) { res.status(403).json({ error: 'Not allowed to collect a work authorization' }); return null; }
-    const rows = await sbGet(`jobs?id=eq.${enc(id)}&select=id,jn_id,name,client_name,address,insurer,location_id`);
+    const rows = await sbGet(`jobs?id=eq.${enc(id)}&select=id,jn_id,jn_contact_id,name,client_name,address,insurer,location_id`);
     const job = rows && rows[0];
     if (!job) { res.status(404).json({ error: 'Job not found' }); return null; }
     if (!['admin', 'owner'].includes(actor.role) && !actor.locs.includes(String(job.location_id))) { res.status(403).json({ error: 'Not your location' }); return null; }
@@ -215,9 +264,56 @@ module.exports = function mountWorkAuth(app, deps) {
         return res.json({ available: false, reason: c.tablesMissing ? 'Work authorizations are not set up yet (supabase/add_work_authorizations.sql).' : 'This location has no work authorization in DryOps yet.', signed });
       }
       const ctx = ctxOf(c.job);
-      res.json({ available: true, agreement: mergeAgreement(c.template, ctx), signer_name: ctx.customerName, missing: missingForAgreement(ctx), signed });
+      const exp = Math.floor(now().getTime() / 1000) + PREVIEW_TTL_SECS;
+      const sig = signPreview(secret, c.job.id, exp);
+      // The customer's email as JobNimbus has it, to prefill "who is signing". Best effort, never blocks.
+      let email = '';
+      if (jnGetContact && c.job.jn_contact_id) {
+        try { email = cleanEmail(((await jnGetContact(c.job.jn_contact_id)) || {}).email) || ''; } catch { email = ''; }
+      }
+      res.json({
+        available: true, agreement: mergeAgreement(c.template, ctx), signer_name: ctx.customerName, signer_email: email,
+        preview_url: sig ? `/work-authorization/preview/${c.job.id}.pdf?exp=${exp}&sig=${sig}` : null,
+        can_email: !!(RESEND_API_KEY && EMAIL_FROM), missing: missingForAgreement(ctx), signed,
+      });
     } catch (err) { res.status(err.status || 502).json({ error: err.message }); }
   });
+
+  // The unsigned agreement as a PDF, for the app's viewer. No login: the signed link is the key.
+  app.get('/work-authorization/preview/:file', async (req, res) => {
+    try {
+      const id = String(req.params.file || '').replace(/\.pdf$/i, '');
+      if (!uuidRe.test(id) || !verifyPreview(secret, id, req.query.exp, req.query.sig)) return res.status(403).json({ error: 'Link expired or invalid' });
+      const rows = await sbGet(`jobs?id=eq.${enc(id)}&select=id,jn_id,jn_contact_id,name,client_name,address,insurer,location_id`);
+      const job = rows && rows[0];
+      const tRows = job && job.location_id ? await sbGet(`work_auth_templates?location_id=eq.${enc(String(job.location_id))}&is_active=eq.true&select=*&limit=1`) : null;
+      const template = tRows && tRows[0];
+      if (!job || !template) return res.status(404).json({ error: 'No work authorization for this job' });
+      const pdf = await renderWorkAuthPdf(PDFDocument, mergeAgreement(template, ctxOf(job)), null);
+      res.set('Content-Type', 'application/pdf').set('Content-Disposition', 'inline; filename="Work Authorization.pdf"').set('Cache-Control', 'private, no-store').send(pdf);
+    } catch (err) { res.status(err.status || 502).json({ error: err.message }); }
+  });
+
+  /** The signed copy by email (Resend). Resolves to { ok } or { ok: false, error }; never throws. */
+  async function emailSignedCopy(to, agreement, signerName, filename, pdf) {
+    if (!RESEND_API_KEY || !EMAIL_FROM) return { ok: false, error: 'Email is not set up on the server' };
+    const esc = (v) => String(v).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    const html = `<p>Hello ${esc(signerName)},</p><p>Attached is your signed copy of the Work Authorization Agreement with ${esc(agreement.company.name)}.</p>`
+      + `<p>Please keep it for your records.${agreement.company.phone ? ` If you have any questions, call us at ${esc(agreement.company.phone)}.` : ''}</p><p>${esc(agreement.company.name)}</p>`;
+    try {
+      const r = await fetchFn('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: EMAIL_FROM, to: [to], subject: `Your signed Work Authorization - ${agreement.company.name}`, html,
+          attachments: [{ filename, content: pdf.toString('base64') }],
+        }),
+      });
+      if (r.ok) return { ok: true };
+      const j = await r.json().catch(() => null);
+      return { ok: false, error: (j && j.message) || `Email service answered ${r.status}` };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }
 
   app.post('/jobs/:id/work-authorization/sign', requireAuth, async (req, res) => {
     try {
@@ -226,6 +322,8 @@ module.exports = function mountWorkAuth(app, deps) {
       if (!c.template) return res.status(409).json({ error: 'This location has no work authorization in DryOps yet.' });
       const signerName = squash(req.body && req.body.signer_name).slice(0, 120);
       if (signerName.length < 2) return res.status(400).json({ error: 'Type the name of the person signing.' });
+      const signerEmail = cleanEmail(req.body && req.body.signer_email);
+      if (signerEmail === null) return res.status(400).json({ error: 'That email address does not look right. Fix it, or leave it empty.' });
       const cleaned = cleanSignature(req.body && req.body.signature);
       if (cleaned.error) return res.status(400).json({ error: cleaned.error });
       const ctx = ctxOf(c.job);
@@ -259,13 +357,23 @@ module.exports = function mountWorkAuth(app, deps) {
         documentId = (made && made.id) || null;
       } catch (e) { console.warn('[work-auth] documents insert failed', c.job.id, e.message); }
 
-      await sbInsert('work_authorizations', {
+      // The signed copy to the signer's email, when one was given. Reported, never fatal.
+      const mail = signerEmail ? await emailSignedCopy(signerEmail, agreement, signerName, filename, pdf) : null;
+
+      const record = {
         id, job_id: c.job.id, template_id: c.template.id, template_version: c.template.version || 1, body: agreement,
         signer_name: signerName, signature: cleaned.signature, signed_at: signedAt.toISOString(), signed_via: 'phone',
         collected_by: c.actor.id, collected_by_name: c.actor.name, storage_url: storageUrl, document_id: documentId, jn_file_id: jnFileId ? String(jnFileId) : null,
-      });
+      };
+      // signer_email / emailed_at arrive with supabase/add_work_auth_email.sql; before it is run the record is kept without them.
+      try {
+        await sbInsert('work_authorizations', { ...record, signer_email: signerEmail || null, emailed_at: mail && mail.ok ? now().toISOString() : null });
+      } catch (e) {
+        console.warn('[work-auth] record without the email columns:', e.message);
+        await sbInsert('work_authorizations', record);
+      }
       log(c.job.id, `signed by ${signerName}, collected by ${c.actor.name}, ${pdf.length}B`, jnFileId ? `jn:${jnFileId}` : 'not in JobNimbus');
-      res.json({ ok: true, id, name: filename, storage_url: storageUrl, jn_filed: !!jnFileId, in_jobnimbus: !!c.job.jn_id });
+      res.json({ ok: true, id, name: filename, storage_url: storageUrl, jn_filed: !!jnFileId, in_jobnimbus: !!c.job.jn_id, emailed_to: mail && mail.ok ? signerEmail : null, email_error: mail && !mail.ok ? mail.error : null });
     } catch (err) { res.status(err.status || 502).json({ error: err.message }); }
   });
 
@@ -279,3 +387,6 @@ module.exports.cleanSignature = cleanSignature;
 module.exports.renderWorkAuthPdf = renderWorkAuthPdf;
 module.exports.centralDate = centralDate;
 module.exports.customerName = customerName;
+module.exports.signPreview = signPreview;
+module.exports.verifyPreview = verifyPreview;
+module.exports.cleanEmail = cleanEmail;

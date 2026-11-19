@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const PDFDocument = require('pdfkit');
-const { mergeAgreement, missingForAgreement, cleanSignature, renderWorkAuthPdf, centralDate, customerName } = require('../workAuth');
+const { mergeAgreement, missingForAgreement, cleanSignature, renderWorkAuthPdf, centralDate, customerName, signPreview, verifyPreview, cleanEmail } = require('../workAuth');
 
 const template = {
   company_name: 'Texas Water and Fire of Dallas', company_address: '1625 Crescent Circle, Suit 314, Carrollton, TX 75006', company_phone: '(214) 551-8636',
@@ -76,4 +76,32 @@ test('the signed agreement renders to a PDF', async () => {
   assert.ok(buf.length > 3000);
   const pages = (buf.toString('latin1').match(/\/Type \/Page\b/g) || []).length;
   assert.ok(pages >= 2 && pages <= 5, `a 16-clause agreement is a few pages, not ${pages} (footers must not add pages)`);
+});
+
+test('the unsigned agreement renders as a preview PDF', async () => {
+  const buf = await renderWorkAuthPdf(PDFDocument, mergeAgreement(template, ctx), null);
+  assert.strictEqual(buf.slice(0, 5).toString(), '%PDF-');
+  const pages = (buf.toString('latin1').match(/\/Type \/Page\b/g) || []).length;
+  assert.strictEqual(pages, 1);
+});
+
+test('the preview link is signed, bound to the job and expires', () => {
+  const NOW = 1_800_000_000;
+  const sig = signPreview('secret', 'job-1', NOW + 600);
+  assert.match(sig, /^[0-9a-f]{32}$/);
+  assert.strictEqual(verifyPreview('secret', 'job-1', NOW + 600, sig, NOW), true);
+  assert.strictEqual(verifyPreview('secret', 'job-2', NOW + 600, sig, NOW), false);
+  assert.strictEqual(verifyPreview('secret', 'job-1', NOW + 601, sig, NOW), false);
+  assert.strictEqual(verifyPreview('secret', 'job-1', NOW + 600, sig, NOW + 601), false);
+  assert.strictEqual(verifyPreview('other', 'job-1', NOW + 600, sig, NOW), false);
+  assert.strictEqual(verifyPreview('', 'job-1', NOW + 600, sig, NOW), false);
+  assert.strictEqual(signPreview('', 'job-1', NOW), null);
+});
+
+test('the signer email is optional but must be an address when given', () => {
+  assert.strictEqual(cleanEmail(' Beverly.Belk@Example.com '), 'beverly.belk@example.com');
+  assert.strictEqual(cleanEmail(''), '');
+  assert.strictEqual(cleanEmail(null), '');
+  assert.strictEqual(cleanEmail('beverly@'), null);
+  assert.strictEqual(cleanEmail('no at sign'), null);
 });
