@@ -43,17 +43,33 @@ function stamp(iso) {
   return `${p.year}-${p.month}-${p.day} ${p.hour}${p.minute}`;
 }
 
-/** The file name in JobNimbus: "DryOps Kitchen 2026-11-12 1035 a1b2.jpg" (the id tail keeps two shots in a minute apart). */
-function photoFilename(photo, roomName) {
-  const tail = String(photo.id || '').replace(/[^A-Za-z0-9]/g, '').slice(-4);
-  return [`DryOps`, clean(roomName) || 'General', stamp(photo.taken_at), tail].filter(Boolean).join(' ').slice(0, 110) + '.jpg';
+/** "Nov 12, 2026 10:35 AM" in Central time, for the description. */
+function takenLabel(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).formatToParts(d).map((x) => [x.type, x.value]));
+  return `${p.month} ${p.day}, ${p.year} ${p.hour}:${p.minute} ${p.dayPeriod}`;
 }
 
-/** The description in JobNimbus: who took it and where, since the uploader shown there is the API user. */
+/**
+ * The file name in JobNimbus: "2026-11-12 1035 DryOps Kitchen a1b2.jpg" (the id tail keeps two shots in a minute apart).
+ * The taken date comes FIRST (owner 2026-11-19): JobNimbus dates a file by its upload and offers no way to
+ * backdate it (date_created / date_file_created are ignored on POST and PUT, EXIF is not read for API uploads),
+ * so sorting by name is what puts the photos in the order they were taken.
+ */
+function photoFilename(photo, roomName) {
+  const tail = String(photo.id || '').replace(/[^A-Za-z0-9]/g, '').slice(-4);
+  return [stamp(photo.taken_at), `DryOps`, clean(roomName) || 'General', tail].filter(Boolean).join(' ').slice(0, 110) + '.jpg';
+}
+
+/** The description in JobNimbus: who took it, where and when, since the uploader and the date shown there are the API user's and the upload's. */
 function photoDescription(photo, roomName, takerName) {
-  if (photo.caption === PORTAL_CAPTION) return 'From the homeowner (DryOps portal)';
+  const when = takenLabel(photo.taken_at);
+  if (photo.caption === PORTAL_CAPTION) return ['From the homeowner (DryOps portal)', when].filter(Boolean).join(' · ');
   const who = clean(takerName) ? `Taken in DryOps by ${clean(takerName)}` : 'Taken in DryOps';
-  return [who, clean(roomName), clean(photo.caption)].filter(Boolean).join(' · ').slice(0, 250);
+  return [who, clean(roomName), when, clean(photo.caption)].filter(Boolean).join(' · ').slice(0, 250);
 }
 
 function createPhotoSync({ sbGet, sbPatch, jnUploadFile, sharp = null, fetchFn = fetch, dryrun = false, log = console, now = () => Date.now() }) {
@@ -191,4 +207,4 @@ function registerPhotoSyncRoutes(app, { photoSync, requireAuth, requireAdmin, sb
   });
 }
 
-module.exports = { createPhotoSync, registerPhotoSyncRoutes, photoFilename, photoDescription, stamp, MAX_ATTEMPTS, HOLD_MS, SNOOZE_MS };
+module.exports = { createPhotoSync, registerPhotoSyncRoutes, photoFilename, photoDescription, stamp, takenLabel, MAX_ATTEMPTS, HOLD_MS, SNOOZE_MS };
