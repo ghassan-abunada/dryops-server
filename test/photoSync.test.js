@@ -42,18 +42,18 @@ const photo = (over = {}) => ({ id: 'p-0001', job_id: 'j1', room_id: 'r1', stora
 
 test('names and describes the photo so JobNimbus says where it came from', () => {
   assert.strictEqual(stamp('2026-11-12T16:35:00Z'), '2026-11-12 1035'); // Central
-  assert.strictEqual(photoFilename(photo(), 'Kitchen'), 'DryOps Kitchen 2026-11-12 1035 0001.jpg');
-  assert.strictEqual(photoFilename(photo({ room_id: null }), null), 'DryOps General 2026-11-12 1035 0001.jpg');
-  assert.strictEqual(photoFilename(photo(), 'Bath/Hall: "2"'), 'DryOps Bath Hall 2 2026-11-12 1035 0001.jpg');
-  assert.strictEqual(photoDescription(photo(), 'Kitchen', 'Chance Dixon'), 'Taken in DryOps by Chance Dixon · Kitchen');
-  assert.strictEqual(photoDescription(photo({ caption: 'From homeowner (portal)' }), null, null), 'From the homeowner (DryOps portal)');
+  assert.strictEqual(photoFilename(photo(), 'Kitchen'), '2026-11-12 1035 DryOps Kitchen 0001.jpg');
+  assert.strictEqual(photoFilename(photo({ room_id: null }), null), '2026-11-12 1035 DryOps General 0001.jpg');
+  assert.strictEqual(photoFilename(photo(), 'Bath/Hall: "2"'), '2026-11-12 1035 DryOps Bath Hall 2 0001.jpg');
+  assert.strictEqual(photoDescription(photo(), 'Kitchen', 'Chance Dixon'), 'Taken in DryOps by Chance Dixon · Kitchen · Nov 12, 2026 10:35 AM');
+  assert.strictEqual(photoDescription(photo({ caption: 'From homeowner (portal)' }), null, null), 'From the homeowner (DryOps portal) · Nov 12, 2026 10:35 AM');
 });
 
 test('uploads a pending photo once and records the JobNimbus file', async () => {
   const w = world([photo()]);
   const r = await w.make().syncPendingPhotos();
   assert.deepStrictEqual([r.scanned, r.uploaded, r.failed], [1, 1, 0]);
-  assert.deepStrictEqual(w.uploads[0], { jn: 'JN1', filename: 'DryOps Kitchen 2026-11-12 1035 0001.jpg', description: 'Taken in DryOps by Chance Dixon · Kitchen', bytes: 3 });
+  assert.deepStrictEqual(w.uploads[0], { jn: 'JN1', filename: '2026-11-12 1035 DryOps Kitchen 0001.jpg', description: 'Taken in DryOps by Chance Dixon · Kitchen · Nov 12, 2026 10:35 AM', bytes: 3 });
   assert.strictEqual(w.photos[0].jn_file_id, 'F1');
   assert.ok(w.photos[0].jn_synced_at);
   assert.strictEqual(w.photos[0].jn_sync_claimed_at, null);
@@ -97,7 +97,7 @@ test('a dry run uploads nothing and changes nothing', async () => {
   const w = world([photo()]);
   const r = await w.make({ dryrun: true }).syncPendingPhotos();
   assert.strictEqual(r.dryrun, true);
-  assert.strictEqual(r.items[0].filename, 'DryOps Kitchen 2026-11-12 1035 0001.jpg');
+  assert.strictEqual(r.items[0].filename, '2026-11-12 1035 DryOps Kitchen 0001.jpg');
   assert.strictEqual(w.uploads.length, 0);
   assert.strictEqual(w.photos[0].jn_file_id, null);
   assert.strictEqual(w.photos[0].jn_sync_claimed_at, null);
