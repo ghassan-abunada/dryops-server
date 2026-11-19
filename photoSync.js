@@ -100,8 +100,10 @@ function createPhotoSync({ sbGet, sbPatch, jnUploadFile, sharp = null, fetchFn =
     const out = { scanned: 0, uploaded: 0, failed: 0, snoozed: 0, skipped: 0, dryrun: !!dry, items: [] };
     const started = now();
     const free = `or=(jn_sync_claimed_at.is.null,jn_sync_claimed_at.lt.${enc(iso(started - HOLD_MS))})`;
+    // Only pictures DryOps holds itself. A row whose storage_url is "jn:<file id>" (drylog.app's room photos) points
+    // at a photo that is ALREADY in JobNimbus: 1,235 of the 1,426 rows on 2026-11-19. Those are never uploaded.
     const rows = await sbGet(
-      `photos?jn_file_id=is.null&jn_sync_attempts=lt.${MAX_ATTEMPTS}&${free}${jobId ? `&job_id=eq.${enc(jobId)}` : ''}`
+      `photos?jn_file_id=is.null&storage_url=like.http*&jn_sync_attempts=lt.${MAX_ATTEMPTS}&${free}${jobId ? `&job_id=eq.${enc(jobId)}` : ''}`
       + `&select=id,job_id,room_id,storage_url,caption,taken_at,taken_by,jn_sync_attempts&order=taken_at.asc&limit=${Math.max(1, limit)}`);
     if (!rows) throw new Error('could not read the photo queue (is supabase/add_photo_jn_sync.sql applied?)');
     out.scanned = rows.length;
@@ -125,7 +127,7 @@ function createPhotoSync({ sbGet, sbPatch, jnUploadFile, sharp = null, fetchFn =
       const filename = photoFilename(photo, room);
       const description = photoDescription(photo, room, photo.taken_by ? nameOf.get(photo.taken_by) : null);
 
-      if (!jn || !photo.storage_url) {
+      if (!jn || !/^https?:\/\//i.test(photo.storage_url || '')) {
         // Not a failure: the job has no JobNimbus record yet (or the row has no picture). Look again later.
         out.snoozed += 1;
         if (!dry) await sbPatch('photos', `id=eq.${enc(photo.id)}&jn_file_id=is.null`, { jn_sync_claimed_at: iso(now() + SNOOZE_MS - HOLD_MS) }).catch(() => {});
@@ -189,10 +191,10 @@ function registerPhotoSyncRoutes(app, { photoSync, requireAuth, requireAdmin, sb
   app.get('/admin/photos/jn-sync/status', requireAuth, requireAdmin, async (_req, res) => {
     try {
       const [pending, synced, failing, gaveUp] = await Promise.all([
-        sbCount('photos?jn_file_id=is.null'),
+        sbCount('photos?jn_file_id=is.null&storage_url=like.http*'),
         sbCount('photos?jn_file_id=not.is.null'),
-        sbCount(`photos?jn_file_id=is.null&jn_sync_attempts=gt.0&jn_sync_attempts=lt.${MAX_ATTEMPTS}`),
-        sbCount(`photos?jn_file_id=is.null&jn_sync_attempts=gte.${MAX_ATTEMPTS}`),
+        sbCount(`photos?jn_file_id=is.null&storage_url=like.http*&jn_sync_attempts=gt.0&jn_sync_attempts=lt.${MAX_ATTEMPTS}`),
+        sbCount(`photos?jn_file_id=is.null&storage_url=like.http*&jn_sync_attempts=gte.${MAX_ATTEMPTS}`),
       ]);
       res.json({ enabled: !!enabled, dryrun: !!dryrun, running: photoSync.isRunning(), pending, synced, failing, gave_up: gaveUp, last: photoSync.lastRun() });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
