@@ -21,7 +21,7 @@
 // local US/CA numbers only, texting registration (TCR) required; CallRail adds
 // opt-out wording to the first text when we leave it out.
 const crypto = require('crypto');
-const { makeSummarizer, prepare: prepareSummary } = require('./pushSummary');
+const { makeSummarizer, prepare: prepareSummary, parseLsa } = require('./pushSummary');
 
 const CONTENT_MAX = 140;
 const DEDUPE_WINDOW_MS = 2 * 60 * 1000;
@@ -55,8 +55,16 @@ function toE164(v) {
   if (d.length === 11 && d.startsWith('1')) return `+${d}`;
   return null;
 }
+// The inbox row's one-line preview, cut at 160 chars. A Google LSA lead is one
+// text wrapped in Google's template, and the template alone runs ~150 chars, so
+// cutting the raw text left three or four of the customer's own characters.
+// The template comes off first: the customer's words, else "Location · Service".
+// (Backfill for rows written before this: supabase_sms_preview_backfill.sql.)
 function previewOf(content, mediaUrls) {
-  const t = String(content || '').replace(/\s+/g, ' ').trim();
+  const lsa = parseLsa(content);
+  const t = lsa
+    ? (lsa.text || [lsa.location, lsa.serviceLabel].filter(Boolean).join(' · ') || 'Google LSA message')
+    : String(content || '').replace(/\s+/g, ' ').trim();
   if (t) return t.slice(0, 160);
   return Array.isArray(mediaUrls) && mediaUrls.length ? `Photo${mediaUrls.length > 1 ? 's' : ''}` : '';
 }

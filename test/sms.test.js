@@ -65,6 +65,15 @@ test('previewOf and validateContent', () => {
   assert.strictEqual(previewOf('  hello\n\nworld  '), 'hello world');
   assert.strictEqual(previewOf('', ['a', 'b']), 'Photos');
   assert.strictEqual(previewOf('', ['a']), 'Photo');
+  // A Google LSA lead: the template comes off before the cut, so the customer's words survive.
+  const LSA = 'You have received a new message from a customer via Google Local Services Ads.\n\nCustomer name: Ben K, Location: Berkeley Lake\n\nService: water_damage_mold_removal\n\nMessage: ';
+  const words = 'We found mold in the basement after a pipe burst last week and need someone out here as soon as possible';
+  assert.strictEqual(previewOf(`${LSA}${words}. [Notes from LSA: (1) This customer has requested a quote].`), `${words}.`);
+  assert.strictEqual(previewOf(`(1/2) ${LSA}${words}`), words);
+  assert.strictEqual(previewOf(`${LSA}${'y'.repeat(300)}`), 'y'.repeat(160));
+  assert.strictEqual(previewOf(LSA), 'Berkeley Lake · Mold removal');   // nothing typed: the facts
+  assert.strictEqual(previewOf('You have received a new message from a customer via Google Local Services Ads.'), 'Google LSA message');
+  assert.strictEqual(previewOf('z'.repeat(300)), 'z'.repeat(160));
   assert.deepStrictEqual(validateContent('  '), { error: 'Type a message first.' });
   assert.deepStrictEqual(validateContent('ok'), { content: 'ok' });
   const long = 'x'.repeat(CONTENT_MAX + 1);
