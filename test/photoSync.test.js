@@ -15,7 +15,8 @@ function world(photos, { jobs = [{ id: 'j1', jn_id: 'JN1' }], rooms = [{ id: 'r1
     if (q.startsWith('photos?')) {
       const job = (q.match(/job_id=eq\.([^&]+)/) || [])[1];
       const limit = Number((q.match(/limit=(\d+)/) || [])[1] || 1000);
-      return photos.filter((p) => !p.jn_file_id && (p.jn_sync_attempts || 0) < MAX_ATTEMPTS && free(p) && (!job || p.job_id === job))
+      const own = q.includes('storage_url=like.http*');
+      return photos.filter((p) => !p.jn_file_id && (!own || /^http/.test(p.storage_url || '')) && (p.jn_sync_attempts || 0) < MAX_ATTEMPTS && free(p) && (!job || p.job_id === job))
         .sort((a, b) => a.taken_at.localeCompare(b.taken_at)).slice(0, limit).map((p) => ({ ...p }));
     }
     if (q.startsWith('jobs?jn_id=')) return jobs.filter((j) => j.jn_id === decodeURIComponent(q.match(/jn_id=eq\.([^&]+)/)[1]));
@@ -91,6 +92,15 @@ test('a job that is not in JobNimbus yet is snoozed, not failed, and does not bl
   assert.strictEqual((await w.make().syncPendingPhotos()).scanned, 0); // snoozed
   w.advance(SNOOZE_MS + 1000);
   assert.strictEqual((await w.make().syncPendingPhotos()).scanned, 1); // looked at again later
+});
+
+test('a row that points at a photo already in JobNimbus is never uploaded', async () => {
+  const w = world([photo({ id: 'p-aaaa', storage_url: 'jn:mskqa534utwqkmn8', taken_at: '2026-08-16T19:33:56Z' }), photo({ id: 'p-bbbb' })]);
+  const r = await w.make().syncPendingPhotos();
+  assert.deepStrictEqual([r.scanned, r.uploaded, r.failed, r.snoozed], [1, 1, 0, 0]);
+  assert.strictEqual(w.uploads.length, 1);
+  assert.strictEqual(w.photos[0].jn_file_id, null);
+  assert.strictEqual(w.photos[0].jn_sync_attempts, 0);
 });
 
 test('a dry run uploads nothing and changes nothing', async () => {
