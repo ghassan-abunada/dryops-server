@@ -21,10 +21,15 @@ const message = {
 const file = (...rows) => `${[HEADER, ...rows.map(line)].join('\n')}\n`;
 
 function memoryDb() {
-  const tables = { lsa_leads: new Map(), lsa_imports: [], lsa_lead_changes: [] };
+  const tables = { lsa_leads: new Map(), lsa_imports: [], lsa_lead_changes: [], lsa_account_overrides: [] };
   return {
     tables,
     async select(table, query) {
+      if (table === 'lsa_account_overrides') {
+        if (tables.lsa_account_overrides === null) throw new Error('lsa_account_overrides select 404'); // not created yet
+        assert.match(query, /is_excluded=is\.true/);
+        return tables.lsa_account_overrides.filter((r) => r.is_excluded).map((r) => ({ account_id: r.account_id }));
+      }
       const ids = /google_lead_id=in\.\(([^)]*)\)/.exec(query)[1].split(',');
       return ids.map((id) => tables[table].get(id)).filter(Boolean).map((r) => ({
         ...r,
@@ -138,6 +143,47 @@ test('importReport: rejected rows are counted in the reply', async () => {
   const out = await lsa.importReport(db, { csv: file(call, { ...message, 'Google Ads Lead Id': 'abc' }), managerId: '1' });
   assert.strictEqual(out.text, '2 rows: 1 new, 0 changed, 0 same, 1 rejected');
   assert.strictEqual(db.tables.lsa_imports[0].rejected_count, 1);
+});
+
+test("importReport: rows of an account marked as another company's are dropped and counted; a missing list skips nobody", async () => {
+  const theirs = { ...message, 'Account ID': '5550001111' };
+  const db = memoryDb();
+  db.tables.lsa_account_overrides.push({ account_id: '555-000-1111', is_excluded: true }, { account_id: call['Account ID'], is_excluded: false });
+  const out = await lsa.importReport(db, { csv: file(call, theirs), managerId: '1' });
+  assert.strictEqual(out.text, "2 rows: 1 new, 0 changed, 0 same, 1 skipped (another company's account)");
+  assert.deepStrictEqual([...db.tables.lsa_leads.keys()], [call['Google Ads Lead Id']]);
+  assert.deepStrictEqual([db.tables.lsa_imports[0].row_count, db.tables.lsa_imports[0].new_count], [2, 1]);
+  // A lead of theirs stored before the account was marked is neither updated nor removed.
+  db.tables.lsa_leads.set(theirs['Google Ads Lead Id'], { google_lead_id: theirs['Google Ads Lead Id'], account_id: '5550001111', row_hash: 'old' });
+  await lsa.importReport(db, { csv: file(call, theirs), managerId: '1' });
+  assert.strictEqual(db.tables.lsa_leads.get(theirs['Google Ads Lead Id']).row_hash, 'old');
+  assert.strictEqual(db.tables.lsa_lead_changes.length, 0);
+
+  const bare = memoryDb();
+  bare.tables.lsa_account_overrides = null;
+  const all = await lsa.importReport(bare, { csv: file(call, theirs), managerId: '1' });
+  assert.strictEqual(all.text, '2 rows: 2 new, 0 changed, 0 same');
+});
+
+test('loadExcludedAccounts and dropExcluded: digits only, paged, never throws', async () => {
+  const pages = [];
+  const many = Array.from({ length: 1000 }, (_, i) => ({ account_id: String(1000000000 + i) }));
+  const db = { async select(table, query) { pages.push([table, query]); return pages.length === 1 ? many : [{ account_id: '555-000-1111' }, { account_id: '' }, { account_id: null }]; } };
+  const { ids, error } = await lsa.loadExcludedAccounts(db);
+  assert.deepStrictEqual([error, ids.size, ids.has('5550001111'), ids.has('1000000999')], [null, 1001, true, true]);
+  assert.deepStrictEqual(pages.map(([t, q]) => [t, new URLSearchParams(q).get('is_excluded'), new URLSearchParams(q).get('offset')]),
+    [['lsa_account_overrides', 'is.true', '0'], ['lsa_account_overrides', 'is.true', '1000']]);
+  // A read that fails on the second page gives no list at all, not half of one.
+  let n = 0;
+  const half = await lsa.loadExcludedAccounts({ async select() { if (n++) throw new Error('lsa_account_overrides select 503'); return many; } });
+  assert.deepStrictEqual([half.ids.size, half.error], [0, 'lsa_account_overrides select 503']);
+  assert.deepStrictEqual((await lsa.loadExcludedAccounts({ async select() { return { message: 'no' }; } })).ids.size, 0);
+
+  const list = [{ id: '11' }, { id: '12' }, { id: '13' }];
+  assert.deepStrictEqual(lsa.dropExcluded(list, new Set(['12'])), { kept: [{ id: '11' }, { id: '13' }], dropped: 1 });
+  assert.deepStrictEqual(lsa.dropExcluded(list, null), { kept: list, dropped: 0 });
+  assert.deepStrictEqual(lsa.dropExcluded(null, new Set(['12'])), { kept: [], dropped: 0 });
+  assert.deepStrictEqual(lsa.dropExcluded([{ account_id: '12' }], new Set(['12']), (r) => r.account_id), { kept: [], dropped: 1 });
 });
 
 test('keyOk: exact match only, never when the key is unset', () => {

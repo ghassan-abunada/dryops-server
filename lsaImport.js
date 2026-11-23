@@ -8,6 +8,9 @@
 // row into a lead keyed on Google's lead id, and reports what was new, what Google
 // changed since last time, and what was the same. Schema: supabase_lsa_leads.sql.
 //
+// Accounts marked as another company's (lsa_account_overrides.is_excluded) are left out:
+// their rows are dropped before anything is compared or stored, and counted in the reply.
+//
 // Pure parsing / diffing is exported for tests; the route is mounted from server.js.
 
 const crypto = require('crypto');
@@ -197,10 +200,59 @@ function diffLeads(leads, existing, managerId, nowIso) {
   return { writes, changes, counts: { new: fresh, changed, same } };
 }
 
-function summaryLine({ rowCount, counts, rejected }) {
+function summaryLine({ rowCount, counts, rejected, excluded = 0 }) {
   const parts = [`${counts.new} new`, `${counts.changed} changed`, `${counts.same} same`];
   if (rejected) parts.push(`${rejected} rejected`);
+  if (excluded) parts.push(`${excluded} skipped (another company's account)`);
   return `${rowCount} rows: ${parts.join(', ')}`;
+}
+
+// ── Accounts that are not ours ──────────────────────────────────────────────
+//
+// The owner also manages Google Ads for an unrelated company, so its accounts show up
+// under the same logins. They are marked in lsa_account_overrides (is_excluded = true)
+// and nothing of theirs is asked for or stored: the API sync, the profile snapshot and
+// the CSV imports all read the list through here.
+
+/** "123-456-7890" or 1234567890 → "1234567890", the form every LSA table keeps. */
+const accountKey = (v) => String(v ?? '').replace(/\D/g, '');
+
+/**
+ * The account ids marked as another company's. Never throws: a missing table or a failed
+ * read gives an empty set and the reason in `error`, so a sync still runs (and says so
+ * in its summary) on a database where the table has not been created.
+ */
+async function loadExcludedAccounts(db) {
+  const ids = new Set();
+  try {
+    for (let offset = 0; ; offset += 1000) { // PostgREST caps a reply at 1000 rows
+      const rows = await db.select('lsa_account_overrides', `select=account_id&is_excluded=is.true&order=account_id&limit=1000&offset=${offset}`);
+      if (!Array.isArray(rows)) throw new Error('unexpected reply');
+      for (const r of rows) { const id = accountKey(r && r.account_id); if (id) ids.add(id); }
+      if (rows.length < 1000) break;
+    }
+    return { ids, error: null };
+  } catch (err) {
+    // A list read halfway is not used: better none than one that looks complete.
+    return { ids: new Set(), error: String((err && err.message) || err).slice(0, 200) };
+  }
+}
+
+/** Split a list into the accounts we keep and the ones marked as another company's. Pure. */
+function dropExcluded(list, excluded, idOf = (x) => x && x.id) {
+  if (!excluded || !excluded.size) return { kept: [...(list || [])], dropped: 0 };
+  const kept = (list || []).filter((x) => !excluded.has(accountKey(idOf(x))));
+  return { kept, dropped: (list || []).length - kept.length };
+}
+
+let excludedWarned = false; // an unreadable list is reported once, not on every file
+async function excludedForImport(db) {
+  const { ids, error } = await loadExcludedAccounts(db);
+  if (error && !excludedWarned) {
+    excludedWarned = true;
+    console.warn(`[lsa] lsa_account_overrides could not be read (${error}): no account is skipped as another company's`);
+  }
+  return ids;
 }
 
 const ymdOk = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
@@ -228,7 +280,9 @@ async function importReport(db, { csv, managerId, from, to, filename, source, fo
     await db.insert('lsa_imports', [{ ...meta, error: err.message.slice(0, 500) }]);
     return { status: err.status, text: err.message };
   }
-  const { leads, rejected, rowCount } = parsed;
+  const { rejected, rowCount } = parsed;
+  // Another company's accounts can sit in the same manager's file: their rows stop here.
+  const { kept: leads, dropped: excluded } = dropExcluded(parsed.leads, await excludedForImport(db), (l) => l.account_id);
 
   const existing = new Map();
   const fields = ['google_lead_id', 'row_hash', 'manager_ids', 'changed_at', ...TRACKED].join(',');
@@ -249,7 +303,7 @@ async function importReport(db, { csv, managerId, from, to, filename, source, fo
   for (const part of chunk(upgraded, 500)) await db.upsert('lsa_leads', part, 'google_lead_id');
   for (const part of chunk(changes.map((c) => ({ ...c, import_id: imp && imp.id })), 500)) await db.insert('lsa_lead_changes', part);
 
-  return { status: 200, text: summaryLine({ rowCount, counts, rejected: rejected.length }) };
+  return { status: 200, text: summaryLine({ rowCount, counts, rejected: rejected.length, excluded }) };
 }
 
 // ── Pay-per-lead leads report (Google's new dashboard) ──────────────────────
@@ -524,9 +578,10 @@ function diffPplLeads(rows, existing, managerId, nowIso) {
   return { writes, patches: [...byPatch.values()], changes, counts };
 }
 
-function pplSummaryLine({ rowCount, counts, rejected, campaigns, tied }) {
+function pplSummaryLine({ rowCount, counts, rejected, campaigns, tied, excluded = 0 }) {
   const parts = [`${counts.new} new`, `${counts.matched} matched to existing leads`, `${counts.changed} changed`, `${counts.same} same`];
   if (rejected) parts.push(`${rejected} rejected`);
+  if (excluded) parts.push(`${excluded} skipped (another company's account)`);
   return `${rowCount} rows: ${parts.join(', ')}; ${campaigns} campaign${campaigns === 1 ? '' : 's'} (${tied} tied to an account)`;
 }
 
@@ -548,7 +603,8 @@ async function importPplReport(db, { csv, managerId, filename, source }, now = (
     await db.insert('lsa_imports', [{ ...meta, error: err.message.slice(0, 500) }]);
     return { status: err.status, text: err.message };
   }
-  const { leads, rejected, rowCount, range } = parsed;
+  const { rejected, rowCount, range } = parsed;
+  let { leads } = parsed;
   // The file states its range in words ("All time"), not as two dates: keep it beside the name.
   if (range) meta.filename = `${meta.filename || 'pay-per-lead leads'} [${range}]`.slice(0, 200);
 
@@ -566,6 +622,19 @@ async function importPplReport(db, { csv, managerId, filename, source }, now = (
   }
 
   const accounts = decidePplAccounts(leads, existing, campaigns, meta.manager_id);
+  // This file has no account column: a campaign is another company's only when it is
+  // already tied to an account marked so. Its leads and the campaign stop here. A campaign
+  // nothing ties to an account yet cannot be told apart and is stored as before.
+  const notOurs = await excludedForImport(db);
+  let excluded = 0;
+  if (notOurs.size) {
+    // A placeholder account ("C" + campaign id) is never on the list, whatever its digits.
+    const theirs = (id) => !isPseudoAccount(id) && notOurs.has(accountKey(id));
+    const before = leads.length;
+    leads = leads.filter((l) => !theirs((accounts.get(l.campaign_id || '') || {}).account_id));
+    excluded = before - leads.length;
+    for (const [key, a] of accounts) if (theirs(a.account_id)) accounts.delete(key);
+  }
   // A real account none of this file's leads is stored under yet: read its name and geo from one of its rows.
   const looked = new Map();
   for (const a of accounts.values()) {
@@ -604,7 +673,7 @@ async function importPplReport(db, { csv, managerId, filename, source }, now = (
   }
   for (const part of chunk(changes.map((c) => ({ ...c, import_id: imp && imp.id })), 500)) await db.insert('lsa_lead_changes', part);
 
-  return { status: 200, text: pplSummaryLine({ rowCount, counts, rejected: rejected.length, campaigns: withId.length, tied }) };
+  return { status: 200, text: pplSummaryLine({ rowCount, counts, rejected: rejected.length, campaigns: withId.length, tied, excluded }) };
 }
 
 function keyOk(provided, expected) {
@@ -693,7 +762,7 @@ function mountLsaImport(app, { express, SUPABASE_URL, SUPABASE_SERVICE_KEY, LSA_
 module.exports = mountLsaImport;
 Object.assign(module.exports, {
   COLUMNS, TRACKED, ImportError, parseCsv, parseReport, normalizeRow, localTimestamp, splitPhone, diffLeads,
-  summaryLine, importReport, keyOk, restDb,
+  summaryLine, importReport, keyOk, restDb, accountKey, loadExcludedAccounts, dropExcluded,
   PPL_COLUMNS, PPL_TRACKED, looksLikePpl, pplDate, pplPhone, normalizePplRow, parsePplReport, pplBusinessName,
   decidePplAccounts, pplLeadRow, diffPplLeads, pplSummaryLine, importPplReport, isPplHash, isApiHash,
 });

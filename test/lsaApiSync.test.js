@@ -172,6 +172,27 @@ test('chooseAccounts: accounts with leads every run, empty ones weekly and cappe
   assert.strictEqual(api.chooseAccounts({ clients, memory: null, nowMs: NOW }).queue.length, 6);
 });
 
+test("chooseAccounts: an account marked as another company's is never asked, whatever names it", () => {
+  const clients = [client('1'), client('2'), client('3'), client('4', { managers: ['901'] })];
+  const memory = new Map([['1', { lead_count: 12, last_checked_at: daysAgo(1) }], ['2', { lead_count: 5, last_checked_at: daysAgo(1) }]]);
+  const excluded = new Set(['1', '3']);
+  const pick = (o) => api.chooseAccounts({ clients, memory, nowMs: NOW, excluded, ...o });
+  const ids = (out) => out.queue.map((q) => q.client.id);
+  // With leads (1) and never looked at (3): both gone, and not counted as enabled.
+  const out = pick({});
+  assert.deepStrictEqual(ids(out), ['2', '4']);
+  assert.deepStrictEqual([out.counts.enabled, out.counts.matched], [2, 2]);
+  assert.deepStrictEqual(ids(pick({ full: true })), ['4', '2']);
+  // Named itself, named with one of ours, or through its manager.
+  assert.deepStrictEqual(ids(pick({ only: new Set(['1']) })), []);
+  assert.deepStrictEqual(ids(pick({ only: new Set(['1', '2']) })), ['2']);
+  assert.deepStrictEqual(ids(pick({ only: new Set(['900']) })), ['2']);
+  assert.deepStrictEqual(ids(api.chooseAccounts({ clients, memory: null, nowMs: NOW, excluded })), ['2', '4']);
+  // An empty set, or none, changes nothing.
+  assert.strictEqual(pick({ excluded: new Set() }).queue.length, 4);
+  assert.strictEqual(pick({ excluded: null }).queue.length, 4);
+});
+
 test('dailyDue: from 05:30 Denver, once a day, and never throws on a bad clock', () => {
   assert.deepStrictEqual(api.dailyDue({ y: 2026, m: 11, d: 16, h: 5, min: 29 }, null), { due: false, dayKey: '2026-11-16' });
   assert.deepStrictEqual(api.dailyDue({ y: 2026, m: 11, d: 16, h: 5, min: 30 }, '2026-11-15'), { due: true, dayKey: '2026-11-16' });
@@ -185,7 +206,8 @@ test('dailyDue: from 05:30 Denver, once a day, and never throws on a bad clock',
 // ── a whole run against an in-memory store and a mocked Google ─────────────
 
 function memoryDb({ missing = [], cost = false } = {}) {
-  const tables = { lsa_leads: new Map(), lsa_campaigns: new Map(), lsa_api_accounts: new Map(), lsa_imports: [], lsa_lead_changes: [] };
+  // lsa_account_overrides: rows are pushed by the tests that mark an account as another company's.
+  const tables = { lsa_leads: new Map(), lsa_campaigns: new Map(), lsa_api_accounts: new Map(), lsa_imports: [], lsa_lead_changes: [], lsa_account_overrides: [] };
   // supabase_lsa_api_cost.sql: without `cost` the table is not there, as before that file is run.
   if (cost) tables.lsa_campaign_daily = new Map();
   const writes = [];
@@ -204,6 +226,7 @@ function memoryDb({ missing = [], cost = false } = {}) {
         if (['select', 'order', 'limit', 'offset'].includes(k)) continue;
         if (v.startsWith('in.(')) { const ids = v.slice(4, -1).split(','); rows = rows.filter((r) => ids.includes(r[k])); }
         else if (v.startsWith('eq.')) rows = rows.filter((r) => String(r[k]) === v.slice(3));
+        else if (v === 'is.true') rows = rows.filter((r) => r[k] === true);
         else if (v.startsWith('gte.')) rows = rows.filter((r) => String(r[k]) >= v.slice(4));
         else if (v.startsWith('like.')) rows = rows.filter((r) => String(r[k] || '').includes(v.slice(5).replace(/\*/g, '')));
         else throw new Error(`memoryDb: unexpected filter ${k}=${v}`);
@@ -545,6 +568,14 @@ test('chooseCostAccounts: accounts with leads or recent spend, the one refreshed
   assert.deepStrictEqual(pick({ only: new Set(['2']) }), ['2']);
   // Nothing known about leads (no memory table, no lead pass): every enabled account.
   assert.deepStrictEqual(api.chooseCostAccounts({ clients }).map((c) => c.id), ['1', '2', '3', '4', '5', '7']);
+  // Another company's account: not with leads, not with recent spend, not when named, not when nothing is known.
+  const excluded = new Set(['3', '4']);
+  assert.deepStrictEqual(pick({ excluded, recent: new Set(['4']) }), ['1', '5', '7']);
+  assert.deepStrictEqual(pick({ excluded, only: new Set(['3']) }), []);
+  assert.deepStrictEqual(pick({ excluded, only: new Set(['3', '2']) }), ['2']);
+  assert.deepStrictEqual(pick({ excluded, only: new Set(['900']) }), ['1', '5']);
+  assert.deepStrictEqual(api.chooseCostAccounts({ clients, excluded }).map((c) => c.id), ['1', '2', '5', '7']);
+  assert.deepStrictEqual(pick({ excluded: new Set() }), ['1', '3', '5', '7']);
 });
 
 const week = (cid) => [
@@ -553,6 +584,61 @@ const week = (cid) => [
   costResult(cid, `7${cid}`, '2026-11-15', { impressions: '9' }, { name: 'Pay-per-lead-PMax-Example', advertisingChannelType: 'PERFORMANCE_MAX' }),
   costResult(cid, `9${cid}`, '2026-11-15', { costMicros: '10000000', impressions: '90', clicks: '1' }, { name: 'Brand search', advertisingChannelType: 'SEARCH' }),
 ];
+
+test("syncLeads: an account marked as another company's is never asked for leads, conversations or cost, even with only=", async () => {
+  const db = memoryDb({ cost: true });
+  // 12 is theirs. It has leads from before in the account memory and spend in the last 60 days: neither brings it back.
+  db.tables.lsa_account_overrides.push(
+    { account_id: '12', is_excluded: true },
+    { account_id: '11', is_excluded: false }, // an override that only moves a location is ours
+    { account_id: '555-000-1111', is_excluded: true }, // marked, and not under any manager we are on
+  );
+  db.tables.lsa_api_accounts.set('12', { customer_id: '12', manager_id: '900', lead_count: 9, last_checked_at: daysAgo(1), last_cost_at: null });
+  db.tables.lsa_campaign_daily.set('12|512|2026-11-10', { account_id: '12', campaign_id: '512', day: '2026-11-10', cost_micros: 5 });
+  const world = () => google({
+    managers: { 900: [{ id: '11' }, { id: '12' }], 901: [{ id: '12' }, { id: '21' }] },
+    leads: { 11: [lead('1001', '11')], 12: [lead('1201', '12')], 21: [lead('2001', '21')] },
+    cost: { 11: week('11'), 12: week('12'), 21: week('21') },
+  });
+  const touched = (g) => g.ads().filter((c) => c.kind !== 'list' && c.kind !== 'clients').map((c) => c.cid);
+  const theirs = () => JSON.stringify([db.tables.lsa_api_accounts.get('12'), [...db.tables.lsa_campaign_daily.values()].filter((r) => r.account_id === '12')]);
+  const before = theirs();
+
+  let g = world();
+  const s = await make(db, g).syncLeads({});
+  assert.deepStrictEqual([s.error, s.error_count, s.excluded_accounts, s.excluded_list, s.clients], [null, 0, 1, 'ok', 2]);
+  assert.deepStrictEqual([s.clients_queried, s.leads_new, s.cost_accounts], [2, 2, 2]);
+  assert.ok(touched(g).length > 0 && !touched(g).includes('12'), 'Google is never asked about the account');
+  assert.deepStrictEqual([...db.tables.lsa_leads.keys()].sort(), ['1001', '2001']);
+  assert.ok(!db.writes.some((w) => (w.rows || []).some((r) => r.account_id === '12' || r.customer_id === '12')), 'nothing is written for it');
+  // What was stored before the account was marked is left as it was.
+  assert.strictEqual(theirs(), before);
+
+  // Named itself: still skipped, and the summary shows it.
+  g = world();
+  const named = await make(db, g).syncLeads({ only: '12', dryRun: true });
+  assert.deepStrictEqual([named.error, named.excluded_accounts, named.clients_queried, named.cost_candidates], [null, 1, 0, 0]);
+  assert.deepStrictEqual(touched(g), []);
+  // Named beside one of ours in a full run, and through its manager in a cost-only run.
+  g = world();
+  const both = await make(db, g).syncLeads({ only: '12,21', full: true, dryRun: true });
+  assert.deepStrictEqual([both.excluded_accounts, both.clients_queried], [1, 1]);
+  assert.deepStrictEqual([...new Set(touched(g))], ['21']);
+  g = world();
+  const costOnly = await make(db, g).syncLeads({ costOnly: true, only: '900', dryRun: true });
+  assert.deepStrictEqual([costOnly.excluded_accounts, costOnly.cost_accounts], [1, 1]);
+  assert.deepStrictEqual(touched(g), ['11']);
+});
+
+test('syncLeads: when lsa_account_overrides is missing the run goes on, skips nobody and says so', async () => {
+  const db = memoryDb({ missing: ['lsa_account_overrides'] });
+  const g = google({ managers: { 900: [{ id: '11' }, { id: '12' }] }, leads: { 11: [lead('1001', '11')], 12: [lead('1201', '12')] } });
+  const warned = [];
+  const s = await make(db, g, { log: { ...quiet, warn: (m) => warned.push(m) } }).syncLeads({});
+  assert.deepStrictEqual([s.error, s.error_count, s.excluded_accounts, s.clients_queried, s.leads_new], [null, 0, 0, 2, 2]);
+  assert.match(s.excluded_list, /^unavailable: lsa_account_overrides select 404/);
+  assert.strictEqual(warned.filter((m) => /lsa_account_overrides/.test(m)).length, 1);
+});
 
 test('cost pass: after the leads, one request per account with leads or recent spend; rows, campaign names and the refresh time are stored', async () => {
   const db = memoryDb({ cost: true });

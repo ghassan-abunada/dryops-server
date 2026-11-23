@@ -38,13 +38,14 @@ const oldCall = (o = {}) => ({
 const oldFile = (...rows) => `${[OLD_HEADER, ...rows.map(oldLine)].join('\n')}\n`;
 
 function memoryDb() {
-  const tables = { lsa_leads: new Map(), lsa_campaigns: new Map(), lsa_imports: [], lsa_lead_changes: [] };
+  const tables = { lsa_leads: new Map(), lsa_campaigns: new Map(), lsa_imports: [], lsa_lead_changes: [], lsa_account_overrides: [] };
   const calls = { update: [], upsert: [] };
   const keyOf = { lsa_leads: 'google_lead_id', lsa_campaigns: 'campaign_id' };
   return {
     tables,
     calls,
     async select(table, query) {
+      if (table === 'lsa_account_overrides') return tables.lsa_account_overrides.filter((r) => r.is_excluded).map((r) => ({ account_id: r.account_id }));
       const all = [...tables[table].values()];
       const inList = /(google_lead_id|campaign_id)=in\.\(([^)]*)\)/.exec(query);
       if (inList) { const ids = inList[2].split(','); return all.filter((r) => ids.includes(r[inList[1]])).map((r) => ({ ...r })); }
@@ -273,6 +274,23 @@ test('importReport: a recorded campaign keeps its real account when no lead in t
   const row = db.tables.lsa_leads.get('77');
   assert.deepStrictEqual([row.account_id, row.business_name, row.geo, row.manager_ids], ['1086506690', 'A1 Restoration', 'Queen Creek,Arizona,United States', []]);
   assert.deepStrictEqual([db.tables.lsa_campaigns.get('24436769692').account_id, db.tables.lsa_campaigns.get('24436769692').manager_id], ['1086506690', '111']);
+});
+
+test("importReport: a campaign tied to an account marked as another company's is left out, leads and campaign", async () => {
+  const db = memoryDb();
+  db.tables.lsa_campaigns.set('24436769692', { campaign_id: '24436769692', campaign_name: 'n', manager_id: '111', account_id: '1086506690' });
+  db.tables.lsa_account_overrides.push({ account_id: '108-650-6690', is_excluded: true });
+  const before = JSON.stringify(db.tables.lsa_campaigns.get('24436769692'));
+  const out = await lsa.importReport(db, { csv: pplFile(rec({ 'Lead ID': '77' }), rec({ 'Lead ID': '78' })), managerId: '' });
+  assert.strictEqual(out.text, "2 rows: 0 new, 0 matched to existing leads, 0 changed, 0 same, 2 skipped (another company's account); 0 campaigns (0 tied to an account)");
+  assert.strictEqual(db.tables.lsa_leads.size, 0);
+  assert.strictEqual(JSON.stringify(db.tables.lsa_campaigns.get('24436769692')), before);
+  assert.deepStrictEqual(db.calls.upsert, []);
+  // A campaign nothing ties to an account yet is stored under its placeholder, as before.
+  db.tables.lsa_campaigns.clear();
+  const loose = await lsa.importReport(db, { csv: pplFile(rec({ 'Lead ID': '77' })), managerId: '' });
+  assert.match(loose.text, /^1 rows: 1 new/);
+  assert.strictEqual(db.tables.lsa_leads.get('77').account_id, 'C24436769692');
 });
 
 test('importReport: pseudo-account leads move to the real account once the campaign is tied', async () => {

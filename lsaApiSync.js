@@ -10,6 +10,8 @@
 // Shape of one run (syncLeads):
 //   1. customers:listAccessibleCustomers → the manager accounts the service account is on
 //   2. per manager: customer_client → its client accounts
+//      then the accounts marked as another company's (lsa_account_overrides.is_excluded)
+//      are taken off that list: nothing below ever asks Google about them, `only` or not
 //   3. per chosen client account: local_services_lead (a manager-level query returns nothing)
 //   4. per client account that had a lead: local_services_lead_conversation (call length, texts)
 //
@@ -27,7 +29,7 @@
 // Pure mapping / diffing / selection is exported for tests; routes are mounted from server.js.
 
 const crypto = require('crypto');
-const { keyOk, restDb, isApiHash } = require('./lsaImport');
+const { keyOk, restDb, isApiHash, loadExcludedAccounts, dropExcluded } = require('./lsaImport');
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SCOPE = 'https://www.googleapis.com/auth/adwords';
@@ -171,11 +173,12 @@ function apiCostRow(result, accountId) {
  *   recent      Set of account ids with lsa_campaign_daily rows in the last 60 days
  *   lastCostAt  Map(customer id → ISO time of its last cost refresh)
  *   only        Set of customer / manager ids; an account named itself is always taken
+ *   excluded    Set of account ids marked as another company's: never taken, named or not
  * Enabled accounts with leads or recent spend, the one refreshed longest ago first (never
  * refreshed before all), so a pass cut short by the budget picks up the rest next time.
  */
-function chooseCostAccounts({ clients, leadCounts = null, recent = new Set(), lastCostAt = new Map(), only = null }) {
-  let pool = (clients || []).filter((c) => c.status === 'ENABLED');
+function chooseCostAccounts({ clients, leadCounts = null, recent = new Set(), lastCostAt = new Map(), only = null, excluded = null }) {
+  let pool = dropExcluded(clients, excluded).kept.filter((c) => c.status === 'ENABLED');
   if (only && only.size) pool = pool.filter((c) => only.has(c.id) || (c.managers || []).some((m) => only.has(m)));
   const wanted = (c) => !leadCounts || Number(leadCounts.get(c.id)) > 0 || recent.has(c.id) || !!(only && only.has(c.id));
   const at = (c) => { const t = Date.parse(lastCostAt.get(c.id) || ''); return Number.isFinite(t) ? t : 0; };
@@ -279,6 +282,8 @@ function summarizeConversations(results) {
  *   clients  [{ id, status, managers: [ids] }]
  *   memory   Map(customer_id → lsa_api_accounts row), or null when the table is not there
  *   budget   how many Google requests the run may still spend on leads + conversations
+ *   excluded Set of account ids marked as another company's: never asked, even when
+ *            `only` or `full` names them, and not counted as enabled
  * Enabled accounts only. With memory: every account that had leads last time (each costs
  * a lead and a conversation request), then accounts never looked at, then accounts with
  * no leads whose last look is older than `staleDays` (at most `emptyPerRun`, oldest
@@ -286,8 +291,8 @@ function summarizeConversations(results) {
  * `full`, `only` and a missing memory table take every (matching) account, least
  * recently looked at first, so a backfill cut short by the budget continues next time.
  */
-function chooseAccounts({ clients, memory = null, nowMs = Date.now(), full = false, only = null, emptyPerRun = 150, staleDays = 7, budget = Infinity, conversations = true }) {
-  let pool = (clients || []).filter((c) => c.status === 'ENABLED');
+function chooseAccounts({ clients, memory = null, nowMs = Date.now(), full = false, only = null, emptyPerRun = 150, staleDays = 7, budget = Infinity, conversations = true, excluded = null }) {
+  let pool = dropExcluded(clients, excluded).kept.filter((c) => c.status === 'ENABLED');
   const enabled = pool.length;
   if (only && only.size) pool = pool.filter((c) => only.has(c.id) || (c.managers || []).some((m) => only.has(m)));
   const mem = (c) => (memory && memory.get(c.id)) || null;
@@ -599,7 +604,7 @@ function createLsaApiSync({
    * account, upserted on (account, campaign, day) so a later run overwrites Google's
    * adjustments. A failing account is recorded and the pass goes on.
    */
-  async function costPass(run, { clients, memory, memoryRows, only, costDays, leadsRan }) {
+  async function costPass(run, { clients, memory, memoryRows, only, excluded, costDays, leadsRan }) {
     const s = run.summary;
     const nowMs = now().getTime();
     const day = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -615,7 +620,7 @@ function createLsaApiSync({
       for (const [id, m] of memoryRows) leadCounts.set(id, Number(m.lead_count) || 0);
     }
     const recent = await recentCostAccounts(day(nowMs - COST_RECENT_DAYS * 86400000));
-    const queue = chooseCostAccounts({ clients, leadCounts, recent, lastCostAt, only });
+    const queue = chooseCostAccounts({ clients, leadCounts, recent, lastCostAt, only, excluded });
     s.cost_candidates = queue.length;
 
     const done = []; const campaigns = new Map();
@@ -703,25 +708,34 @@ function createLsaApiSync({
     const s = run.summary;
     await probe({ cost: costDays > 0 });
     s.sql_applied = { accounts: has.memory, conversations: has.conversations, cost: has.cost };
-    const clients = await discover(run, only);
+    // Another company's accounts sit under the same managers. They come off the list here,
+    // once, before anything is chosen, so no pass below can ask Google about one or store
+    // a row for it (the choosers are handed the same set, as a second guard). When the
+    // list cannot be read the run goes on with nobody skipped, and says so.
+    const notOurs = await loadExcludedAccounts(db);
+    if (notOurs.error) log.warn(`[lsa-api] lsa_account_overrides could not be read (${notOurs.error}): no account is skipped as another company's`);
+    s.excluded_list = notOurs.error ? `unavailable: ${notOurs.error}` : 'ok';
+    const excluded = notOurs.ids;
+    const { kept: clients, dropped } = dropExcluded(await discover(run, only), excluded);
+    s.excluded_accounts = dropped;
     s.clients = clients.length;
     const memory = has.memory ? await loadMemory() : null;
     const memoryRows = new Map(); // what the lead pass learned about each account it asked
-    if (!costOnly) await leadPasses(run, { clients, memory, memoryRows, sinceDays, full, only, label });
+    if (!costOnly) await leadPasses(run, { clients, memory, memoryRows, sinceDays, full, only, excluded, label });
     if (!(costDays > 0) || !has.cost) return;
     // Cost is an extra: whatever goes wrong here, the leads above are already stored.
-    try { await costPass(run, { clients, memory, memoryRows, only, costDays, leadsRan: !costOnly }); } catch (err) {
+    try { await costPass(run, { clients, memory, memoryRows, only, excluded, costDays, leadsRan: !costOnly }); } catch (err) {
       s.cost_error = String((err && err.message) || err).slice(0, 300);
       run.fail('cost pass', err);
     }
   }
 
   /** Steps 3 and 4: leads, then conversations, then the account memory. */
-  async function leadPasses(run, { clients, memory, memoryRows, sinceDays, full, only, label }) {
+  async function leadPasses(run, { clients, memory, memoryRows, sinceDays, full, only, excluded, label }) {
     const s = run.summary;
     const nowMs = now().getTime();
     const { queue, counts } = chooseAccounts({
-      clients, memory, nowMs, full, only, emptyPerRun, budget: run.cap - run.ops - 5, conversations: has.conversations,
+      clients, memory, nowMs, full, only, excluded, emptyPerRun, budget: run.cap - run.ops - 5, conversations: has.conversations,
     });
     s.selection = counts;
     const day = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -816,7 +830,8 @@ function createLsaApiSync({
    * Run one sync. Never throws: the summary carries `error` when the run could not finish.
    *   sinceDays  leads created in the last N days (default 14)
    *   full       every enabled account, no date filter (history backfill)
-   *   only       comma-separated customer or manager ids
+   *   only       comma-separated customer or manager ids (an account marked as another
+   *              company's is skipped even when named here)
    *   dryRun     read Google and the store, diff, write nothing
    *   costDays   campaign cost per day for the last N days (default 14, 0 = no cost pass, at most 400)
    *   costOnly   skip the leads and conversations (cost history backfill)
@@ -833,7 +848,7 @@ function createLsaApiSync({
     const summary = {
       run_id: `${started.getTime().toString(36)}-${++seq}`, started: started.toISOString(), finished: null,
       dry_run: !!dryRun, full: !!full, since_days: full ? null : days, only: onlySet.size ? [...onlySet] : null,
-      ops_used: 0, ops_cap: 0, managers: 0, clients: 0, clients_queried: 0, clients_with_leads: 0, skipped_budget: 0,
+      ops_used: 0, ops_cap: 0, managers: 0, clients: 0, excluded_accounts: 0, excluded_list: null, clients_queried: 0, clients_with_leads: 0, skipped_budget: 0,
       leads_seen: 0, leads_new: 0, leads_changed: 0, leads_same: 0, moved_from_placeholder: 0, changed_fields: {}, changed_by_source: {}, charge_changes: {},
       conversations_seen: 0, conversation_leads_updated: 0, call_seconds_filled: 0, conversation_leads_unknown: 0, conversations_skipped_budget: 0,
       cost_only: !!costOnly, cost_days: cost, cost_from: null, cost_to: null, cost_candidates: 0, cost_accounts: 0, cost_accounts_with_rows: 0,
@@ -869,7 +884,7 @@ function createLsaApiSync({
       }
       last = summary;
       running = null;
-      log.log(`[lsa-api] ${summary.dry_run ? 'dry run' : 'run'} ${summary.run_id}: ${summary.ops_used} requests, ${summary.clients_queried} accounts, ${summary.leads_seen} leads (${summary.leads_new} new, ${summary.leads_changed} changed, ${summary.leads_same} same), cost ${summary.cost_accounts} accounts / ${summary.cost_rows} rows, ${summary.error_count} errors`);
+      log.log(`[lsa-api] ${summary.dry_run ? 'dry run' : 'run'} ${summary.run_id}: ${summary.ops_used} requests, ${summary.clients_queried} accounts${summary.excluded_accounts ? ` (${summary.excluded_accounts} skipped as another company's)` : ''}, ${summary.leads_seen} leads (${summary.leads_new} new, ${summary.leads_changed} changed, ${summary.leads_same} same), cost ${summary.cost_accounts} accounts / ${summary.cost_rows} rows, ${summary.error_count} errors`);
     }
     return summary;
   }
