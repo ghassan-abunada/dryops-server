@@ -5,7 +5,7 @@ const callAccess = require('./callAccess');
 const { createCallrailBudget, orderAccounts } = require('./callrailBudget');
 const { readCallrailCall, describeBody: describeCallrailBody } = require('./callrailPayload');
 const jnScope = require('./jnScope');
-const { descriptionCol } = require('./jobSync');
+const { descriptionCol, clientPhoneCol } = require('./jobSync');
 const { storageCols } = require('./storage');
 const jobPdf = require('./jobPdf');
 
@@ -447,7 +447,9 @@ function jnJobFields(job) {
   set('number', job.number != null && job.number !== '' ? String(job.number) : undefined);
   set('address', addrParts.length ? addrParts.join(', ') : undefined);
   set('claim_number', pick('cf_string_2', 'Claim Number', 'Claim #'));
-  set('client_phone', pick('parent_mobile_phone'));
+  // Mobile, else home, else work: offices type the number into different
+  // boxes (jobSync.clientPhoneCol). No number in the payload = column untouched.
+  Object.assign(row, clientPhoneCol(job));
   set('adjuster_name', pick('cf_string_3', 'Adjuster Name', 'Adjuster'));
   set('adjuster_phone', pick('cf_string_4', 'Adjuster Phone'));
   set('adjuster_email', pick('cf_string_5', 'Adjuster Email'));

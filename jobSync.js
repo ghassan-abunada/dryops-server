@@ -21,6 +21,27 @@ function descriptionCol(job) {
   return { description: s || null };
 }
 
+// JobNimbus copies the contact's phones onto the job as parent_mobile_phone /
+// parent_home_phone / parent_work_phone → jobs.client_phone. Offices do not
+// agree on which box they type the number into (some fill only Home phone), so
+// the client's phone is the first one that holds a number: mobile, then home,
+// then work. jobs.client_phone_norm is a generated column over client_phone,
+// and calls, texts and Google leads find their job through it.
+// No number in the payload (keys missing, or all empty) = leave the column
+// alone: webhooks drop keys, and a dropped key must never wipe a stored phone.
+const CLIENT_PHONE_KEYS = ['parent_mobile_phone', 'parent_home_phone', 'parent_work_phone'];
+function clientPhoneCol(job) {
+  if (!job || typeof job !== 'object') return {};
+  for (const k of CLIENT_PHONE_KEYS) {
+    const v = job[k];
+    if (v === undefined || v === null) continue;
+    // A phone with no digit in it ("", " ", "n/a") is not a number to call.
+    if (!/\d/.test(String(v))) continue;
+    return { client_phone: v };
+  }
+  return {};
+}
+
 module.exports = function mountJobSync(app, deps) {
   const { SUPABASE_URL, SUPABASE_SERVICE_KEY, jnGetJobFull, jnFetchUpdatedSince, jnJobFields, sbSelect, requireAuth, loadActor } = deps;
   // JN sales_rep user id → jobs.sales_rep_profile_id (salesRep.js); absent in tests.
@@ -119,3 +140,5 @@ module.exports = function mountJobSync(app, deps) {
 };
 
 module.exports.descriptionCol = descriptionCol;
+module.exports.clientPhoneCol = clientPhoneCol;
+module.exports.CLIENT_PHONE_KEYS = CLIENT_PHONE_KEYS;

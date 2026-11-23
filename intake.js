@@ -568,7 +568,7 @@ module.exports = function mountIntake(app, deps) {
     let base = isCommercial ? titleCase(c.business_name) : `${titleCase(c.first_name)} ${titleCase(c.last_name)}`.trim();
 
     if (contactJnId) {
-      const r = await jnSendJson('GET', `contacts/${enc(contactJnId)}?fields=jnid,display_name,first_name,last_name,company,mobile_phone,email`);
+      const r = await jnSendJson('GET', `contacts/${enc(contactJnId)}?fields=jnid,display_name,first_name,last_name,company,mobile_phone,home_phone,work_phone,email`);
       if (!r.ok || !r.body) throw httpError(400, 'VALIDATION', 'Linked contact not found in JobNimbus', { field: 'link_contact_jn_id' });
       contactDisplayName = r.body.display_name || base;
       if (!base) {
@@ -576,7 +576,8 @@ module.exports = function mountIntake(app, deps) {
         base = `${titleCase(r.body.first_name)} ${titleCase(r.body.last_name)}`.trim()
           || titleCase(r.body.company) || String(r.body.display_name || '').replace(TRAILING_PAREN_RE, '').trim();
       }
-      if (!c.first_name && r.body.first_name) { c.first_name = r.body.first_name; c.last_name = r.body.last_name || ''; c.phone = c.phone || r.body.mobile_phone || ''; c.email = c.email || r.body.email || ''; }
+      // Linked contact's phone: mobile, else home, else work (same order as jobSync.clientPhoneCol).
+      if (!c.first_name && r.body.first_name) { c.first_name = r.body.first_name; c.last_name = r.body.last_name || ''; c.phone = c.phone || r.body.mobile_phone || r.body.home_phone || r.body.work_phone || ''; c.email = c.email || r.body.email || ''; }
       step('contact-linked', { contactJnId });
     } else {
       const candidates = nameCandidates(base, clean(loc.contact_name_suffix), abbr);
