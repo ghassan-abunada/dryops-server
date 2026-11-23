@@ -44,13 +44,19 @@ test('mergeProfiles: an account under two managers is one row carrying both', ()
   assert.deepStrictEqual(out.map((r) => [r.account_id, r.manager_ids]), [['5', ['900', '901']], ['6', ['900']]]);
 });
 
-function memoryDb({ missing = false } = {}) {
+/** `excluded` = account ids marked as another company's; `noOverrides` = that table has not been created. */
+function memoryDb({ missing = false, excluded = [], noOverrides = false } = {}) {
   const rows = new Map();
   const writes = [];
   return {
     rows, writes,
     async select(table, query) {
       if (missing) throw new Error(`${table} select 404`);
+      if (table === 'lsa_account_overrides') {
+        if (noOverrides) throw new Error(`${table} select 404`);
+        assert.match(query, /is_excluded=is\.true/);
+        return excluded.map((account_id) => ({ account_id }));
+      }
       const day = /day=eq\.([\d-]+)/.exec(query);
       return [...rows.values()].filter((r) => !day || r.day === day[1]).slice(0, 1).map((r) => ({ day: r.day }));
     },
@@ -103,6 +109,32 @@ test('syncProfiles: every manager, the 30-day window, pages followed, one row pe
   assert.strictEqual(await sync.storedToday('2026-11-23'), true);
   assert.strictEqual(await sync.storedToday('2026-11-24'), false);
   assert.strictEqual(sync.status().last.day, '2026-11-23');
+});
+
+test("syncProfiles: an account marked as another company's is dropped before anything is stored, and counted", async () => {
+  const g = () => google({ reports: { 900: [report('11'), report('12')], 901: [report('12'), report('13')] } });
+  // The override may carry dashes; Google's report never does.
+  const db = memoryDb({ excluded: ['12', '555-000-1111'] });
+  const s = await make(db, g()).syncProfiles();
+  assert.deepStrictEqual([s.error, s.accounts, s.excluded_accounts, s.excluded_list, s.with_reviews, s.stored], [null, 2, 1, 'ok', 2, 2]);
+  assert.deepStrictEqual([...db.rows.keys()].sort(), ['11|2026-11-23', '13|2026-11-23']);
+  assert.ok(!db.writes.flat().some((r) => r.account_id === '12'));
+  const dry = await make(memoryDb({ excluded: ['12'] }), g()).syncProfiles({ dryRun: true });
+  assert.deepStrictEqual([dry.accounts, dry.excluded_accounts, dry.stored], [2, 1, 0]);
+  // Every account of the day is theirs: nothing to store, and no error.
+  const all = memoryDb({ excluded: ['11', '12', '13'] });
+  const none = await make(all, g()).syncProfiles();
+  assert.deepStrictEqual([none.error, none.accounts, none.excluded_accounts, none.stored, all.writes.length], [null, 0, 3, 0, 0]);
+});
+
+test('syncProfiles: when lsa_account_overrides is missing the run goes on, skips nobody and says so', async () => {
+  const db = memoryDb({ noOverrides: true });
+  const warned = [];
+  const g = google({ reports: { 900: [report('11'), report('12')] } });
+  const s = await make(db, g, { log: { ...quiet, warn: (m) => warned.push(m) } }).syncProfiles();
+  assert.deepStrictEqual([s.error, s.accounts, s.excluded_accounts, s.stored], [null, 2, 0, 2]);
+  assert.match(s.excluded_list, /^unavailable: lsa_account_overrides select 404/);
+  assert.strictEqual(warned.length, 1);
 });
 
 test('syncProfiles: a passing 403 or 500 is retried; a manager that keeps failing is recorded and the rest are stored', async () => {
