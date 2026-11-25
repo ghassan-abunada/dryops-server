@@ -165,7 +165,7 @@ function equipmentRows(report, demo) {
     if (sized && row.Dehumidifier) row.Dehumidifier = `${row.Dehumidifier} (${sized})`;
     rows.push(row);
   }
-  if (rows.length) { const t = { room: 'Left on site', _bold: true }; for (const k of demo.EQUIPMENT) t[k] = total[k] ? String(total[k]) : ''; rows.push(t); }
+  if (rows.length) { const t = { room: 'Total', _bold: true }; for (const k of demo.EQUIPMENT) t[k] = total[k] ? String(total[k]) : ''; rows.push(t); }
   return rows;
 }
 

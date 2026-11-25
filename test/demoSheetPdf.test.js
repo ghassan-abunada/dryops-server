@@ -102,7 +102,7 @@ test('site work, equipment, checklist and time on site', () => {
   assert.deepStrictEqual([day.techs, day.after_hours], [3, true]);
   assert.deepStrictEqual(day.equipment, [
     { room: 'Kitchen', 'Air Mover': '4', Dehumidifier: '2 (1 large)', 'Air Scrubber': '1', 'Drying Mats': '' },
-    { room: 'Left on site', _bold: true, 'Air Mover': '4', Dehumidifier: '2', 'Air Scrubber': '1', 'Drying Mats': '' },
+    { room: 'Total', _bold: true, 'Air Mover': '4', Dehumidifier: '2', 'Air Scrubber': '1', 'Drying Mats': '' },
   ]);
   assert.deepStrictEqual(day.checklist.filter((c) => c[2]).map((c) => c[0]), ['Sketch after']);
   assert.strictEqual(hoursBetween('15:00', '09:00'), null);
