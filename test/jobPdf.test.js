@@ -49,7 +49,8 @@ function setup(state = {}) {
     if (q.startsWith('estimate_docs?')) return st.estimate && q.includes(`id=eq.${st.estimate.id}`) ? [st.estimate] : [];
     if (q.startsWith('estimate_versions?')) return st.version && q.includes(`revision=eq.${st.version.revision}`) ? [st.version] : [];
     if (q.startsWith('estimate_approvals?')) return st.approvals;
-    if (q.startsWith('documents?')) return [{ id: 'doc-row', storage_url: 'reselected', type: 'drying_log', name: 'x' }];
+    if (q.startsWith('inspections?')) return st.demoVisits || [];
+    if (q.startsWith('documents?')) return st.documents || [{ id: 'doc-row', storage_url: 'reselected', type: 'drying_log', name: 'x' }];
     return [];
   };
   const sbInsert = async (t, row) => { writes.push([t, row]); return st.insertReturns === 'empty' ? undefined : { id: 'd-1', ...row }; };
@@ -63,7 +64,7 @@ function setup(state = {}) {
   const requireAuth = (req, res, next) => { if (!req.headers || !req.headers.authorization) return res.status(401).json({ error: 'Missing bearer token' }); req.userId = req.headers.authorization.replace('Bearer ', ''); next(); };
   const loadActor = async (req) => st.actors[req.userId] || null;
   const now = () => new Date('2026-06-14T12:00:00Z');
-  const api = mount(app, { requireAuth, loadActor, sbGet, sbInsert, jnUploadFile, jnAddNote, locationLogoUrl: async () => null, logoPngFromUrl: async () => null, SUPABASE_URL: 'https://sb.test', SUPABASE_SERVICE_KEY: 'svc', FILE_LINK_SECRET: SECRET, fetchFn, now });
+  const api = mount(app, { requireAuth, loadActor, sbGet, sbInsert, jnUploadFile, jnAddNote, locationLogoUrl: async () => null, logoPngFromUrl: async () => null, SUPABASE_URL: 'https://sb.test', SUPABASE_SERVICE_KEY: 'svc', FILE_LINK_SECRET: SECRET, demo: st.demo || null, fetchFn, now });
   async function call(method, { as, kind = 'drying-log', job = JOB, query = {}, body: b = null } = {}) {
     const res = { statusCode: 200, headers: {}, body: undefined, status(s) { this.statusCode = s; return this; }, json(j) { this.body = j; this.sent = true; return this; }, set(k, v) { this.headers[k] = v; return this; }, send(d) { this.body = d; this.sent = true; return this; } };
     const req = { params: { id: job, kind }, query, body: b, headers: as ? { authorization: `Bearer ${as}` } : {} };
@@ -92,8 +93,9 @@ test('pure helpers: params, render key, filenames, roles', () => {
   assert.strictEqual(filenameFor('invoice', { name: 'Smith/Jones: Rebuild' }, { number: 1 }), 'Invoice INV-1 - Smith Jones Rebuild.pdf');
   assert.strictEqual(canSave({ role: 'expansion_manager' }), true);
   assert.strictEqual(canSave({ role: 'technician' }), false);
-  assert.deepStrictEqual(KINDS, ['drying-log', 'mitigation-report', 'estimate', 'invoice']);
-  assert.deepStrictEqual(Object.values(DOC_TYPE), ['drying_log', 'mitigation_report', 'estimate', 'invoice']);
+  assert.deepStrictEqual(KINDS, ['drying-log', 'mitigation-report', 'demo-sheet', 'estimate', 'invoice']);
+  assert.deepStrictEqual(Object.values(DOC_TYPE), ['drying_log', 'mitigation_report', 'demo_sheet', 'estimate', 'invoice']);
+  assert.strictEqual(filenameFor('demo-sheet', job, { date: '2026-06-13' }), 'Demo Sheet - Maria Delgado - 2026-06-13.pdf');
   assert.ok(JSON_LIMIT_PATH.test(`/jobs/${JOB}/pdf/drying-log`));
   assert.ok(!JSON_LIMIT_PATH.test(`/jobs/${JOB}/files`));
 });
@@ -245,4 +247,71 @@ test('estimate / invoice: doc_id required, kind must match, pricing mismatch is 
   assert.strictEqual(ir.body.filename, 'Invoice INV-1 - Maria Delgado.pdf');
   assert.strictEqual(inv.jn[0][2], 'Invoice INV-1 - Maria Delgado.pdf');
   assert.match(inv.jn[1][2], /^Invoice INV-1 attached · total \$678\.10 · balance due \$578\.10\./);
+});
+
+// ── Demo sheet ───────────────────────────────────────────────────────────────
+// The report's quantity rules live in server.js (side effects at load), so the
+// test slices them out of the source the way demoReport.test.js does.
+const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const demoDeps = new Function(`${serverSrc.slice(serverSrc.indexOf('// ── Post-demo report'), serverSrc.indexOf('// The demo sheet PDF (jobPdf.js fileDemoSheet)'))}\nreturn demoSheetDeps();`)();
+const demoVisit = (over = {}) => ({
+  id: 'v-1', scheduled_date: '2026-06-13', status: 'completed', demo_report_by_name: 'Sam Tech', demo_report_submitted_at: '2026-06-13T20:00:00Z',
+  demo_report: {
+    v: 1, pre_docusketch: true, post_docusketch: true, equipment_staged: 'moved', antimicrobial: true, cleaned_floors_cavities: true, equipment_reset: true,
+    photos_detailed: true, photos_wide: true, photo_count: 40, completed_time: '15:30', notes: null,
+    rooms: [{
+      name: 'Kitchen', profile: 'kitchen', dims: { length_ft: 12, width_ft: 10, ceiling_ft: 8 },
+      flooring: { removed: true, types: ['LVP/LVT'], sqft: null }, baseboard: { kind: 'full_perimeter', lf: null },
+      drywall: { kind: 'flood_cut_2ft', perimeter: true, lf: null, sqft: null, insulation_removed: true },
+      cabinets: { removed: ['Base cabinets'], lf: { 'Base cabinets': 10 } }, appliances: ['Dishwasher'], cabinets_removed: true, appliances_detached: true,
+      special_work: null, equipment_left: { 'Air Mover': 4, Dehumidifier: 1, 'Air Scrubber': 0, 'Drying Mats': 0 },
+    }],
+  },
+  ...over,
+});
+
+test('demo sheet: 409 without a post-demo report; renders from the demo visits; any role in scope may read', async () => {
+  const none = setup({ demo: demoDeps });
+  const r = await none.call('POST', { as: 'admin', kind: 'demo-sheet', body: {} });
+  assert.strictEqual(r.statusCode, 409);
+  assert.strictEqual(r.body.needs_demo_report, true);
+  const { call } = setup({ demo: demoDeps, demoVisits: [demoVisit()] });
+  const ok = await call('POST', { as: 'tech', kind: 'demo-sheet', body: {} });
+  assert.strictEqual(ok.statusCode, 200);
+  assert.strictEqual(ok.body.filename, 'Demo Sheet - Maria Delgado - 2026-06-13.pdf');
+  assert.strictEqual(ok.body.pages, 1);
+  assert.strictEqual(ok.body.visits, 1);
+  assert.match(ok.body.pdf_url, new RegExp(`^/jobs/${JOB}/pdf/demo-sheet\\?rid=`));
+  assert.strictEqual((await call('POST', { as: 'techElsewhere', kind: 'demo-sheet', body: {} })).statusCode, 403);
+  assert.strictEqual((await call('POST', { as: 'tech', kind: 'demo-sheet', body: { jn: true } })).statusCode, 403);
+});
+
+test('fileDemoSheet: files to JobNimbus and Documents once, and skips while the sheet on file is current', async () => {
+  const a = setup({ demo: demoDeps, demoVisits: [demoVisit()], documents: [] });
+  const out = await a.api.fileDemoSheet(JOB, { by: 'Sam Tech' });
+  assert.strictEqual(out.ok, true);
+  assert.strictEqual(out.jn_file_id, 'jn-file-1');
+  assert.deepStrictEqual(a.jn.map((x) => [x[0], x[1], x[2]]), [['file', 'jn-job', 'Demo Sheet - Maria Delgado - 2026-06-13.pdf']]);
+  assert.match(a.jn[0][4], /^Demo Sheet generated by DryOps \(Sam Tech\): 1 room · 88 SF drywall · 120 SF flooring$/);
+  const row = a.writes.find(([t]) => t === 'documents')[1];
+  assert.strictEqual(row.type, 'demo_sheet');
+  assert.strictEqual(row.jn_file_id, 'jn-file-1');
+
+  // already filed after the report was submitted → nothing new
+  const b = setup({ demo: demoDeps, demoVisits: [demoVisit()], documents: [{ id: 'd', created_at: '2026-06-13T20:05:00Z', jn_file_id: 'jn-file-0' }] });
+  assert.deepStrictEqual(await b.api.fileDemoSheet(JOB), { ok: true, skipped: 'current' });
+  assert.strictEqual(b.jn.length, 0);
+  // the report changed after the last sheet, or that sheet never reached JobNimbus → file again
+  const c = setup({ demo: demoDeps, demoVisits: [demoVisit({ demo_report_submitted_at: '2026-06-13T21:00:00Z' })], documents: [{ id: 'd', created_at: '2026-06-13T20:05:00Z', jn_file_id: 'jn-file-0' }] });
+  assert.strictEqual((await c.api.fileDemoSheet(JOB)).jn_file_id, 'jn-file-1');
+  const d = setup({ demo: demoDeps, demoVisits: [demoVisit()], documents: [{ id: 'd', created_at: '2026-06-13T20:05:00Z', jn_file_id: null }] });
+  assert.strictEqual((await d.api.fileDemoSheet(JOB)).jn_file_id, 'jn-file-1');
+  // a JobNimbus failure still saves the document, without a file id
+  const e = setup({ demo: demoDeps, demoVisits: [demoVisit()], documents: [], jnFails: true });
+  const failed = await e.api.fileDemoSheet(JOB);
+  assert.strictEqual(failed.jn_file_id, null);
+  assert.strictEqual(failed.jn_error, 'JN down');
+  assert.strictEqual(e.writes.find(([t]) => t === 'documents')[1].jn_file_id, null);
+  // no report → nothing to file
+  assert.deepStrictEqual(await setup({ demo: demoDeps }).api.fileDemoSheet(JOB), { ok: false, reason: 'no post-demo report' });
 });
