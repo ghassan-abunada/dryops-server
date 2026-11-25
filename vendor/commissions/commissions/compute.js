@@ -10,12 +10,13 @@ const rules_1 = require("./rules");
 const payroll_1 = require("./payroll");
 const payout_1 = require("./payout");
 /**
- * @param photo JobNimbus "a photo by the rep" answers for unlanded after-hours jobs,
- *   by job id. A job missing from it is treated as not checked (no credit taken).
+ * @param photo what JobNimbus shows of the rep's photos, by job id: whether he
+ *   uploaded one and when the first went up. A job missing from it is treated as
+ *   not checked (no credit taken, and its after hours falls back to the call time).
  */
 function computePayout(feed, photo = {}) {
     const latest = (0, rules_1.latestApproved)(feed.corrections);
-    const jobs = (0, rules_1.includedJobs)(feed.jobs, latest).map(j => (0, rules_1.computeJob)(j, latest, photo[j.id]));
+    const jobs = (0, rules_1.includedJobs)(feed.jobs, latest).map(j => (0, rules_1.computeJob)(j, latest, photo[j.id], feed.rep?.timezone));
     const lines = [...jobs.flatMap(j => j.lines), ...(0, rules_1.manualLines)(feed.corrections)];
     // A response line we can't verify right now must not turn into a credit.
     const unverified = new Set(jobs.filter(j => j.flags.includes('photo_unchecked')).map(j => `job:${j.job.id}:after_hours_response`));

@@ -1,10 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ARRIVAL_WINDOW_HOURS = exports.isSoldStage = exports.LINE_LABEL = exports.NON_OPPORTUNITY = exports.CLOSED_STATUSES = exports.WORK_END_MIN = exports.WORK_START_MIN = exports.AMOUNTS = void 0;
+exports.photoByRepOf = exports.ARRIVAL_WINDOW_HOURS = exports.isSoldStage = exports.LINE_LABEL = exports.NON_OPPORTUNITY = exports.CLOSED_STATUSES = exports.WORK_END_MIN = exports.WORK_START_MIN = exports.AMOUNTS = void 0;
 exports.latestApproved = latestApproved;
 exports.hasClaimNumber = hasClaimNumber;
 exports.jobTypeOf = jobTypeOf;
 exports.isAfterHours = isAfterHours;
+exports.localParts = localParts;
 exports.responseClock = responseClock;
 exports.afterHoursOf = afterHoursOf;
 exports.largeJobBonus = largeJobBonus;
@@ -13,6 +14,7 @@ exports.computeJob = computeJob;
 exports.manualLines = manualLines;
 exports.includedJobs = includedJobs;
 exports.isUnlandedAfterHours = isUnlandedAfterHours;
+exports.needsPhotoLookup = needsPhotoLookup;
 // Commission rules: the Project Manager Compensation agreement (effective
 // 2026-11-01) as a pure function from a job's facts to its bonus lines. Facts come
 // from commission_feed; an approved correction overrides a fact, never a dollar
@@ -85,29 +87,74 @@ function isAfterHours(dow, minutes) {
     return minutes < exports.WORK_START_MIN || minutes >= exports.WORK_END_MIN;
 }
 /**
- * An arrival answers the lead only when it comes within this long of it. The
- * phone is seen at the address whenever the app is open there, so without a
- * limit a monitor visit on Saturday would turn Monday's job into an after-hours one.
+ * An arrival (or a first photo) answers the lead only when it comes within this
+ * long of it. The phone is seen at the address whenever the app is open there,
+ * so without a limit a monitor visit on Saturday would turn Monday's job into an
+ * after-hours one.
  */
 exports.ARRIVAL_WINDOW_HOURS = 72;
+const photoByRepOf = (p) => p === undefined ? undefined : typeof p === 'boolean' ? p : p.byRep;
+exports.photoByRepOf = photoByRepOf;
+const photoAtOf = (p) => p && typeof p === 'object' ? p.firstAt : null;
+const DOW = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+/** Wall-clock parts of an instant in a timezone, shaped like the feed's lead_* fields. null when either is unusable. */
+function localParts(iso, timeZone) {
+    const at = new Date(iso);
+    if (Number.isNaN(at.getTime()))
+        return null;
+    try {
+        const parts = {};
+        for (const p of new Intl.DateTimeFormat('en-US', {
+            timeZone, weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+        }).formatToParts(at))
+            parts[p.type] = p.value;
+        const dow = DOW[parts.weekday];
+        const hour = Number(parts.hour) % 24;
+        const minute = Number(parts.minute);
+        if (!dow || !Number.isFinite(hour) || !Number.isFinite(minute))
+            return null;
+        return {
+            local: `${parts.year}-${parts.month}-${parts.day}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
+            dow, minutes: hour * 60 + minute,
+        };
+    }
+    catch {
+        return null;
+    }
+}
+const withinWindow = (leadAt, at) => {
+    const hours = (Date.parse(at) - Date.parse(leadAt)) / 3600000;
+    return Number.isFinite(hours) && hours <= exports.ARRIVAL_WINDOW_HOURS;
+};
 /**
  * When the rep responded (owner 2026-11-25): after hours goes by when he reached
- * the job address, not by when the call came in. A job with no arrival on record
- * (app not opened on site, no pin on the job, a job from before arrivals were
- * recorded) keeps the lead time, so nothing already paid moves.
+ * the job address, not by when the call came in. In order:
+ *   1. his phone at the address (job_arrivals),
+ *   2. no location: his first photo on the job, from DryOps (first_photo_at) or
+ *      JobNimbus (`photo`), whichever is earlier,
+ *   3. neither: the lead time, as before.
+ * @param timeZone the rep's timezone, needed to read a photo's time; without it step 2 is skipped.
  */
-function responseClock(job) {
+function responseClock(job, photo, timeZone) {
     const lead = { source: job.lead_source, local: job.lead_local, dow: job.lead_dow, minutes: job.lead_minutes, lateArrival: false };
-    if (!job.arrived_at || !job.arrived_local || job.arrived_dow == null || job.arrived_minutes == null)
-        return lead;
-    const hours = (Date.parse(job.arrived_at) - Date.parse(job.lead_at)) / 3600000;
-    if (!Number.isFinite(hours) || hours > exports.ARRIVAL_WINDOW_HOURS)
-        return { ...lead, lateArrival: true };
-    return { source: 'arrival', local: job.arrived_local, dow: job.arrived_dow, minutes: job.arrived_minutes, lateArrival: false };
+    const hasArrival = !!job.arrived_at && !!job.arrived_local && job.arrived_dow != null && job.arrived_minutes != null;
+    if (hasArrival && withinWindow(job.lead_at, job.arrived_at)) {
+        return { source: 'arrival', local: job.arrived_local, dow: job.arrived_dow, minutes: job.arrived_minutes, lateArrival: false };
+    }
+    const fallback = hasArrival ? { ...lead, lateArrival: true } : lead;
+    if (!timeZone)
+        return fallback;
+    const firstPhoto = [job.first_photo_at, photoAtOf(photo)]
+        .filter((t) => !!t && Number.isFinite(Date.parse(t)))
+        .sort((x, y) => Date.parse(x) - Date.parse(y))[0];
+    if (!firstPhoto || !withinWindow(job.lead_at, firstPhoto))
+        return fallback;
+    const parts = localParts(firstPhoto, timeZone);
+    return parts ? { source: 'photo', ...parts, lateArrival: fallback.lateArrival } : fallback;
 }
 /** After hours as the job's own facts say, before any correction. */
-function afterHoursOf(job) {
-    const c = responseClock(job);
+function afterHoursOf(job, photo, timeZone) {
+    const c = responseClock(job, photo, timeZone);
     return isAfterHours(c.dow, c.minutes);
 }
 /** Each FULL $5,000 above the threshold. */
@@ -131,10 +178,13 @@ function jobLabel(job) {
     return job.number ? `#${job.number} ${who}` : who;
 }
 /**
- * @param jnPhotoByRep did JobNimbus show a photo uploaded by the rep? undefined =
- *   not looked up / the lookup failed. Only asked for unlanded after-hours jobs.
+ * @param photo what JobNimbus shows of the rep's photos on the job. undefined =
+ *   not looked up / the lookup failed.
+ * @param timeZone the rep's timezone (reads the first photo's time).
  */
-function computeJob(job, latest, jnPhotoByRep) {
+function computeJob(job, latest, photo, timeZone) {
+    const jnPhotoByRep = (0, exports.photoByRepOf)(photo);
+    const clock = responseClock(job, photo, timeZone);
     const corrected = [];
     function fact(field, derived) {
         const o = override(latest, job.id, field);
@@ -146,7 +196,7 @@ function computeJob(job, latest, jnPhotoByRep) {
     const landed = fact('landed', (0, format_1.isLandedStage)(job.stage));
     const jobType = fact('job_type', jobTypeOf(job.insurance_type, job.claim_number));
     const noClaim = job.insurance_type === 'Insurance' && job.claim_number !== undefined && !hasClaimNumber(job.claim_number) && !corrected.includes('job_type');
-    const afterHours = fact('after_hours', afterHoursOf(job));
+    const afterHours = fact('after_hours', isAfterHours(clock.dow, clock.minutes));
     const respondedDerived = job.photo_by_rep ? true : jnPhotoByRep === undefined ? null : jnPhotoByRep;
     const responded = fact('responded', respondedDerived);
     const soldPackout = (job.packouts || []).some(p => (0, exports.isSoldStage)(p.stage));
@@ -204,6 +254,7 @@ function computeJob(job, latest, jnPhotoByRep) {
     }
     return {
         job,
+        clock,
         facts: { landed, jobType, afterHours, responded, packoutSold, closed, revenue, corrected },
         lines,
         flags,
@@ -237,8 +288,20 @@ function includedJobs(jobs, latest) {
         return j.rep_match;
     });
 }
-function isUnlandedAfterHours(job, latest) {
+function isUnlandedAfterHours(job, latest, photo, timeZone) {
     const landed = latest.get(`${job.id}:landed`)?.value ?? (0, format_1.isLandedStage)(job.stage);
-    const after = latest.get(`${job.id}:after_hours`)?.value ?? afterHoursOf(job);
+    const after = latest.get(`${job.id}:after_hours`)?.value ?? afterHoursOf(job, photo, timeZone);
     return !landed && !!after;
+}
+/**
+ * Does this job need JobNimbus asked about the rep's photos? Yes when no location
+ * arrival settles the response time (the first photo is the backup), and for an
+ * unlanded after-hours job, where a photo is the proof he responded.
+ */
+function needsPhotoLookup(job, latest) {
+    if (!job.jn_id)
+        return false;
+    if (responseClock(job).source !== 'arrival')
+        return true;
+    return !job.photo_by_rep && isUnlandedAfterHours(job, latest);
 }
