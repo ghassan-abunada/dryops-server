@@ -1,10 +1,12 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.isSoldStage = exports.LINE_LABEL = exports.NON_OPPORTUNITY = exports.CLOSED_STATUSES = exports.WORK_END_MIN = exports.WORK_START_MIN = exports.AMOUNTS = void 0;
+exports.ARRIVAL_WINDOW_HOURS = exports.isSoldStage = exports.LINE_LABEL = exports.NON_OPPORTUNITY = exports.CLOSED_STATUSES = exports.WORK_END_MIN = exports.WORK_START_MIN = exports.AMOUNTS = void 0;
 exports.latestApproved = latestApproved;
 exports.hasClaimNumber = hasClaimNumber;
 exports.jobTypeOf = jobTypeOf;
 exports.isAfterHours = isAfterHours;
+exports.responseClock = responseClock;
+exports.afterHoursOf = afterHoursOf;
 exports.largeJobBonus = largeJobBonus;
 exports.jobLabel = jobLabel;
 exports.computeJob = computeJob;
@@ -82,6 +84,32 @@ function isAfterHours(dow, minutes) {
         return true;
     return minutes < exports.WORK_START_MIN || minutes >= exports.WORK_END_MIN;
 }
+/**
+ * An arrival answers the lead only when it comes within this long of it. The
+ * phone is seen at the address whenever the app is open there, so without a
+ * limit a monitor visit on Saturday would turn Monday's job into an after-hours one.
+ */
+exports.ARRIVAL_WINDOW_HOURS = 72;
+/**
+ * When the rep responded (owner 2026-11-25): after hours goes by when he reached
+ * the job address, not by when the call came in. A job with no arrival on record
+ * (app not opened on site, no pin on the job, a job from before arrivals were
+ * recorded) keeps the lead time, so nothing already paid moves.
+ */
+function responseClock(job) {
+    const lead = { source: job.lead_source, local: job.lead_local, dow: job.lead_dow, minutes: job.lead_minutes, lateArrival: false };
+    if (!job.arrived_at || !job.arrived_local || job.arrived_dow == null || job.arrived_minutes == null)
+        return lead;
+    const hours = (Date.parse(job.arrived_at) - Date.parse(job.lead_at)) / 3600000;
+    if (!Number.isFinite(hours) || hours > exports.ARRIVAL_WINDOW_HOURS)
+        return { ...lead, lateArrival: true };
+    return { source: 'arrival', local: job.arrived_local, dow: job.arrived_dow, minutes: job.arrived_minutes, lateArrival: false };
+}
+/** After hours as the job's own facts say, before any correction. */
+function afterHoursOf(job) {
+    const c = responseClock(job);
+    return isAfterHours(c.dow, c.minutes);
+}
 /** Each FULL $5,000 above the threshold. */
 function largeJobBonus(jobType, revenue) {
     if (!jobType)
@@ -118,7 +146,7 @@ function computeJob(job, latest, jnPhotoByRep) {
     const landed = fact('landed', (0, format_1.isLandedStage)(job.stage));
     const jobType = fact('job_type', jobTypeOf(job.insurance_type, job.claim_number));
     const noClaim = job.insurance_type === 'Insurance' && job.claim_number !== undefined && !hasClaimNumber(job.claim_number) && !corrected.includes('job_type');
-    const afterHours = fact('after_hours', isAfterHours(job.lead_dow, job.lead_minutes));
+    const afterHours = fact('after_hours', afterHoursOf(job));
     const respondedDerived = job.photo_by_rep ? true : jnPhotoByRep === undefined ? null : jnPhotoByRep;
     const responded = fact('responded', respondedDerived);
     const soldPackout = (job.packouts || []).some(p => (0, exports.isSoldStage)(p.stage));
@@ -211,6 +239,6 @@ function includedJobs(jobs, latest) {
 }
 function isUnlandedAfterHours(job, latest) {
     const landed = latest.get(`${job.id}:landed`)?.value ?? (0, format_1.isLandedStage)(job.stage);
-    const after = latest.get(`${job.id}:after_hours`)?.value ?? isAfterHours(job.lead_dow, job.lead_minutes);
+    const after = latest.get(`${job.id}:after_hours`)?.value ?? afterHoursOf(job);
     return !landed && !!after;
 }

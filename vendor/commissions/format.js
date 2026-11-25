@@ -91,7 +91,7 @@ function tidySpaces(s) {
  *   "24 Hour Flood Pros of Kansas City"            → "24 Kansas City"
  *   "24 Hour Flood Pros - Tulsa, OK"               → "24 Tulsa, OK"
  *   "Gurr Brothers Construction of Texas (Dallas)" → "GBC Texas (Dallas)"
- *   "Utah Water and Fire"                          → "Utah WAF"
+ *   "Utah Water and Fire"                          → "Utah W&F"
  *   "A1 Restoration of Dallas"                     → "A1 of Dallas"
  */
 function shortLocationName(name) {
@@ -102,7 +102,11 @@ function shortLocationName(name) {
     // 1) "24 Hour Flood Pros of X" / "24 Hour Flood Pros - X" → "24 X".
     //    A bare "24 Hour Flood Pros" (optionally with an ", LLC"-style suffix and
     //    nothing else after it) is left alone — there's no city part to keep.
-    const floodPros = out.match(/^24\s+Hour\s+Flood\s+Pros(?:,?\s*LLC\.?)?(?:\s+of\s+|\s*[-–—]\s*)(.+)$/i);
+    // 0) Legal suffix: "…, LLC." / "… LLC" is dropped wherever it sits.
+    out = tidySpaces(out.replace(/,?\s*\bL\.?L\.?C\b\.?/gi, ' '));
+    //    "Hour" and the "of" / dash are optional: "24 Flood Pros of Albuquerque",
+    //    "24 Hour Flood Pros El Paso - Recon" → "24 El Paso - Recon".
+    const floodPros = out.match(/^24\s+(?:Hour\s+)?Flood\s+Pros(?:\s+of\s+|\s*[-–—]\s*|\s+)(.+)$/i);
     if (floodPros) {
         out = `24 ${floodPros[1].trim()}`;
     }
@@ -115,10 +119,25 @@ function shortLocationName(name) {
     // 3) "American Fire and Flood" → "AFF"; "Water and Fire"/"Water & Fire" → "W&F".
     out = out.replace(/\bAmerican\s+Fire\s+(?:and|&)\s+Flood(?:\s+of\b)?/gi, 'AFF');
     out = out.replace(/\bWater\s+(?:and|&)\s+Fire\b/gi, 'W&F');
+    //    "American Packout of Dallas" → "AP Dallas" (a bare "American Packout" stays).
+    out = out.replace(/\bAmerican\s+Packout(?:\s+of\b|\s*[-–—])?(?=\s*\S)/gi, 'AP ');
+    //    "Lonestar Fire & Flood of Austin" → "LFF Austin".
+    out = out.replace(/\bLone\s?star\s+Fire\s+(?:and|&)\s+Flood\b/gi, 'LFF');
+    //    "Prime Packouts of Dallas" → "PP Dallas" (a bare "Prime Packouts" stays).
+    out = out.replace(/\bPrime\s+Packouts?\b(?:\s+of\b|\s*[-–—])?(?=\s*\S)/gi, 'PP ');
+    //    Patriot brands: "Patriot Abatement of Dallas" → "PAT ABT Dallas",
+    //    "Patriot Restoration of Boston" → "PAT Boston", "Patriot Packout of Arizona" → "PAT Packout Arizona".
+    out = out.replace(/\bPatriot\s+Abatement\b/gi, 'PAT ABT');
+    out = out.replace(/\bPatriot(?=\s+(?:Restoration|Packout)\b)/gi, 'PAT');
     // 4) Drop the word "Restoration" (e.g. "Salt River Restoration, LLC." → "Salt River, LLC.").
-    out = out.replace(/\bRestoration\b/gi, '');
+    //    "and Restoration" goes as a pair ("Priority Plumbing and Restoration of Dallas"
+    //    → "Priority Plumbing Dallas"). The word stays where it IS the brand: leading
+    //    ("Restoration Kings"), after "Mr." or before "Team".
+    out = out.replace(/\s+(?:and|&)\s+Restoration\b/gi, '');
+    out = out.replace(/\bRestoration\b(?!\s+Team\b)/gi, (m, off, str) => (off === 0 || /\bMr\.?\s+$/i.test(str.slice(0, off)) ? m : ''));
     // 5) Drop connecting "of" (e.g. "24 X of Y" → "24 X Y", "A1 of Dallas" → "A1 Dallas").
-    out = out.replace(/\bof\b/gi, ' ');
+    //    "of the" goes together: "Strong of the Rio Grande Valley" → "Strong Rio Grande Valley".
+    out = out.replace(/\bof(?:\s+the)?\b/gi, ' ');
     // Cleanup: collapse spaces, fix " ," and strip a stray leading/trailing comma.
     out = tidySpaces(out);
     out = out.replace(/^(?:,\s*)+/i, '').replace(/(?:,)+$/i, '');
