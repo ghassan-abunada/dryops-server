@@ -15,7 +15,7 @@
 //   POST /commissions/reminder/run {"send":true} admin: send it now (logged)
 const { computePayout } = require('./vendor/commissions/commissions/compute');
 const { commissionPayday, commissionReminderDay, shortDate } = require('./vendor/commissions/commissions/payroll');
-const { LINE_LABEL, isUnlandedAfterHours, latestApproved, includedJobs } = require('./vendor/commissions/commissions/rules');
+const { LINE_LABEL, needsPhotoLookup, latestApproved, includedJobs } = require('./vendor/commissions/commissions/rules');
 const { monthLabel } = require('./vendor/commissions/commissions/payout');
 
 const TZ = 'America/Chicago';
@@ -102,17 +102,29 @@ function createReminder(deps) {
     return (u && u.email) || null;
   }
 
-  /** Did the rep upload a photo to this JobNimbus job? null when JobNimbus can't answer. */
+  /**
+   * The rep's photos on this JobNimbus job: { byRep, firstAt } with the upload time
+   * of his first one (the backup response time when no location arrival was
+   * recorded). null when JobNimbus can't answer.
+   */
   async function photoByRep(jnId, repName) {
     const want = String(repName || '').trim().toLowerCase();
     try {
+      let first = null;
+      let found = false;
       for (let from = 0; from < 2000; from += 200) {
         const j = await jnGetJson(`files?size=200&from=${from}&related=${encodeURIComponent(jnId)}`);
         const files = (j && j.files) || [];
-        if (files.some(f => (f.subtype === 'image' || String(f.content_type || '').startsWith('image/')) && String(f.created_by_name || '').trim().toLowerCase() === want)) return true;
-        if (files.length < 200) return false;
+        for (const f of files) {
+          if (!(f.subtype === 'image' || String(f.content_type || '').startsWith('image/'))) continue;
+          if (String(f.created_by_name || '').trim().toLowerCase() !== want) continue;
+          found = true;
+          const at = Number(f.date_created);
+          if (Number.isFinite(at) && at > 0 && (first == null || at < first)) first = at;
+        }
+        if (files.length < 200) break;
       }
-      return false;
+      return { byRep: found, firstAt: first == null ? null : new Date(first * 1000).toISOString() };
     } catch (e) { return null; }
   }
 
@@ -129,7 +141,7 @@ function createReminder(deps) {
     const latest = latestApproved(feed.corrections || []);
     const photo = {};
     for (const job of includedJobs(feed.jobs || [], latest)) {
-      if (!job.jn_id || job.photo_by_rep || !isUnlandedAfterHours(job, latest)) continue;
+      if (!needsPhotoLookup(job, latest)) continue;
       const answer = await photoByRep(job.jn_id, rep.rep_name);
       if (answer !== null) photo[job.id] = answer;
     }
