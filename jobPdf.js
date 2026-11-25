@@ -1,12 +1,12 @@
 'use strict';
-// ── Job PDFs: drying log, mitigation report, estimate, invoice ───────────────
+// ── Job PDFs: drying log, mitigation report, demo sheet, estimate, invoice ───
 // The job page's "PDF" actions (app lib/jobPdf.ts). Renders with pdfkit from
 // what Supabase already holds — scope_sheets (reviewed sheet + DryingLog v1),
 // rooms / materials / equipment, photos, estimate_docs + estimate_versions +
 // estimate_approvals — and can save the file to the `documents` bucket (+ a
 // documents row), upload it to the job's JobNimbus files and post a note.
 //
-//   GET  /jobs/:id/pdf/:kind   kind ∈ drying-log | mitigation-report | estimate | invoice
+//   GET  /jobs/:id/pdf/:kind   kind ∈ drying-log | mitigation-report | demo-sheet | estimate | invoice
 //        ?doc_id= (estimate / invoice) &revision= (frozen estimate_versions
 //        revision; default live) &version= (scope_sheets version; default
 //        latest) &photos=none|supabase (default supabase) &disposition=
@@ -19,7 +19,10 @@
 //        pdf_url }. `drying_log` (DryingLog v1) is accepted when the job has
 //        no scope_sheets snapshot; with no snapshot and no body → 409
 //        { needs_drying_log: true }. A mitigation report without a snapshot
-//        renders without the sheet section.
+//        renders without the sheet section. A demo sheet prints the post-demo
+//        report(s) on the job's demo visits (demoSheetPdf.js); with none → 409
+//        { needs_demo_report: true }. It is also filed on its own when a demo is
+//        marked complete (fileDemoSheet, called from server.js completeVisit).
 //
 // Auth: requireAuth + intake.loadActor + the location scope rule (admin /
 // owner / executive see every job; everyone else their locations). Any role
@@ -42,12 +45,13 @@ const K = require('./pdfKit');
 const { dryingLogModel, validateDryingLog } = require('./dryingLogPdf');
 const { renderDrylogPdf, validateDrylog, drylogSummary } = require('./drylogPdf');
 const { renderMitigationReportPdf } = require('./mitigationReportPdf');
+const { renderDemoSheetPdf, demoSheetModel, demoSheetSummary } = require('./demoSheetPdf');
 const { renderEstimatePdf } = require('./estimatePdf');
 const P = require('./estimatePricing');
 
-const KINDS = ['drying-log', 'mitigation-report', 'estimate', 'invoice'];
-const DOC_TYPE = { 'drying-log': 'drying_log', 'mitigation-report': 'mitigation_report', estimate: 'estimate', invoice: 'invoice' };
-const TITLE = { 'drying-log': 'Drying Log', 'mitigation-report': 'Mitigation Report', estimate: 'Estimate', invoice: 'Invoice' };
+const KINDS = ['drying-log', 'mitigation-report', 'demo-sheet', 'estimate', 'invoice'];
+const DOC_TYPE = { 'drying-log': 'drying_log', 'mitigation-report': 'mitigation_report', 'demo-sheet': 'demo_sheet', estimate: 'estimate', invoice: 'invoice' };
+const TITLE = { 'drying-log': 'Drying Log', 'mitigation-report': 'Mitigation Report', 'demo-sheet': 'Demo Sheet', estimate: 'Estimate', invoice: 'Invoice' };
 const SAVE_ROLES = new Set(['admin', 'owner', 'expansion_manager']);
 const PHOTO_CAP = 60;
 const PHOTO_PX = 1200;
@@ -88,6 +92,7 @@ function filenameFor(kind, job, { date, number } = {}) {
   switch (kind) {
     case 'drying-log': return `Drying Log - ${client} - ${date}.pdf`;
     case 'mitigation-report': return `Mitigation Report - ${client} - ${date}.pdf`;
+    case 'demo-sheet': return `Demo Sheet - ${client} - ${date}.pdf`;
     case 'estimate': return `Estimate E-${number} - ${client}.pdf`;
     case 'invoice': return `Invoice INV-${number} - ${client}.pdf`;
     default: return `${client}.pdf`;
@@ -99,6 +104,7 @@ module.exports = function mountJobPdf(app, deps) {
   const {
     requireAuth, loadActor, sbGet, sbInsert, jnUploadFile, jnAddNote, locationLogoUrl, logoPngFromUrl, jnDownloadFile = null,
     SUPABASE_URL, SUPABASE_SERVICE_KEY, FILE_LINK_SECRET, fetchFn = (...a) => fetch(...a), sharp = null, now = () => new Date(),
+    demo = null,
   } = deps;
   const enc = encodeURIComponent;
   const secret = String(FILE_LINK_SECRET || '').trim();
@@ -160,6 +166,17 @@ module.exports = function mountJobPdf(app, deps) {
       sbGet(`equipment?room_id=in.(${ids})&select=*&order=placed_on.asc.nullsfirst,created_at.asc`),
     ]);
     return { rooms, materials: materials || [], equipment: equipment || [] };
+  }
+  /** Demo visits that carry a post-demo report, oldest first. */
+  async function loadDemoVisits(jobId) {
+    return (await sbGet(`inspections?job_id=eq.${enc(jobId)}&task_type=eq.demo&status=neq.cancelled&demo_report=not.is.null&select=id,scheduled_date,status,demo_report,demo_report_submitted_at,demo_report_by_name&order=scheduled_date.asc,created_at.asc`)) || [];
+  }
+  /** The water category (1-3) on the job's latest inspection report, or null. */
+  async function loadInspectionCategory(jobId) {
+    try {
+      const row = first(await sbGet(`inspections?job_id=eq.${enc(jobId)}&task_type=eq.inspection&status=neq.cancelled&inspection_report=not.is.null&select=category:inspection_report->category&order=scheduled_date.desc,created_at.desc&limit=1`));
+      return row && row.category != null ? row.category : null;
+    } catch (e) { warn('inspection category unavailable:', e.message); return null; }
   }
   async function loadLogo(location) {
     if (!location || !locationLogoUrl || !logoPngFromUrl) return null;
@@ -322,9 +339,21 @@ module.exports = function mountJobPdf(app, deps) {
     return { buf, filename: filenameFor(kind, job, { number: doc.number }), note: `${label} attached · total $${P.money(totals.total)}${kind === 'invoice' ? ` · balance due $${P.money(P.c2(totals.total - (Number(doc.amount_paid) || 0)))}` : ''}.`, meta: { doc_id: doc.id, revision, total: totals.total } };
   }
 
+  async function renderDemoSheet({ job, location, logoPng, visits: loaded }) {
+    if (!demo) throw new HttpError(502, { error: 'The demo sheet is not set up on this server' });
+    const visits = loaded || await loadDemoVisits(job.id);
+    if (!visits.length) throw new HttpError(409, { error: 'This job has no post-demo report yet. The sheet is made from it.', needs_demo_report: true });
+    const buf = await renderDemoSheetPdf({ job, location, logoPng, visits, demo, lossCategory: await loadInspectionCategory(job.id), now: now() });
+    const last = visits[visits.length - 1];
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(last.scheduled_date || '')) ? last.scheduled_date : todayCentral(now());
+    const summary = demoSheetSummary(demoSheetModel(visits, demo));
+    return { buf, filename: filenameFor('demo-sheet', job, { date }), note: `Demo sheet attached: ${summary}.`, summary, meta: { visits: visits.length } };
+  }
+
   async function render(kind, ctx) {
     if (kind === 'drying-log') return renderDryingLog(ctx);
     if (kind === 'mitigation-report') return renderMitigation(ctx);
+    if (kind === 'demo-sheet') return renderDemoSheet(ctx);
     return renderEstimate({ ...ctx, kind });
   }
 
@@ -413,7 +442,34 @@ module.exports = function mountJobPdf(app, deps) {
     } catch (err) { sendError(res, err); }
   });
 
-  return { renderKey, filenameFor, cacheSize: () => cache.size };
+  /**
+   * File the demo sheet on its own (no request): render it, upload it to the
+   * job's JobNimbus files and save it under Documents. Called when a demo is
+   * marked complete or its report lands on a completed demo. Does nothing
+   * when the sheet on file is already newer than the latest report, so a
+   * second "complete" never files a duplicate.
+   */
+  async function fileDemoSheet(jobId, { by = null } = {}) {
+    const job = await loadJob(jobId);
+    if (!job) return { ok: false, reason: 'job not found' };
+    const visits = await loadDemoVisits(job.id);
+    if (!visits.length) return { ok: false, reason: 'no post-demo report' };
+    const latest = visits.map((v) => Date.parse(v.demo_report_submitted_at || '')).filter(Number.isFinite).sort((a, b) => b - a)[0];
+    const prior = first(await sbGet(`documents?job_id=eq.${enc(job.id)}&type=eq.${DOC_TYPE['demo-sheet']}&select=id,created_at,jn_file_id&order=created_at.desc&limit=1`));
+    if (prior && Number.isFinite(latest) && Date.parse(prior.created_at) >= latest && (prior.jn_file_id || !job.jn_id)) return { ok: true, skipped: 'current' };
+    const location = await loadLocation(job.location_id);
+    const out = await renderDemoSheet({ job, location, logoPng: await loadLogo(location), visits });
+    let jnFileId = null, jnError = null;
+    if (job.jn_id) {
+      try { jnFileId = await jnUploadFile(job.jn_id, out.filename, out.buf, `Demo Sheet generated by DryOps${by ? ` (${by})` : ''}: ${out.summary}`); }
+      catch (e) { jnError = e.message; warn('demo sheet JN upload failed', job.jn_id, e.message); }
+    }
+    const document = await saveDocument(job, 'demo-sheet', out.filename, out.buf, jnFileId);
+    log('demo-sheet filed', job.id, `${out.buf.length}B`, jnFileId ? `jn:${jnFileId}` : `jn failed: ${jnError || 'no JobNimbus id'}`);
+    return { ok: true, filename: out.filename, document, jn_file_id: jnFileId, jn_error: jnError };
+  }
+
+  return { renderKey, filenameFor, fileDemoSheet, cacheSize: () => cache.size };
 };
 
 module.exports.KINDS = KINDS;

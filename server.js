@@ -4546,6 +4546,25 @@ function demoReportTaskLine(r) {
   const total = demoEquipmentPhrase(demoTotalEquipment(r));
   return `Post-demo report: ${n} room${n === 1 ? '' : 's'} · ${total ? `${total} left` : 'no equipment left'} · DocuSketch pre ${demoCheck(r.pre_docusketch)} post ${demoCheck(r.post_docusketch)}`;
 }
+/** What the demo sheet PDF (demoSheetPdf.js) takes from the report: the quantity rules and labels, so the sheet and the JobNimbus note cannot disagree. */
+function demoSheetDeps() {
+  return {
+    floodCutLF: demoFloodCutLF, drywallSF: demoDrywallSF, baseboardLF: demoBaseboardLF, flooringSF: demoFlooringSF,
+    DRYWALL_LABEL: DEMO_DRYWALL_LABEL, BASEBOARD_LABEL: DEMO_BASEBOARD_LABEL, STAGED_LABEL: DEMO_STAGED_LABEL,
+    COVERAGE_LABEL: DEMO_COVERAGE_LABEL, FLOOR_PROTECTION_LABEL: DEMO_FLOOR_PROTECTION_LABEL,
+    EQUIPMENT: DEMO_EQUIPMENT, EQUIPMENT_PLURAL: DEMO_EQUIPMENT_PLURAL,
+  };
+}
+
+// The demo sheet PDF (jobPdf.js fileDemoSheet) goes to the job's JobNimbus
+// files and Documents once a demo is complete and has its report: on "Mark
+// complete" at 100%, or when the report lands on an already completed demo.
+// Never blocks or fails the request that triggered it.
+let jobPdfApi = null;
+function fileDemoSheetSoon(jobId, by) {
+  if (!jobId || !jobPdfApi || !jobPdfApi.fileDemoSheet) return;
+  jobPdfApi.fileDemoSheet(jobId, { by }).catch((e) => console.warn('[demo sheet] could not file', jobId, e.message));
+}
 
 // Shared by the token route and the signed-in route.
 async function saveDemoReport(args) { return saveVisitReport({ ...args, kind: 'demo' }); }
@@ -4633,6 +4652,7 @@ async function saveVisitReport({ visitId, kind, report: raw, actor, source }) {
   // Shared draft (several technicians): remember who did which rooms, then clear it.
   await reportCollab.finish(visitId).catch((e) => console.warn('[report collab] finish failed', e.message));
   syncVisitJnTask(visitId).catch(() => {});
+  if (kind === 'demo' && visit.status === 'completed') fileDemoSheetSoon(visit.job_id, actor.name);
   return { status: 200, body: { ok: true, visit: patched && patched[0], complete: spec.isComplete(v.report), summary: spec.summarize(v.report), scope, scope_warning: scopeWarning } };
 }
 
@@ -4901,7 +4921,7 @@ async function visitNoteContext(visit, actorId) {
 
 // Shared by the token route and the signed-in route.
 async function completeVisit({ visitId, pct, note, actor, source }) {
-  const visit = await loadVisit(visitId, `id,jn_id,task_type,test_types,status,assigned_to_ids,completion_pct,location_id,${REPORT_COLUMNS.join(',')}`);
+  const visit = await loadVisit(visitId, `id,jn_id,job_id,task_type,test_types,status,assigned_to_ids,completion_pct,location_id,${REPORT_COLUMNS.join(',')}`);
   if (!visit) return { status: 404, body: { error: 'Visit not found' } };
   if (visit.status === 'cancelled') return { status: 409, body: { error: 'This visit was cancelled' } };
   let p = Number(pct);
@@ -4952,6 +4972,7 @@ async function completeVisit({ visitId, pct, note, actor, source }) {
   // Mirror the status onto the JN task (is_completed). Failures stay on the
   // row (jn_task_error) and the sweep retries; never block the completion.
   const jnTask = await syncVisitJnTask(visitId).catch((e) => ({ ok: false, error: e.message }));
+  if (visit.task_type === 'demo' && p === 100 && report) fileDemoSheetSoon(visit.job_id, actor.name);
   return { status: 200, body: { ok: true, visit: { ...(patched && patched[0]), ...jnPatch }, update: { ...update, ...jnPatch }, jn, jnTask } };
 }
 
@@ -7511,9 +7532,9 @@ require('./jobFiles')(app, {
 // the page sends (drylogPdf.js), scope_sheets, rooms / materials / equipment,
 // photos and estimate_docs; can save to the
 // documents bucket, upload to the job's JobNimbus files and post a note.
-jobPdf(app, {
+jobPdfApi = jobPdf(app, {
   requireAuth, loadActor: intake.loadActor, sbGet, sbInsert, jnUploadFile, jnAddNote, locationLogoUrl, logoPngFromUrl, jnDownloadFile,
-  SUPABASE_URL, SUPABASE_SERVICE_KEY, sharp,
+  SUPABASE_URL, SUPABASE_SERVICE_KEY, sharp, demo: demoSheetDeps(),
   FILE_LINK_SECRET: (process.env.FILE_LINK_SECRET || JN_WEBHOOK_TOKEN || '').trim(),
 });
 
