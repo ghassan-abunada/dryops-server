@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { renderDemoSheetPdf, demoSheetModel, demoSheetSummary, roomRows, siteRows, hoursBetween } = require('../demoSheetPdf');
+const { renderDemoSheetPdf, lossCategoryLabel, demoSheetModel, demoSheetSummary, roomRows, siteRows, hoursBetween } = require('../demoSheetPdf');
 const { countPages } = require('../pdfKit');
 
 const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
@@ -107,6 +107,16 @@ test('site work, equipment, checklist and time on site', () => {
   assert.deepStrictEqual(day.checklist.filter((c) => c[2]).map((c) => c[0]), ['Sketch after']);
   assert.strictEqual(hoursBetween('15:00', '09:00'), null);
   assert.strictEqual(hoursBetween(null, '09:00'), null);
+});
+
+test('cat of loss: the inspection report wins, else the JobNimbus Cat field, tidied', () => {
+  assert.strictEqual(lossCategoryLabel(3, 'CAT 2'), 'Cat 3');
+  assert.strictEqual(lossCategoryLabel(null, 'CAT 2'), 'Cat 2');
+  assert.strictEqual(lossCategoryLabel(undefined, 'cat3'), 'Cat 3');
+  assert.strictEqual(lossCategoryLabel(null, 'FIRE/SMOKE'), 'Fire/Smoke');
+  assert.strictEqual(lossCategoryLabel(null, 'MOLD'), 'Mold');
+  assert.strictEqual(lossCategoryLabel(7, null), null);
+  assert.strictEqual(lossCategoryLabel(null, '  '), null);
 });
 
 test('renders a PDF: one page for a typical demo, every day of a multi-day demo, and a report with nothing removed', async () => {

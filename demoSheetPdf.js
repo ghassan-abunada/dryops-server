@@ -23,6 +23,19 @@ const typed = (v) => v != null && Number(v) > 0;
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const upper1 = (s) => (s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : s);
 
+/**
+ * "Cat 2" for the header: the inspection report's water category when the job
+ * has one, else the job's JobNimbus Cat field ("CAT 2" / "MOLD" / "FIRE/SMOKE").
+ */
+function lossCategoryLabel(inspectionCategory, jobCat) {
+  const n = Number(inspectionCategory);
+  if (Number.isInteger(n) && n >= 1 && n <= 3) return `Cat ${n}`;
+  const t = String(jobCat || '').trim();
+  if (!t) return null;
+  const m = /^cat\s*(\d)$/i.exec(t);
+  return m ? `Cat ${m[1]}` : t.toLowerCase().replace(/(^|[\s/])([a-z])/g, (_, a, b) => a + b.toUpperCase());
+}
+
 function fmtClock(hhmm) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm || '');
   if (!m) return '';
@@ -358,9 +371,10 @@ function drawDay(doc, y, day, demo, { heading }) {
 /**
  * Render the Demo Sheet → Buffer.
  *   job, location, logoPng; visits (see demoSheetModel); demo: the report's
- *   quantity functions + labels from server.js; now: the generated stamp.
+ *   quantity functions + labels from server.js; lossCategory: the inspection
+ *   report's water category (1-3) when there is one; now: the generated stamp.
  */
-async function renderDemoSheetPdf({ job, location, logoPng, visits, demo, now = new Date() }) {
+async function renderDemoSheetPdf({ job, location, logoPng, visits, demo, lossCategory = null, now = new Date() }) {
   const model = demoSheetModel(visits, demo);
   const doc = K.newDoc({ title: 'Demo Sheet' });
   doc.__meta.generated = now;
@@ -375,7 +389,7 @@ async function renderDemoSheetPdf({ job, location, logoPng, visits, demo, now = 
     title: 'Demo Sheet', subtitle: client, date: dates ? `Demo ${dates}` : '',
     kv: [
       ['Job', job.name || job.number], ['Address', job.address], ['Claim', job.claim_number], ['Insurance', job.insurer],
-      ['Reported by', by], ['On site', one ? one.onSite : null], ['Technicians', one && one.techs ? String(one.techs) : null], ['After hours', one && one.after_hours ? 'Yes' : null],
+      ['Cat of loss', lossCategoryLabel(lossCategory, job.cat)], ['Reported by', by], ['On site', one ? one.onSite : null], ['Technicians', one && one.techs ? String(one.techs) : null], ['After hours', one && one.after_hours ? 'Yes' : null],
     ],
   });
 
@@ -400,4 +414,4 @@ async function renderDemoSheetPdf({ job, location, logoPng, visits, demo, now = 
   return K.finish(doc);
 }
 
-module.exports = { renderDemoSheetPdf, demoSheetModel, demoSheetSummary, roomRows, siteRows, totalRows, hoursBetween };
+module.exports = { renderDemoSheetPdf, lossCategoryLabel, demoSheetModel, demoSheetSummary, roomRows, siteRows, totalRows, hoursBetween };

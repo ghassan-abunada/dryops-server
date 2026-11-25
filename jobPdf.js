@@ -171,6 +171,13 @@ module.exports = function mountJobPdf(app, deps) {
   async function loadDemoVisits(jobId) {
     return (await sbGet(`inspections?job_id=eq.${enc(jobId)}&task_type=eq.demo&status=neq.cancelled&demo_report=not.is.null&select=id,scheduled_date,status,demo_report,demo_report_submitted_at,demo_report_by_name&order=scheduled_date.asc,created_at.asc`)) || [];
   }
+  /** The water category (1-3) on the job's latest inspection report, or null. */
+  async function loadInspectionCategory(jobId) {
+    try {
+      const row = first(await sbGet(`inspections?job_id=eq.${enc(jobId)}&task_type=eq.inspection&status=neq.cancelled&inspection_report=not.is.null&select=category:inspection_report->category&order=scheduled_date.desc,created_at.desc&limit=1`));
+      return row && row.category != null ? row.category : null;
+    } catch (e) { warn('inspection category unavailable:', e.message); return null; }
+  }
   async function loadLogo(location) {
     if (!location || !locationLogoUrl || !logoPngFromUrl) return null;
     try { const url = await locationLogoUrl(location); return url ? await logoPngFromUrl(url) : null; }
@@ -336,7 +343,7 @@ module.exports = function mountJobPdf(app, deps) {
     if (!demo) throw new HttpError(502, { error: 'The demo sheet is not set up on this server' });
     const visits = loaded || await loadDemoVisits(job.id);
     if (!visits.length) throw new HttpError(409, { error: 'This job has no post-demo report yet. The sheet is made from it.', needs_demo_report: true });
-    const buf = await renderDemoSheetPdf({ job, location, logoPng, visits, demo, now: now() });
+    const buf = await renderDemoSheetPdf({ job, location, logoPng, visits, demo, lossCategory: await loadInspectionCategory(job.id), now: now() });
     const last = visits[visits.length - 1];
     const date = /^\d{4}-\d{2}-\d{2}$/.test(String(last.scheduled_date || '')) ? last.scheduled_date : todayCentral(now());
     const summary = demoSheetSummary(demoSheetModel(visits, demo));
